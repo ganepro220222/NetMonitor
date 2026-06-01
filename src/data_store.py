@@ -1,0 +1,3118 @@
+from __future__ import annotations
+"""
+data_store.py — SQLite-backed persistent storage for monitoring data.
+
+Architecture
+────────────
+写入：单一 write thread 独占写连接（无锁争用）。
+      探测结果放入内存队列，每 60 秒批量 INSERT 一次（极低 IO 开销）。
+      告警事件优先级更高，同样进队列但每次 flush 都清空。
+读取：每个查询开新的只读连接（WAL 模式下读写完全并发）。
+
+Tables
+──────
+pings_raw     每次探测的原始记录（默认保留 7 天）
+pings_hourly  每小时聚合（avg/max/p95/丢包率，保留 90 天）
+alert_events  状态变化事件（保留 365 天）
+targets_meta  节点快照（name/ip/type，永久）
+cum_stats     跨重启累计统计（total/success/lat_avg，永久）
+
+Schema version via PRAGMA user_version，支持未来迁移。
+"""
+
+import math
+import os
+import queue
+import sqlite3
+import threading
+import time
+from collections import defaultdict
+from datetime import datetime
+from typing import Optional
+
+
+_XLSX_ILLEGAL_RE = None
+
+
+def excel_safe_sheet_name(value, fallback: str = "节点") -> str:
+    """Sanitise a string for use as an openpyxl worksheet title.
+
+    Excel's worksheet-name constraints are tighter than its cell
+    constraints:
+      * the characters \\ / * ? : [ ] are explicitly forbidden;
+      * the same XML 1.0 control-char set is rejected (otherwise the
+        workbook saves but openpyxl can't reopen it -- the failure
+        mode the /api/export?tids=... path tripped when a label
+        contained \\x00);
+      * the title must be 1-31 chars long;
+      * cannot be empty / whitespace-only.
+
+    The function is intentionally separate from excel_safe_text:
+    formula-injection escape (leading apostrophe) is harmful in a
+    sheet title because Excel renders the apostrophe in the tab and
+    treats it as a literal name character.  Pre-2025 this routine
+    lived inline in DataStore.export_excel and only handled the
+    forbidden-character substitution; lifting it into a helper
+    centralises the XML-illegal-char strip too and keeps every
+    export path aligned with the same rules.
+    """
+    import re as _re
+    s = value if isinstance(value, str) else ""
+    # Drop XML-illegal control chars (\x00-\x08, \x0b-\x0c, \x0e-\x1f)
+    # before the forbidden-character pass so an injected NUL between
+    # otherwise-valid letters doesn't survive into the title.
+    global _XLSX_ILLEGAL_RE
+    if _XLSX_ILLEGAL_RE is None:
+        _XLSX_ILLEGAL_RE = _re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
+    s = _XLSX_ILLEGAL_RE.sub("", s)
+    # Replace the Excel-forbidden filename-like characters.
+    s = _re.sub(r'[\\/*?:\[\]]', '_', s)
+    # Strip leading/trailing whitespace (Excel rejects names ending
+    # with whitespace).
+    s = s.strip()
+    if not s:
+        s = fallback
+    # Excel caps the title at 31 characters.  Cut hard rather than
+    # smart-cutting so the user can see the exact prefix that survived.
+    return s[:31]
+
+
+def excel_safe_text(s):
+    """Neutralise CSV/Excel formula-injection prefixes (=, +, -, @,
+    plus tab/CR) AND strip XML-illegal control characters that
+    openpyxl would otherwise reject with IllegalCharacterError on
+    every workbook write.
+
+    Excel evaluates a leading =/+/-/@ as a formula on open; openpyxl
+    preserves the marker so a downstream user opening the file ends
+    up running attacker-supplied content.  Leading-apostrophe escape
+    is the standard mitigation (OWASP "Formula Injection"): Excel
+    displays the value as literal text but the cell stores the
+    apostrophe verbatim, so consumers reading the workbook
+    programmatically just see the original string with one leading
+    "'".
+
+    Second layer: strip the XML 1.0 forbidden control characters
+    (\\x00-\\x08, \\x0B, \\x0C, \\x0E-\\x1F).  openpyxl checks for
+    exactly this set and raises IllegalCharacterError otherwise; an
+    attacker who could route an arbitrary string into a cell (e.g.
+    via the /api/export?tids=%00 path before it was filtered) could
+    use that to wedge the export endpoint with a 500.  Pre-stripping
+    here means every export sink stays robust even if a future code
+    path forgets the upstream filter.
+
+    Non-string inputs and the empty string pass through unchanged.
+
+    Module-level (was previously a closure inside WebServer's
+    /api/waveform/export route) so DataStore.export_excel, the SLA
+    export route, and the desktop waveform window can share the
+    same sanitiser without duplicating the rule set.
+    """
+    if not isinstance(s, str) or not s:
+        return s
+    global _XLSX_ILLEGAL_RE
+    if _XLSX_ILLEGAL_RE is None:
+        import re as _re
+        _XLSX_ILLEGAL_RE = _re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
+    cleaned = _XLSX_ILLEGAL_RE.sub("", s)
+    if not cleaned:
+        return cleaned
+    return ("'" + cleaned) if cleaned[0] in ("=", "+", "-", "@", "\t", "\r") else cleaned
+
+
+class DataStore:
+    SCHEMA_VERSION = 5
+    FLUSH_INTERVAL       = 60       # 秒，批量写入间隔
+    HOURLY_AGG_INTERVAL  = 3600     # 秒，每小时聚合一次
+    VACUUM_INTERVAL      = 86400 * 7  # 秒，每周渐进式 VACUUM
+
+    def __init__(self,
+                 db_path: str = "data/monitor.db",
+                 raw_retention_days: int = 7,
+                 hourly_retention_days: int = 90,
+                 alert_retention_days: int = 365,
+                 traceroute_retention_days: int = 30,
+                 diag_retention_days: int = 180):
+
+        self._db_path                = db_path
+        self._raw_retention_days          = raw_retention_days
+        self._hourly_retention_days        = hourly_retention_days
+        self._alert_retention_days         = alert_retention_days
+        self._traceroute_retention_days    = traceroute_retention_days
+        # ICMP + DNS diagnostic history retention.  Diagnostic rows are
+        # small (~1–2 KB each incl. details_json) and infrequent
+        # (user-triggered only), so default 180 d is generous without
+        # bloating the DB.  Shared between icmp_diagnostic_history and
+        # dns_diagnostic_history — the user has one knob for "diagnostic
+        # history" rather than separate knobs per protocol.
+        self._diag_retention_days          = diag_retention_days
+
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+
+        self._queue        = queue.Queue()
+        self._schema_ready = threading.Event()
+
+        # Thread-local read-connection cache.
+        # Old behaviour: every get_*() / api_* call invoked _read_conn() which
+        # did sqlite3.connect(file:?mode=ro) + PRAGMA journal_mode=WAL, then
+        # the caller's finally-block close()d the connection.  An /api/sla
+        # request on 50 nodes loops get_sla_stats() 50 times → 50 connect/
+        # close pairs + 100 PRAGMA round-trips for a single HTTP request.
+        # SQLite connection setup is fast but not free; on machines with slow
+        # AV scanning of new file handles it dominates response time.
+        #
+        # New behaviour: keep one read-only connection per thread, hand the
+        # SAME instance back on subsequent calls.  Caller code that still
+        # calls conn.close() must be updated to NOT close — see the docstring
+        # on _read_conn() for the rule.  WAL mode is set once at open.
+        self._tls = threading.local()
+
+        self._write_thread = threading.Thread(
+            target=self._write_loop, daemon=True, name="data-store-writer")
+        self._write_thread.start()
+        self._active_incidents: dict[str, str] = {}  # tid → current incident_id
+        # Per-target identity generation.  Bumped by wipe_target_history
+        # (and on_target_removed) so an in-flight ICMP / DNS diagnostic
+        # task started against the OLD target can compare its captured
+        # generation against the current value at persist-time and skip
+        # the DataStore write -- otherwise the diag result returns AFTER
+        # wipe completes and re-inserts the very rows the user just
+        # asked us to delete (same asynchronous-writeback class of bug
+        # the traceroute scheduler's _gen already guards against).
+        self._target_generation: dict[str, int] = {}
+        self._target_gen_lock = threading.Lock()
+        # Per-target "commit lock" that serialises
+        # bump_target_generation with the MainWindow commit sequence
+        # (record_ping -> record_alert -> _last_statuses update).
+        # Without it the producer-side record_ping return value can
+        # only tell the caller "generation was valid at the moment
+        # of queue.put"; an edit landing in the gap between that
+        # return and the _last_statuses assignment leaves
+        # _last_statuses polluted with a value the writer thread
+        # will later drop -- and the NEXT genuine probe synthesises
+        # a phantom transition against the polluted seed.  Held by
+        # MainWindow._on_state_update around the whole commit;
+        # acquired briefly by bump_target_generation so concurrent
+        # bumps fan out per-tid without serialising unrelated nodes.
+        self._commit_locks: dict[str, threading.Lock] = {}
+        self._commit_locks_lock = threading.Lock()
+
+        threading.Thread(
+            target=self._maybe_vacuum, daemon=True,
+            name="data-store-vacuum").start()
+
+        # 等待 schema 初始化完成再返回（最多 10 秒）
+        self._queue.put(("_init_schema", None))
+        if not self._schema_ready.wait(timeout=10):
+            raise RuntimeError("DataStore: schema init timed out")
+
+    # ── 公开写入 API ────────────────────────────────────────────────
+
+    def record_ping(self, *, target_id: str, label: str, ip: str,
+                    ping_type: str, ts: float, status: str,
+                    latency_ms: Optional[float], loss_rate: float,
+                    status_code: Optional[int] = None,
+                    failure_reason: Optional[str] = None,
+                    captured_generation: Optional[int] = None) -> bool:
+        """把探测结果放入写队列，立即返回，不阻塞监控线程。
+
+        captured_generation: per-target identity generation captured
+        when the probe started.  Embedded in the queued payload and
+        re-checked by the writer thread (on enqueue) and by _flush
+        (right before INSERT) against current_target_generation().  A
+        mismatch -- caused by wipe_target_history / on_target_removed
+        landing between probe start and INSERT -- drops the row so a
+        stale measurement under the OLD identity can never resurrect
+        under the NEW identity's history.  Same shape as the
+        protection already in place for record_traceroute /
+        record_diag_result / record_dns_diag_result; None disables
+        the check (e.g. legacy / test paths that don't capture it).
+
+        Returns True when the result was queued, False when the
+        producer-side fast-path generation check dropped it.  Callers
+        in _on_state_update consult the return value before
+        advancing _last_statuses -- without that gate a stale-but-
+        dropped probe still mutates the in-memory transition
+        bookkeeping and the NEXT genuine probe is recorded as a
+        phantom state change.
+        """
+        # Producer-side fast-path: skip queueing entirely if we can
+        # see the generation has already moved on at the moment of
+        # call.  Cheap O(1) lock-free read in the common case.
+        if (captured_generation is not None and target_id is not None
+            and self.current_target_generation(target_id)
+                != captured_generation):
+            return False
+        self._queue.put(("ping", {
+            "target_id": target_id, "label": label, "ip": ip,
+            "ping_type": ping_type, "ts": int(ts), "status": status,
+            "latency_ms": latency_ms, "loss_rate": loss_rate,
+            "status_code": status_code, "failure_reason": failure_reason,
+            "captured_generation": captured_generation,
+        }))
+        return True
+
+    def record_alert(self, *, target_id: str, label: str, ip: str,
+                     ts: float, old_status: str, new_status: str,
+                     category: str, failure_reason: str = "",
+                     captured_generation: Optional[int] = None):
+        """记录状态变化事件（含故障原因，自动分配 incident_id）。
+
+        captured_generation: per-target identity generation captured
+        when the probe that produced this transition started.  Mirrors
+        record_ping's protection -- a stale red->green transition
+        produced by an OLD-config probe that survived through the
+        commit-side identity gate would otherwise plant a bogus
+        recovery event in alert_events.  The writer thread checks
+        the generation immediately before INSERT and drops the row
+        when current_target_generation has moved on.  None disables
+        the check for legacy / test callers.
+        """
+        if (captured_generation is not None and target_id is not None
+            and self.current_target_generation(target_id)
+                != captured_generation):
+            return
+        self._queue.put(("alert", {
+            "target_id": target_id, "label": label, "ip": ip,
+            "ts": int(ts), "old_status": old_status,
+            "new_status": new_status, "category": category,
+            "failure_reason": failure_reason or "",
+            "captured_generation": captured_generation,
+        }))
+
+    def on_target_removed(self, *, target_id: str, label: str, ip: str,
+                          old_status: str):
+        """Close any open incident and drop in-memory state when a node is deleted."""
+        # Bump generation BEFORE queuing the removal so any in-flight
+        # diag task captured the OLD generation; its persist call will
+        # see a mismatch and skip the write.
+        self.bump_target_generation(target_id)
+        self._queue.put(("target_removed", {
+            "target_id": target_id,
+            "label": label,
+            "ip": ip,
+            "old_status": old_status,
+            "ts": int(time.time()),
+        }))
+
+    def commit_lock_for(self, target_id: str) -> threading.Lock:
+        """Return the per-target commit lock used to serialise
+        bump_target_generation with the MainWindow commit sequence.
+
+        Lazily creates the lock on first access so callers don't have
+        to coordinate.  Held by MainWindow._on_state_update around
+        the whole record_ping -> record_alert -> _last_statuses
+        update sequence; acquired briefly by bump_target_generation
+        so an edit bumping generation can't slip between the producer-
+        side record_ping check and the in-memory bookkeeping update.
+        """
+        with self._commit_locks_lock:
+            lock = self._commit_locks.get(target_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._commit_locks[target_id] = lock
+            return lock
+
+    def bump_target_generation(self, target_id: str) -> None:
+        """Invalidate any in-flight diagnostic task for this target.
+
+        Call from wipe_target_history / on_target_removed (and any
+        future identity-changing path).  Diag run helpers capture
+        the generation at start; their persist functions re-read it
+        and skip the DB write on mismatch.  Symmetric with
+        _TracerouteScheduler.bump_generation in web_server.
+
+        Acquires the per-target commit lock around the increment so
+        a MainWindow commit currently inside its record_ping ->
+        _last_statuses sequence completes before this bump becomes
+        visible -- without that ordering, the commit could update
+        _last_statuses with a value the writer thread will later
+        drop (gen mismatch), and the next genuine probe would
+        synthesise a phantom transition against the polluted seed.
+        """
+        with self.commit_lock_for(target_id):
+            with self._target_gen_lock:
+                self._target_generation[target_id] = \
+                    self._target_generation.get(target_id, 0) + 1
+
+    def current_target_generation(self, target_id: str) -> int:
+        """Read current target generation (for capture at task start)."""
+        with self._target_gen_lock:
+            return self._target_generation.get(target_id, 0)
+
+    # ── 公开读取 API ────────────────────────────────────────────────
+
+    def update_retention(self, raw: int | None = None,
+                         hourly: int | None = None,
+                         alert: int | None = None,
+                         traceroute: int | None = None,
+                         diag: int | None = None) -> None:
+        """Live-update retention thresholds without restarting the process."""
+        if raw        is not None: self._raw_retention_days          = raw
+        if hourly     is not None: self._hourly_retention_days        = hourly
+        if alert      is not None: self._alert_retention_days         = alert
+        if traceroute is not None: self._traceroute_retention_days    = traceroute
+        if diag       is not None: self._diag_retention_days          = diag
+
+    def get_cum_stats(self) -> dict:
+        """
+        读取所有节点的累计统计。
+        返回 {target_id: {total, success, latency_avg, latency_n}}
+        供 WebServer 在 SSE init 时将历史统计发送给浏览器。
+        """
+        conn = self._read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT target_id, total, success, lat_avg, lat_n "
+                "FROM cum_stats").fetchall()
+            return {r[0]: {"total": r[1], "success": r[2],
+                           "latency_avg": r[3] or 0.0, "latency_n": r[4]}
+                    for r in rows}
+        except Exception:
+            return {}
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_last_known_statuses(self) -> dict:
+        """
+        Return {target_id: last_new_status} — the most recent operational
+        status per target (green/orange/red/gray), ignoring paused/resumed.
+
+        Used to seed _last_statuses on startup so that if the program crashed
+        while nodes were RED, the first green probe correctly writes a
+        red->green recovery event and closes the open outage in the SLA data.
+
+        Without this seeding, _last_statuses starts empty -> old_st is None
+        -> the recovery event is never written -> SLA Case B perpetually fires
+        from the last crash's open outage.
+
+        Only considers real operational statuses (green/orange/red/gray);
+        ignores paused/resumed meta-events.
+        """
+        conn = self._read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT target_id, new_status FROM alert_events "
+                "WHERE new_status IN ('green','orange','red','gray') "
+                "AND id IN ("
+                "  SELECT MAX(id) FROM alert_events "
+                "  WHERE new_status IN ('green','orange','red','gray') "
+                "  GROUP BY target_id"
+                ")"
+            ).fetchall()
+            return {tid: ns for tid, ns in rows}
+        except Exception:
+            return {}
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_last_persisted_status(self, target_id: str) -> Optional[str]:
+        """Return the most recently persisted ping status for one target,
+        or None if no ping rows exist.
+
+        Used by MainWindow._on_edit to reseed _last_statuses across a
+        config edit, so the FIRST probe under the new config can
+        write a proper transition event (e.g. red->green to close a
+        prior outage, or green->red to open a new one).
+
+        Why pings_raw rather than alert_events:
+          alert_events only records TRANSITIONS, not steady state.
+          A target that has been green since startup with no transition
+          would return None from get_last_known_statuses, and the
+          edit's reseed would have nothing to anchor against -- the
+          first post-edit transition would still be lost.
+          pings_raw, in contrast, is the source of truth for "what
+          was the status of the very last probe accepted by the
+          DataStore writer thread".  That value is the only baseline
+          that lets the next probe synthesise an SLA-correct
+          transition.
+        """
+        conn = self._read_conn()
+        try:
+            row = conn.execute(
+                "SELECT status FROM pings_raw WHERE target_id = ? "
+                "ORDER BY ts DESC LIMIT 1",
+                (target_id,)).fetchone()
+            return row[0] if row is not None else None
+        except Exception:
+            return None
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_targets_meta(self) -> dict:
+        """返回 {target_id: {label, ip, ping_type}}"""
+        conn = self._read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT target_id, label, ip, ping_type FROM targets_meta"
+            ).fetchall()
+            return {r[0]: {"label": r[1], "ip": r[2], "ping_type": r[3]}
+                    for r in rows}
+        except Exception:
+            return {}
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_waveform(self, target_id: str, start_ts: int, end_ts: int) -> dict:
+        """
+        Return waveform data auto-aggregated by time span:
+          span ≤ 2h   → raw second-level data
+          span ≤ 48h  → minute-level aggregation from pings_raw
+          span ≤ 8d   → hourly data from pings_hourly
+          otherwise   → hourly data (longer periods)
+        Returns:
+          { "resolution": "raw"|"1m"|"1h",
+            "points": [{"ts": int, "rtt_ms": float|null, "ok": bool}, ...],
+            "summary": {"avg_ms","min_ms","max_ms","loss_rate","sample_n"} }
+        """
+        span = end_ts - start_ts
+        conn = self._read_conn()
+        try:
+            if span <= 7200:                        # ≤ 2 hours → raw
+                rows = conn.execute(
+                    "SELECT ts, latency_ms, status FROM pings_raw "
+                    "WHERE target_id=? AND ts BETWEEN ? AND ? ORDER BY ts",
+                    (target_id, start_ts, end_ts)).fetchall()
+                # max_ms/min_ms == rtt_ms here: each raw row IS a single sample,
+                # so the per-point min and max collapse to the sample's latency.
+                points = [{"ts": r[0],
+                           "rtt_ms": r[1],
+                           "max_ms": r[1],
+                           "min_ms": r[1],
+                           # orange = high latency but still connected → ok=True
+                           # red    = probe failed / packet lost         → ok=False
+                           # Matches SLA calculation which counts orange as success.
+                           "ok": r[2] != "red" and r[1] is not None,
+                           "sample_n": 1,
+                           "success_n": (1 if (r[2] != "red" and r[1] is not None)
+                                         else 0),
+                           # V4: four-state bucket for richer visual semantics
+                           "bucket_state": (
+                               "ok"       if (r[2] != "red" and r[1] is not None)
+                               else "all_fail")}
+                          for r in rows]
+                resolution = "raw"
+
+            elif span <= 172800:                    # ≤ 48 hours → 1-minute buckets
+                # MAX/MIN naturally skip NULL latencies in SQLite, so they
+                # only reflect successful probes within the bucket — the same
+                # population AVG uses.  Without these the summary's max_ms
+                # would collapse to max-of-averages and hide real spikes
+                # (e.g. a 3000ms 30-second burst inside an otherwise-quiet
+                # minute averages to ~25ms).
+                rows = conn.execute(
+                    "SELECT (ts / 60) * 60 AS minute, "
+                    "AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
+                    "COUNT(*), "
+                    "SUM(CASE WHEN latency_ms IS NOT NULL THEN 1 ELSE 0 END), "
+                    "MAX(latency_ms), "
+                    "MIN(latency_ms) "
+                    "FROM pings_raw "
+                    "WHERE target_id=? AND ts BETWEEN ? AND ? "
+                    "GROUP BY minute ORDER BY minute",
+                    (target_id, start_ts, end_ts)).fetchall()
+                points = [{"ts": r[0],
+                           "rtt_ms": round(r[1], 2) if r[1] is not None else None,
+                           "max_ms": round(r[4], 2) if r[4] is not None else None,
+                           "min_ms": round(r[5], 2) if r[5] is not None else None,
+                           "sample_n":  r[2],
+                           "success_n": r[3],
+                           # ok = bucket has valid RTT data (majority not failed).
+                           # Consistent with raw resolution where ok=True for orange/green.
+                           "ok": r[1] is not None and r[3] > 0,
+                           # V4: partial_fail when some probes in bucket failed
+                           "bucket_state": (
+                               "all_fail"     if r[1] is None
+                               else "partial_fail" if r[3] < r[2]   # success_n < total_n
+                               else "ok")}
+                          for r in rows]
+                resolution = "1m"
+
+            else:                                   # > 48 hours → hourly aggregates
+                # lat_min was added in schema v6; pre-migration rows have
+                # lat_min = NULL.  Those points contribute None to min_ms
+                # and are skipped by the summary (see valid_min below).
+                rows = conn.execute(
+                    "SELECT hour_ts, lat_avg, sample_n, success_n, lat_max, lat_min "
+                    "FROM pings_hourly "
+                    "WHERE target_id=? AND hour_ts BETWEEN ? AND ? ORDER BY hour_ts",
+                    (target_id, start_ts, end_ts)).fetchall()
+                points = [{"ts": r[0],
+                           "rtt_ms": round(r[1], 2) if r[1] is not None else None,
+                           "max_ms": round(r[4], 2) if r[4] is not None else None,
+                           "min_ms": round(r[5], 2) if r[5] is not None else None,
+                           "sample_n":  r[2],
+                           "success_n": r[3],
+                           # lat_avg IS NULL only if all probes in that hour failed.
+                           # For 7d/30d views, the most-recent partial hour won't
+                           # appear until the hourly aggregation flush runs — this is
+                           # an acceptable ~1-hour tail gap for long-range views.
+                           "ok": r[1] is not None,
+                           # V4: use success_n/sample_n for partial vs full failure
+                           "bucket_state": (
+                               "all_fail"     if r[1] is None
+                               else "partial_fail" if (r[3] is not None
+                                                       and r[2] is not None
+                                                       and r[3] < r[2])
+                               else "ok")}
+                          for r in rows]
+                resolution = "1h"
+
+            # Summary - probe-weighted across buckets (matches export_excel / SLA).
+            total_n   = sum(p.get("sample_n") or 0 for p in points)
+            success_n = sum(p.get("success_n") or 0 for p in points)
+            # Weight by success_n (samples that actually contributed a latency),
+            # NOT sample_n (total probes including failures).  rtt_ms here is
+            # the mean over latencies of successful probes only -- a bucket
+            # with 2 successes out of 3600 probes has rtt_ms based on 2
+            # samples; weighting it by 3600 would mask severe outages by
+            # giving the lucky 2 successes the same statistical weight as a
+            # fully-healthy 3600-success bucket.  Fall back to None (rather
+            # than a misleading number) when no successful samples exist.
+            w_pairs   = [(p["rtt_ms"], p["success_n"]) for p in points
+                         if p.get("rtt_ms") is not None and p.get("success_n")]
+            # min/max use per-bucket real extremes (raw=sample value;
+            # 1m/1h=SQL MAX/MIN over successful probes), NOT the bucket
+            # average — that would collapse to "max of averages" and hide
+            # short bursts inside an otherwise-quiet bucket.
+            valid_max = [p["max_ms"] for p in points if p.get("max_ms") is not None]
+            valid_min = [p["min_ms"] for p in points if p.get("min_ms") is not None]
+            w_n       = sum(n for _, n in w_pairs)
+            w_sum     = sum(rtt * n for rtt, n in w_pairs)
+            summary = {
+                "avg_ms":    round(w_sum / w_n, 2) if w_n else None,
+                "min_ms":    round(min(valid_min), 2) if valid_min else None,
+                "max_ms":    round(max(valid_max), 2) if valid_max else None,
+                "loss_rate": round(1 - success_n / total_n, 4) if total_n else None,
+                "sample_n":  total_n,
+                "resolution": resolution,
+            }
+            return {"resolution": resolution, "points": points, "summary": summary}
+        except Exception:
+            return {"resolution": "raw", "points": [], "summary": {}}
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_history(self, target_id: str, start_ts: int, end_ts: int,
+                    use_hourly: bool = False) -> list:
+        """
+        查询单节点历史数据。
+        use_hourly=False → pings_raw（秒级）
+        use_hourly=True  → pings_hourly（小时级）
+        """
+        conn = self._read_conn()
+        try:
+            if use_hourly:
+                rows = conn.execute(
+                    "SELECT hour_ts, sample_n, success_n, lat_avg, lat_max, "
+                    "lat_p95, loss_rate FROM pings_hourly "
+                    "WHERE target_id=? AND hour_ts BETWEEN ? AND ? "
+                    "ORDER BY hour_ts",
+                    (target_id, start_ts, end_ts)).fetchall()
+                return [{"hour_ts":  r[0], "sample_n": r[1],
+                         "success_n": r[2], "lat_avg":  r[3],
+                         "lat_max":   r[4], "lat_p95":  r[5],
+                         "loss_rate": r[6]}
+                        for r in rows]
+            else:
+                rows = conn.execute(
+                    "SELECT ts, status, latency_ms, loss_rate, "
+                    "status_code, failure_reason FROM pings_raw "
+                    "WHERE target_id=? AND ts BETWEEN ? AND ? "
+                    "ORDER BY ts",
+                    (target_id, start_ts, end_ts)).fetchall()
+                return [{"ts": r[0], "status": r[1], "latency_ms": r[2],
+                         "loss_rate": r[3], "status_code": r[4],
+                         "failure_reason": r[5]}
+                        for r in rows]
+        except Exception:
+            return []
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_alert_history(self, target_id: Optional[str] = None,
+                          start_ts: int = 0, limit: int = 200) -> list:
+        """查询告警事件历史。"""
+        conn = self._read_conn()
+        try:
+            if target_id:
+                rows = conn.execute(
+                    "SELECT target_id, label, ip, ts, old_status, "
+                    "new_status, category, incident_id FROM alert_events "
+                    "WHERE target_id=? AND ts>=? ORDER BY ts DESC LIMIT ?",
+                    (target_id, start_ts, limit)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT target_id, label, ip, ts, old_status, "
+                    "new_status, category, incident_id FROM alert_events "
+                    "WHERE ts>=? ORDER BY ts DESC LIMIT ?",
+                    (start_ts, limit)).fetchall()
+            # incident_id is included so export_excel can do the Level-2
+            # exact JOIN into traceroute_logs.  May be NULL on historical
+            # rows that pre-date the v1→v2 backfill — get_incident_traceroute
+            # then falls back to its time-window match.
+            return [{"target_id": r[0], "label": r[1], "ip": r[2],
+                     "ts": r[3], "old_status": r[4],
+                     "new_status": r[5], "category": r[6],
+                     "incident_id": r[7]}
+                    for r in rows]
+        except Exception:
+            return []
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def export_excel(self, output_path: str, target_ids: list,
+                     start_ts: int, end_ts: int,
+                     targets_meta: Optional[dict] = None) -> str:
+        """
+        导出 Excel 报表。
+        时间跨度 ≤ 24 小时 → 秒级原始数据
+        时间跨度 > 24 小时  → 小时级聚合数据（控制行数，避免 Excel 溢出）
+        每个节点一个 Sheet，首页汇总。
+        """
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except ImportError:
+            raise RuntimeError("openpyxl 未安装，请运行 pip install openpyxl")
+
+        if targets_meta is None:
+            targets_meta = self.get_targets_meta()
+
+        span_hours = (end_ts - start_ts) / 3600
+        use_hourly = span_hours > 24
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+
+        # ── 汇总 Sheet ──────────────────────────────────────────────
+        ws_sum = wb.create_sheet("汇总")
+        HDR_FILL = PatternFill("solid", fgColor="1E3A5F")
+        HDR_FONT = Font(color="FFFFFF", bold=True)
+
+        sum_headers = ["节点名称", "IP 地址", "探测类型", "探测次数",
+                       "成功次数", "连通率 %", "平均延时 ms", "最大延时 ms"]
+        for col, h in enumerate(sum_headers, 1):
+            cell = ws_sum.cell(1, col, h)
+            cell.fill = HDR_FILL
+            cell.font = HDR_FONT
+
+        for row_i, tid in enumerate(target_ids, 2):
+            meta    = targets_meta.get(tid, {})
+            label   = meta.get("label", tid)
+            ip      = meta.get("ip", "")
+            ptype   = meta.get("ping_type", "icmp")
+            rows    = self.get_history(tid, start_ts, end_ts, use_hourly)
+
+            if use_hourly:
+                total   = sum(r["sample_n"] for r in rows)
+                success = sum(r["success_n"] for r in rows)
+                maxlats = [r["lat_max"] for r in rows if r["lat_max"] is not None]
+                # Weight by success_n -- the count of samples that actually
+                # contributed a latency to lat_avg.  See _hourly_agg: lat_avg
+                # is computed as sum(latencies)/count(non-null latencies),
+                # so weighting by sample_n (total probes including failures)
+                # would let a 2-success/3600-probe hour dominate the average
+                # as if it had 3600 measurements, hiding severe outages in
+                # the SLA report.
+                w_pairs = [(r["lat_avg"], r["success_n"]) for r in rows
+                             if r["lat_avg"] is not None and r["success_n"]]
+                if w_pairs:
+                    w_n   = sum(n for _, n in w_pairs)
+                    avg_lat = round(sum(avg * n for avg, n in w_pairs) / w_n, 1)
+                else:
+                    avg_lat = ""
+            else:
+                total   = len(rows)
+                success = sum(1 for r in rows if r["status"] in ("green", "orange"))
+                lats    = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
+                maxlats = lats
+                avg_lat = round(sum(lats) / len(lats), 1) if lats else ""
+
+            rate    = round(success / total * 100, 2) if total else 0
+            max_lat = round(max(maxlats), 1) if maxlats else ""
+
+            # excel_safe_text on every string column before append() --
+            # operator-typed labels / ips that start with =/+/-/@ would
+            # otherwise be saved as Excel formulas (CWE-1236), executed
+            # when the recipient opens the workbook.  The summary
+            # sheet is the most visible sink so it gets the explicit
+            # treatment; the alert-timeline sheet below escapes its
+            # external-string cells the same way.
+            ws_sum.append([excel_safe_text(label),
+                           excel_safe_text(ip),
+                           excel_safe_text(ptype),
+                           total, success, rate, avg_lat, max_lat])
+
+        ws_sum.column_dimensions["A"].width = 20
+        ws_sum.column_dimensions["B"].width = 16
+
+        # ── 每节点 Sheet ────────────────────────────────────────────
+        for tid in target_ids:
+            meta  = targets_meta.get(tid, {})
+            raw_label = (meta.get("label", tid) or tid)
+            # excel_safe_sheet_name handles the full constraint set
+            # (\\ / * ? : [ ] forbidden chars + XML-illegal control
+            # chars + length cap + empty-name fallback) so a label
+            # containing e.g. \\x00 produces a reopenable workbook.
+            # Previously only the filename-character substitution ran
+            # and openpyxl saved a workbook whose XML had raw NUL in a
+            # sheet title -- the file looked fine, returned HTTP 200,
+            # but ParseError'd on every subsequent open.
+            label = excel_safe_sheet_name(raw_label, fallback=tid[:31] or "node")
+            ws    = wb.create_sheet(label)
+            rows  = self.get_history(tid, start_ts, end_ts, use_hourly)
+
+            if use_hourly:
+                headers = ["时间（小时）", "探测次数", "成功次数",
+                           "连通率 %", "平均延时 ms", "最大延时 ms",
+                           "P95 延时 ms", "丢包率 %"]
+                for col, h in enumerate(headers, 1):
+                    cell = ws.cell(1, col, h)
+                    cell.fill = HDR_FILL; cell.font = HDR_FONT
+
+                for r in rows:
+                    dt   = datetime.fromtimestamp(r["hour_ts"]).strftime("%Y-%m-%d %H:%M")
+                    rate = round(r["success_n"] / r["sample_n"] * 100, 1) \
+                           if r["sample_n"] else 0
+                    loss = round((r["loss_rate"] or 0) * 100, 1)
+                    # NULL latencies mean "no successful probe in this hour"
+                    # (e.g. 100% packet loss).  `... or 0` would coerce that
+                    # to 0.0ms in the export, suggesting an absurd
+                    # instantaneous response time during a total outage --
+                    # leave the cell blank instead.
+                    ws.append([dt, r["sample_n"], r["success_n"], rate,
+                               round(r["lat_avg"], 1) if r["lat_avg"] is not None else "",
+                               round(r["lat_max"], 1) if r["lat_max"] is not None else "",
+                               round(r["lat_p95"], 1) if r["lat_p95"] is not None else "",
+                               loss])
+            else:
+                headers = ["时间", "状态", "延时 ms", "丢包率 %", "HTTP 状态码", "失败原因"]
+                for col, h in enumerate(headers, 1):
+                    cell = ws.cell(1, col, h)
+                    cell.fill = HDR_FILL; cell.font = HDR_FONT
+
+                for r in rows:
+                    dt   = datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+                    loss = round((r["loss_rate"] or 0) * 100, 1)
+                    # `if r["latency_ms"] else ""` would silently drop a
+                    # legitimate 0.0 ms reading (sub-millisecond LAN /
+                    # loopback / mocked targets) as if it were missing.
+                    # The hourly-sheet path above (~line 478) already uses
+                    # `is not None`; match that semantic here.
+                    lat = r["latency_ms"]
+                    ws.append([dt, r["status"],
+                               round(lat, 1) if lat is not None else "",
+                               loss, r["status_code"] or "", r["failure_reason"] or ""])
+
+            ws.column_dimensions["A"].width = 20
+
+
+        # ── 告警时间线 Sheet ─────────────────────────────────────────
+        # 扩展查询范围，向前 24h 拉取事件，以检测时间截断情况
+        extended_start = start_ts - 86400
+        # SQLite treats a negative LIMIT as "no limit" — use that instead
+        # of a fixed cap.  A multi-week / multi-node export can easily
+        # exceed a fixed cap (e.g. 5000 = ~3 events/node/day for 50 nodes
+        # over 30 days), and because get_alert_history orders ts DESC the
+        # OLDEST events would be the ones silently dropped -- leaving a
+        # report with the first half of its time range missing every
+        # outage record.  Exports are bounded by start_ts and run offline
+        # so an unbounded read is fine here.
+        all_events_raw = self.get_alert_history(start_ts=extended_start, limit=-1)
+
+        # 按 target_id 分组，过滤出 targets_ids 范围内的节点
+        from collections import defaultdict
+        events_by_tid = defaultdict(list)
+        for ev in all_events_raw:
+            if not target_ids or ev['target_id'] in target_ids:
+                events_by_tid[ev['target_id']].append(ev)
+
+        # ── 告警时间线 sheet (完整故障事件流) ───────────────────────────
+        ws_al = wb.create_sheet("告警时间线")
+
+        # Column layout
+        # A: 序号/类型  B: 节点  C: IP  D: 事件时间  E: 状态变化
+        # F: 分类  G: 原因/详情  H: 距上次事件
+        COL_W = {"A": 6, "B": 18, "C": 16, "D": 20, "E": 16,
+                 "F": 12, "G": 38, "H": 14}
+        for col, w in COL_W.items():
+            ws_al.column_dimensions[col].width = w
+
+        # ── Style constants ──────────────────────────────────────────
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        _thin = Side(style='thin', color="CCCCCC")
+        _border = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
+
+        def _fill(hex_color):
+            return PatternFill("solid", fgColor=hex_color)
+
+        INCIDENT_HDR_FILL = _fill("1F4E79")   # dark blue – incident header
+        DETAIL_HDR_FILL   = _fill("D6E4F0")   # light blue – column headers
+        GREEN_FILL        = _fill("E8F5E9")   # light green – recovery events
+        ORANGE_FILL       = _fill("FFF3E0")   # light orange – warning events
+        RED_FILL          = _fill("FFEBEE")   # light red – critical events
+        GRAY_FILL         = _fill("F5F5F5")   # pause/transitional events
+        WHITE_FILL        = _fill("FFFFFF")
+
+        STATUS_LABEL = {
+            'green': '正常', 'orange': '警告', 'red': '严重',
+            'gray': '离线', 'paused': '暂停',
+        }
+        STATUS_FILL = {
+            'green': GREEN_FILL, 'orange': ORANGE_FILL, 'red': RED_FILL,
+            'gray': GRAY_FILL, 'paused': GRAY_FILL,
+        }
+        SEVERITY = {'green': 0, 'gray': 1, 'paused': 1, 'orange': 2, 'red': 3}
+
+        def _fmt_ts(ts):
+            if ts is None: return "—"
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+        def _fmt_dur(seconds):
+            if seconds is None: return "—"
+            h2, r = divmod(int(abs(seconds)), 3600)
+            m2, s2 = divmod(r, 60)
+            if h2:
+                return f"{h2}时{m2:02d}分{s2:02d}秒"
+            elif m2:
+                return f"{m2}分{s2:02d}秒"
+            return f"{s2}秒"
+
+        def _st_label(s):
+            return STATUS_LABEL.get(s, s or '未知')
+
+        def _cat_label(cat, fr=""):
+            """Return human-readable category + failure reason."""
+            cat_map = {
+                'availability': '可用性告警',
+                'performance':  '性能告警',
+                'ok':           '恢复正常',
+                'paused':       '手动暂停',
+                'resumed':      '手动恢复',
+            }
+            base = cat_map.get(cat, cat or '—')
+            reason_map = {
+                'timeout':           'ICMP 超时',
+                'tcp_timeout':       'TCP 连接超时',
+                'tcp_refused':       'TCP 连接被拒绝',
+                'http_timeout':      'HTTP 请求超时',
+                'dns_timeout':       'DNS 查询超时',
+                'dns_bad_response':  'DNS 响应异常',
+                'dns_hijack':        'DNS 解析结果与预期不符',
+                'dns_no_a_record':   'DNS 无解析结果',
+                'too_many_redirects':'HTTP 重定向过多',
+                'ssl_error':         'SSL 证书错误',
+                'keyword_not_found': '页面关键词不存在',
+                'keyword_found':     '页面存在禁止关键词',
+            }
+            if fr:
+                # strip "status_XXX" prefix
+                if fr.startswith("status_"):
+                    reason_desc = f"HTTP {fr[7:]}"
+                else:
+                    reason_desc = reason_map.get(fr, fr)
+                return f"{base}  ({reason_desc})"
+            return base
+
+        def _write_row(ws, row_num, values, fill=None, bold=False,
+                       font_color="000000", merge_to=None, align="left"):
+            for col, val in enumerate(values, 1):
+                c = ws.cell(row_num, col, val)
+                c.border = _border
+                if fill:
+                    c.fill = fill
+                c.font = Font(bold=bold, color=font_color,
+                              name="微软雅黑", size=9)
+                c.alignment = Alignment(horizontal=align, vertical="center",
+                                        wrap_text=(col == 7))
+            if merge_to:
+                ws.merge_cells(
+                    start_row=row_num, start_column=1,
+                    end_row=row_num,   end_column=merge_to)
+
+        # ── Group events into incidents ──────────────────────────────
+        def _build_incidents(events):
+            """
+            Returns list of dicts:
+              {'label', 'ip', 'events': [...], 'closed': bool,
+               'start_truncated': bool}
+            Each 'events' list contains the full transition stream
+            (may start mid-incident if it began before the query window).
+            """
+            incidents = []
+            current_events = None
+            start_truncated = False
+
+            for ev in sorted(events, key=lambda e: e['ts']):
+                ns  = ev.get('new_status', '')
+                os_ = ev.get('old_status', '')
+                cat = ev.get('category', '')
+
+                if cat in ('paused', 'resumed'):
+                    if current_events is not None:
+                        current_events.append(ev)
+                    # outside incident: show as standalone entry below
+                    continue
+
+                if current_events is None:
+                    if ns in ('orange', 'red'):
+                        current_events = [ev]
+                        start_truncated = False
+                    elif os_ in ('orange', 'red') and ns == 'green':
+                        # Recovery with no fault-start in this window
+                        current_events = [ev]
+                        start_truncated = True
+                        incidents.append({
+                            'events': current_events,
+                            'closed': True,
+                            'start_truncated': start_truncated,
+                        })
+                        current_events = None
+                else:
+                    current_events.append(ev)
+                    if ns == 'green':
+                        incidents.append({
+                            'events': current_events,
+                            'closed': True,
+                            'start_truncated': start_truncated,
+                        })
+                        current_events = None
+
+            if current_events:
+                incidents.append({
+                    'events': current_events,
+                    'closed': False,
+                    'start_truncated': start_truncated,
+                })
+            return incidents
+
+        # ── Render the sheet ─────────────────────────────────────────
+        row_al = 1
+        # Sheet-level header
+        _write_row(ws_al, row_al,
+                   ["", "节点", "IP", "事件时间", "状态变化",
+                    "分类", "原因/详情", "距上次事件"],
+                   fill=HDR_FILL, bold=True, font_color="FFFFFF")
+        row_al += 1
+
+        incident_seq = 0
+        for tid in (target_ids or list(events_by_tid.keys())):
+            meta   = targets_meta.get(tid, {})
+            label  = meta.get("label", tid)
+            ip     = meta.get("ip", "")
+            events = [e for e in events_by_tid.get(tid, [])
+                      if start_ts - 86400 <= e['ts'] <= end_ts + 86400]
+
+            incidents = _build_incidents(events)
+
+            for inc in incidents:
+                evts = inc['events']
+                closed = inc['closed']
+                truncated = inc['start_truncated']
+
+                if not evts:
+                    continue
+
+                # Only show if the incident overlaps the query window
+                inc_start_ts = evts[0]['ts']
+                inc_end_ts   = evts[-1]['ts'] if closed else end_ts
+                if inc_end_ts < start_ts or inc_start_ts > end_ts:
+                    continue
+
+                incident_seq += 1
+
+                # Calculate incident metrics
+                fault_start = evts[0]['ts']
+                fault_end   = evts[-1]['ts'] if closed else None
+                total_secs  = (fault_end - fault_start) if fault_end else None
+                max_sev     = max(
+                    (SEVERITY.get(e.get('new_status', ''), 0) for e in evts),
+                    default=0)
+                sev_label   = {0: '正常', 1: '离线/暂停',
+                               2: '⚠ 性能警告', 3: '🔴 严重告警'}[max_sev]
+                dur_str     = _fmt_dur(total_secs) if total_secs else "仍在持续"
+                if truncated:
+                    prefix = f"⚠ 故障事件 #{incident_seq}（开始于查询范围外）"
+                elif not closed:
+                    prefix = f"⚠ 故障事件 #{incident_seq}（查询结束时仍未恢复）"
+                else:
+                    prefix = f"故障事件 #{incident_seq}"
+
+                hdr_text = (f"{prefix}  │  {label}  ({ip})  │  "
+                            f"历时: {dur_str}  │  最高级别: {sev_label}")
+
+                # Incident header row -- excel_safe_text on the whole
+                # composed line because label/ip can each start with a
+                # formula-trigger character; even though the prefix
+                # ("故障事件 #N  │  ") makes the cell start with a
+                # safe character, the wrapping helper still scans the
+                # leading byte so this is a no-op for the normal
+                # case but covers an adversarial label like
+                # "=cmd|...".  Same reasoning applies to the per-row
+                # cells below.
+                _write_row(ws_al, row_al,
+                           [excel_safe_text(hdr_text)] + [""] * 7,
+                           fill=INCIDENT_HDR_FILL, bold=True,
+                           font_color="FFFFFF", merge_to=8)
+                ws_al.row_dimensions[row_al].height = 18
+                row_al += 1
+
+                # ── Forensic auto-traceroute snapshot row ─────────────────
+                # The auto-tracert fires the instant a node turns red and is
+                # persisted to traceroute_logs.  Surface "where the path
+                # broke" here so the report is incident-complete even after
+                # the link recovered and the live tracert looks healthy.
+                # red_ts = first red transition (auto-tracert only fires on
+                # red, never on orange-only performance warnings).
+                red_ts = next((e['ts'] for e in evts
+                               if e.get('new_status') == 'red'), None)
+                if red_ts is not None:
+                    # incident_id is None on the Level-1 schema (get_alert_history
+                    # does not yet return it); get_incident_traceroute then uses
+                    # the time-window fallback.  Wired here for Level-2 forward-compat.
+                    inc_iid = next((e.get('incident_id') for e in evts
+                                    if e.get('new_status') == 'red'), None)
+                    snap = self.get_incident_traceroute(
+                        tid, red_ts, incident_id=inc_iid)
+                    if snap:
+                        brk = self.summarize_break(snap.get("hops", []))
+                        trace_t = _fmt_ts(snap.get("ts"))
+                        chg = "；路径较上次有变化" if snap.get("route_changed") else ""
+                        diag_text = f"🔬 故障时自动追踪 @ {trace_t}：{brk['text']}{chg}"
+                    else:
+                        diag_text = "🔬 故障时自动追踪：（无追踪记录，可能保留期已过或追踪未及执行）"
+                    _write_row(ws_al, row_al, [diag_text] + [""] * 7,
+                               fill=_fill("E1F5FE"), bold=False,
+                               font_color="01579B", merge_to=8)
+                    row_al += 1
+
+                # Event rows
+                prev_ts = None
+                for ev in evts:
+                    ts   = ev['ts']
+                    ns   = ev.get('new_status', '')
+                    os_  = ev.get('old_status', '')
+                    cat  = ev.get('category', '')
+                    fr   = ev.get('failure_reason', '')
+
+                    # Skip if completely outside query window
+                    if ts < start_ts - 86400 or ts > end_ts + 86400:
+                        continue
+
+                    gap = _fmt_dur(ts - prev_ts) if prev_ts else "—"
+                    prev_ts = ts
+
+                    row_fill = STATUS_FILL.get(ns, WHITE_FILL)
+                    _write_row(ws_al, row_al, [
+                        "  ↳",
+                        excel_safe_text(label),
+                        excel_safe_text(ip),
+                        _fmt_ts(ts),
+                        f"{_st_label(os_)} → {_st_label(ns)}",
+                        _cat_label(cat, ""),
+                        excel_safe_text(fr) if fr else "—",
+                        gap,
+                    ], fill=row_fill)
+                    row_al += 1
+
+                # Blank separator row between incidents
+                for col in range(1, 9):
+                    ws_al.cell(row_al, col, "").fill = WHITE_FILL
+                row_al += 1
+
+        if incident_seq == 0:
+            _write_row(ws_al, row_al,
+                       ["（查询时段内无故障事件记录）"] + [""] * 7,
+                       fill=GREEN_FILL, merge_to=8)
+            row_al += 1
+
+        ws_al.freeze_panes = "B2"
+        # ── end alert sheet ─────────────────────────────────────────
+
+        wb.save(output_path)
+        return output_path
+
+    # ── 显式控制 ────────────────────────────────────────────────────
+
+    def flush(self):
+        """同步 flush，阻塞直到写入完成（用于程序退出前）。"""
+        done = threading.Event()
+        self._queue.put(("_flush_sync", done))
+        done.wait(timeout=15)
+
+    def _maybe_vacuum(self):
+        """VACUUM the database at most once every 7 days.
+        Waits 5s on startup so the write-thread WAL connection is
+        established first, avoiding a "database is locked" error.
+        """
+        import time as _t, sqlite3 as _sq
+        _t.sleep(5)   # let the write thread complete its initial setup
+        INTERVAL = 7 * 86400
+        KEY = "last_vacuum_ts"
+        try:
+            conn = _sq.connect(self._db_path, check_same_thread=True)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE IF NOT EXISTS app_meta(key TEXT PRIMARY KEY, value TEXT)")
+            row  = conn.execute("SELECT value FROM app_meta WHERE key=?", (KEY,)).fetchone()
+            last = float(row[0]) if row else 0.0
+            if _t.time() - last >= INTERVAL:
+                conn.execute("VACUUM")
+                sql = "INSERT OR REPLACE INTO app_meta(key,value) VALUES(?,?)"
+                conn.execute(sql, (KEY, str(_t.time())))
+                conn.commit()
+                print("[DataStore] VACUUM completed")
+        except Exception as e:
+            print(f"[DataStore] VACUUM skipped: {e}")
+        finally:
+            try: conn.close()
+            except Exception: pass
+
+    def shutdown(self):
+        """flush 后关闭写线程（优雅退出）。"""
+        done = threading.Event()
+        self._queue.put(("_shutdown", done))
+        done.wait(timeout=30)
+
+    # ── 内部：写线程 ────────────────────────────────────────────────
+
+    def _write_loop(self):
+        conn = sqlite3.connect(self._db_path, check_same_thread=True)
+        # 性能 + 并发安全配置
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        conn.execute("PRAGMA cache_size=-8192")   # 8MB 页缓存
+
+        ping_buf  = []
+        alert_buf = []
+        last_flush   = time.time()
+        last_hourly  = time.time()
+        last_cleanup = time.time() - 86400   # trigger cleanup on first run
+        last_vacuum  = time.time()
+
+        while True:   # outer: retry on transient error, never let thread exit
+            try:
+                while True:
+                    try:
+                        item = self._queue.get(timeout=5)
+                    except queue.Empty:
+                        item = None
+
+                    if item is not None:
+                        kind, data = item
+
+                        if kind == "_init_schema":
+                            self._init_schema(conn)
+                            self._schema_ready.set()
+
+                        elif kind == "ping":
+                            # Final-stop generation guard at the queue
+                            # boundary -- producer-side check in
+                            # record_ping is a fast path, but the
+                            # check + put aren't atomic with a
+                            # concurrent bump_target_generation +
+                            # wipe_target enqueue.  Drop here so a
+                            # stale ping queued just before a wipe
+                            # ran can't slip into the buffer.  _flush
+                            # below applies the SAME filter again so
+                            # a stale ping that sat in the buffer
+                            # through a later wipe is also dropped
+                            # right before INSERT.
+                            cg = data.get("captured_generation")
+                            tid = data.get("target_id")
+                            if (cg is None or tid is None
+                                or self.current_target_generation(tid) == cg):
+                                ping_buf.append(data)
+
+                        elif kind == "alert":
+                            # Same generation guard as the "ping" branch
+                            # above -- a stale red->green produced by an
+                            # OLD-config probe that snuck past the
+                            # commit-side identity check would otherwise
+                            # land in alert_events as a phantom recovery
+                            # event and silently close the user's real
+                            # incident.  _flush re-checks alert_buf the
+                            # same way ping_buf is filtered.
+                            cg = data.get("captured_generation")
+                            tid = data.get("target_id")
+                            if not (cg is None or tid is None
+                                    or self.current_target_generation(tid) == cg):
+                                # Stale -- drop without buffering AND skip
+                                # the immediate flush, since the alert
+                                # branch's whole point was "force a flush
+                                # now because this event matters".  A
+                                # dropped event isn't a real event.
+                                pass
+                            else:
+                                alert_buf.append(data)
+                                # Flush alert events immediately — SLA/outage queries
+                                # read directly from SQLite. Buffering for 60s means
+                                # any SLA query made within 60s of an outage shows
+                                # stale data. Flush now so the DB reflects reality.
+                                if self._flush(conn, ping_buf, alert_buf):
+                                    ping_buf.clear(); alert_buf.clear()
+                                    last_flush = time.time()
+                                # else: buffers preserved; next periodic flush retries
+
+                        elif kind == "target_removed":
+                            tid = data["target_id"]
+                            # Close an open incident in DB before popping memory
+                            # state — _assign_incident_ids needs the stored iid.
+                            if (tid in self._active_incidents
+                                    or data.get("old_status") in ("red", "orange")):
+                                alert_buf.append({
+                                    "target_id": tid,
+                                    "label": data.get("label", ""),
+                                    "ip": data.get("ip", ""),
+                                    "ts": data["ts"],
+                                    "old_status": data.get("old_status", "gray"),
+                                    "new_status": "green",
+                                    "category": "deleted",
+                                    "failure_reason": "",
+                                })
+                                if self._flush(conn, ping_buf, alert_buf):
+                                    ping_buf.clear(); alert_buf.clear()
+                                    last_flush = time.time()
+                            else:
+                                self._active_incidents.pop(tid, None)
+
+                        elif kind == "traceroute":
+                            row_data, captured_gen = data
+                            target_id, label, ip, ts, hops_json = row_data
+                            # Final-stop generation guard: the producer
+                            # (TracerouteScheduler._run_one) already
+                            # captures generation, but its capture + put
+                            # is NOT atomic with a concurrent
+                            # bump_target_generation + wipe_target enqueue.
+                            # Wipe queues a DELETE first; this stale INSERT
+                            # would otherwise repopulate traceroute_logs.
+                            # Re-checking here under the writer thread --
+                            # immediately before the INSERT -- closes the
+                            # hole.  Same pattern repeated for "diag" /
+                            # "dns_diag" below.
+                            if (captured_gen is None or target_id is None
+                                or self.current_target_generation(target_id)
+                                    == captured_gen):
+                                # Level-2 incident binding: stamp the
+                                # currently-open incident_id (if any) onto
+                                # this snapshot.  Both _assign_incident_ids
+                                # (writer of _active_incidents) and this
+                                # INSERT run in the same write thread, and
+                                # the queue is single-consumer FIFO — the
+                                # red alert event was queued the instant
+                                # the node turned red and is flushed
+                                # immediately on enqueue (see the "alert"
+                                # branch above), so by the time the tracert
+                                # result lands here (~5–125 s later) the
+                                # incident is already open in
+                                # self._active_incidents.  The rare
+                                # "extremely brief outage that recovered
+                                # before tracert INSERT" race is
+                                # intentionally handled by leaving
+                                # incident_id = NULL here and letting
+                                # export_excel's Level-1 time-window
+                                # fallback catch it.  Older rows written
+                                # before the column existed also stay NULL
+                                # — same fallback.
+                                if self._traceroute_has_incident_col(conn):
+                                    iid = self._active_incidents.get(target_id)
+                                    conn.execute(
+                                        "INSERT INTO traceroute_logs"
+                                        "(target_id,label,ip,ts,hops,incident_id) "
+                                        "VALUES(?,?,?,?,?,?)",
+                                        (target_id, label, ip, ts, hops_json, iid))
+                                else:
+                                    # Defensive: schema migration somehow didn't run.
+                                    # Keep the old INSERT shape so writes never fail.
+                                    conn.execute(
+                                        "INSERT INTO traceroute_logs"
+                                        "(target_id,label,ip,ts,hops) "
+                                        "VALUES(?,?,?,?,?)",
+                                        (target_id, label, ip, ts, hops_json))
+                                conn.commit()
+
+                        elif kind == "wipe_target":
+                            # Purge every historical row for one target_id.
+                            # Triggered by the "更换监控对象" branch in
+                            # MainWindow._on_edit when the IP/probe-type
+                            # change is a repurposing rather than a node
+                            # renumbering.  See data_store.wipe_target_history
+                            # for the full rationale.
+                            #
+                            # Before wiping, flush ANY pending writes (ping
+                            # AND alert) so a write that landed in the
+                            # in-memory buffer just before the wipe doesn't
+                            # INSERT after the DELETE -- the old `if
+                            # alert_buf:` guard ignored ping_buf, so
+                            # historic probes for the now-repurposed
+                            # target survived the DELETE and reappeared
+                            # on the next periodic flush, polluting the
+                            # new target's history with ghost data from
+                            # the previous one.
+                            tid = data["target_id"]
+                            if ping_buf or alert_buf:
+                                if self._flush(conn, ping_buf, alert_buf):
+                                    ping_buf.clear(); alert_buf.clear()
+                                    last_flush = time.time()
+                            # If the flush above failed (DB locked / disk
+                            # full / etc.), _flush DELIBERATELY preserves
+                            # the buffers for retry on the next cycle
+                            # (see _flush docstring).  But we are about
+                            # to DELETE every historical row for `tid` —
+                            # any buffered row for THAT target must die
+                            # too, or the next successful periodic flush
+                            # would INSERT them right back, polluting the
+                            # repurposed target's history with ghost data
+                            # from the previous one.  Other targets'
+                            # buffered rows still retry as intended.
+                            ping_buf[:]  = [p for p in ping_buf
+                                            if p.get("target_id") != tid]
+                            alert_buf[:] = [a for a in alert_buf
+                                            if a.get("target_id") != tid]
+                            for table in ("pings_raw", "pings_hourly",
+                                          "alert_events", "traceroute_logs",
+                                          "icmp_diagnostic_history",
+                                          "dns_diagnostic_history",
+                                          "cum_stats"):
+                                try:
+                                    conn.execute(
+                                        f"DELETE FROM {table} WHERE target_id=?",
+                                        (tid,))
+                                except Exception as e:
+                                    # Per-table tolerance: one missing/locked
+                                    # table shouldn't abort the whole wipe.
+                                    print(f"[wipe_target] {table}: {e}")
+                            conn.commit()
+                            # Pop in-memory incident pointer so the next
+                            # red transition for this tid opens a fresh
+                            # incident rather than re-binding to a stale id
+                            # from the (now-deleted) prior fault history.
+                            # Safe to mutate from this thread -- write
+                            # thread is the sole writer of _active_incidents.
+                            self._active_incidents.pop(tid, None)
+
+                        elif kind == "diag":
+                            # ICMP advanced-diagnostic result.  Inserted
+                            # immediately (not batched) because results are
+                            # rare and a stale UI is very visible: history
+                            # window opened right after a probe should see it.
+                            # Final-stop generation guard -- see the
+                            # "traceroute" branch above for the full
+                            # rationale.  target_id is the first tuple
+                            # element of the INSERT payload.
+                            row_data, captured_gen = data
+                            target_id_in_msg = row_data[0]
+                            if (captured_gen is None
+                                or target_id_in_msg is None
+                                or self.current_target_generation(target_id_in_msg)
+                                    == captured_gen):
+                                conn.execute(
+                                    "INSERT INTO icmp_diagnostic_history("
+                                    "target_id,host,mode,payload_size,df,count,"
+                                    "success_count,loss_count,avg_rtt_ms,"
+                                    "min_rtt_ms,max_rtt_ms,estimated_path_mtu,"
+                                    "max_df_payload,error_summary,conclusion,"
+                                    "details_json,created_ts) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                    row_data)
+                                conn.commit()
+
+                        elif kind == "dns_diag":
+                            # DNS diagnostic result.  Same immediate-insert
+                            # pattern as ICMP "diag" — opening 📜 right after
+                            # a probe must see the new row.  Identical
+                            # generation guard.
+                            row_data, captured_gen = data
+                            target_id_in_msg = row_data[0]
+                            if (captured_gen is None
+                                or target_id_in_msg is None
+                                or self.current_target_generation(target_id_in_msg)
+                                    == captured_gen):
+                                conn.execute(
+                                    "INSERT INTO dns_diagnostic_history("
+                                    "target_id,domain,qtype,trace_chain,resolver,"
+                                    "success,rcode,elapsed_ms,answer_count,"
+                                    "error_summary,message,details_json,created_ts) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                    row_data)
+                                conn.commit()
+
+                        elif kind == "_flush_sync":
+                            # Whether _flush succeeded or not, signal the
+                            # waiter so flush() doesn't block for 15s.
+                            # On failure the buffers stay so a subsequent
+                            # periodic flush / _shutdown can still try.
+                            if self._flush(conn, ping_buf, alert_buf):
+                                ping_buf.clear(); alert_buf.clear()
+                                last_flush = time.time()
+                            if data: data.set()
+
+                        elif kind == "_shutdown":
+                            # Best-effort final flush; on failure the data is
+                            # lost (process is exiting) but we still close
+                            # the connection cleanly and unblock shutdown().
+                            self._flush(conn, ping_buf, alert_buf)
+                            conn.close()
+                            if data: data.set()
+                            return
+
+                    now = time.time()
+
+                    if now - last_flush >= self.FLUSH_INTERVAL:
+                        if ping_buf or alert_buf:
+                            if self._flush(conn, ping_buf, alert_buf):
+                                ping_buf.clear(); alert_buf.clear()
+                            # On failure: keep last_flush stale so we try again
+                            # on the next loop tick (5s) rather than waiting
+                            # another full FLUSH_INTERVAL (60s).
+                            else:
+                                last_flush = now - (self.FLUSH_INTERVAL - 5)
+                                continue
+                        last_flush = now
+
+                    if now - last_hourly >= self.HOURLY_AGG_INTERVAL:
+                        self._hourly_agg(conn)
+                        last_hourly = now
+
+                    if now - last_cleanup >= 86400:
+                        self._cleanup(conn)
+                        last_cleanup = now
+
+                    if now - last_vacuum >= self.VACUUM_INTERVAL:
+                        try:
+                            conn.execute("PRAGMA incremental_vacuum(2000)")
+                            conn.commit()
+                        except Exception:
+                            pass
+                        last_vacuum = now
+
+            except Exception as e:
+                # Transient error (disk full, DB locked, etc.) — log and retry
+                # after 5s. Thread stays alive; queued data is preserved.
+                import traceback
+                print(f"[DataStore] write loop error, retrying in 5s: {e}")
+                traceback.print_exc()
+                try: time.sleep(5)
+                except Exception: pass
+                # outer while True will restart the inner loop
+
+        # Only reached if outer while somehow ends — close connection
+        try: conn.close()
+        except Exception: pass
+
+    def _init_schema(self, conn: sqlite3.Connection):
+        ver = conn.execute("PRAGMA user_version").fetchone()[0]
+        if ver < 1:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS pings_raw (
+                    id             INTEGER PRIMARY KEY,
+                    target_id      TEXT    NOT NULL,
+                    ts             INTEGER NOT NULL,
+                    status         TEXT    NOT NULL,
+                    latency_ms     REAL,
+                    loss_rate      REAL,
+                    status_code    INTEGER,
+                    failure_reason TEXT,
+                    ping_type      TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_raw_target_ts
+                    ON pings_raw(target_id, ts);
+
+                CREATE TABLE IF NOT EXISTS pings_hourly (
+                    id        INTEGER PRIMARY KEY,
+                    target_id TEXT    NOT NULL,
+                    hour_ts   INTEGER NOT NULL,
+                    sample_n  INTEGER NOT NULL,
+                    success_n INTEGER NOT NULL,
+                    lat_avg   REAL,
+                    lat_max   REAL,
+                    lat_min   REAL,
+                    lat_p95   REAL,
+                    loss_rate REAL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_hourly_target_hour
+                    ON pings_hourly(target_id, hour_ts);
+
+                CREATE TABLE IF NOT EXISTS alert_events (
+                    id             INTEGER PRIMARY KEY,
+                    target_id      TEXT    NOT NULL,
+                    label          TEXT,
+                    ip             TEXT,
+                    ts             INTEGER NOT NULL,
+                    old_status     TEXT,
+                    new_status     TEXT,
+                    category       TEXT,
+                    failure_reason TEXT,
+                    incident_id    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_alert_target_ts
+                    ON alert_events(target_id, ts);
+                CREATE INDEX IF NOT EXISTS idx_alert_incident
+                    ON alert_events(incident_id);
+
+                -- Single-column timestamp indexes for cleanup DELETEs.
+                -- The composite (target_id, ts) indexes above CANNOT serve
+                -- "WHERE ts < ?" without a target_id prefix (SQLite would
+                -- fall back to a full table scan or skip-scan), which made
+                -- weekly cleanup hold a long writer lock once the tables
+                -- grew to millions of rows.
+                CREATE INDEX IF NOT EXISTS idx_raw_ts_only
+                    ON pings_raw(ts);
+                CREATE INDEX IF NOT EXISTS idx_hourly_ts_only
+                    ON pings_hourly(hour_ts);
+                CREATE INDEX IF NOT EXISTS idx_alert_ts_only
+                    ON alert_events(ts);
+
+                CREATE TABLE IF NOT EXISTS targets_meta (
+                    target_id  TEXT PRIMARY KEY,
+                    label      TEXT,
+                    ip         TEXT,
+                    ping_type  TEXT,
+                    updated_at INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS cum_stats (
+                    target_id  TEXT PRIMARY KEY,
+                    total      INTEGER DEFAULT 0,
+                    success    INTEGER DEFAULT 0,
+                    lat_avg    REAL    DEFAULT 0,
+                    lat_n      INTEGER DEFAULT 0,
+                    updated_at INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS traceroute_logs (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id   TEXT    NOT NULL,
+                    label       TEXT,
+                    ip          TEXT,
+                    ts          REAL    NOT NULL,
+                    hops        TEXT,
+                    incident_id TEXT
+                );
+                -- Index for incident<->traceroute time-window correlation
+                -- (export_excel.get_incident_traceroute time-window lookup).
+                CREATE INDEX IF NOT EXISTS idx_tracert_target_ts
+                    ON traceroute_logs(target_id, ts);
+                -- Index for exact incident_id JOIN (Level 2 forensic binding).
+                CREATE INDEX IF NOT EXISTS idx_tracert_incident
+                    ON traceroute_logs(incident_id);
+
+                CREATE TABLE IF NOT EXISTS icmp_diagnostic_history (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id          TEXT,
+                    host               TEXT    NOT NULL,
+                    mode               TEXT    NOT NULL,
+                    payload_size       INTEGER NOT NULL,
+                    df                 INTEGER NOT NULL,
+                    count              INTEGER NOT NULL,
+                    success_count      INTEGER NOT NULL,
+                    loss_count         INTEGER NOT NULL,
+                    avg_rtt_ms         REAL,
+                    min_rtt_ms         REAL,
+                    max_rtt_ms         REAL,
+                    estimated_path_mtu INTEGER,
+                    max_df_payload     INTEGER,
+                    error_summary      TEXT,
+                    conclusion         TEXT,
+                    details_json       TEXT,
+                    created_ts         REAL    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_diag_target_ts
+                    ON icmp_diagnostic_history(target_id, created_ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_diag_host_ts
+                    ON icmp_diagnostic_history(host, created_ts DESC);
+
+                CREATE TABLE IF NOT EXISTS dns_diagnostic_history (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id     TEXT,
+                    domain        TEXT    NOT NULL,
+                    qtype         TEXT    NOT NULL,
+                    trace_chain   INTEGER NOT NULL,
+                    resolver      TEXT,
+                    success       INTEGER NOT NULL,
+                    rcode         TEXT,
+                    elapsed_ms    REAL,
+                    answer_count  INTEGER NOT NULL,
+                    error_summary TEXT,
+                    message       TEXT,
+                    details_json  TEXT,
+                    created_ts    REAL    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_dns_diag_target_ts
+                    ON dns_diagnostic_history(target_id, created_ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_dns_diag_domain_ts
+                    ON dns_diagnostic_history(domain, created_ts DESC);
+
+                PRAGMA user_version = 7;
+            """)
+            conn.commit()
+
+        # ── Incremental migrations ──────────────────────────────────────
+        # v1 → v2: add incident_id and failure_reason to alert_events
+        if ver == 1:
+            existing = {r[1] for r in conn.execute(
+                "PRAGMA table_info(alert_events)").fetchall()}
+            if 'incident_id' not in existing:
+                conn.execute(
+                    "ALTER TABLE alert_events ADD COLUMN incident_id TEXT")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_alert_incident "
+                    "ON alert_events(incident_id)")
+            if 'failure_reason' not in existing:
+                conn.execute(
+                    "ALTER TABLE alert_events ADD COLUMN failure_reason TEXT")
+            conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+            # Back-fill incident_id for historical events
+            self._backfill_incident_ids(conn)
+            ver = 2
+
+        # v2 → v3: add icmp_diagnostic_history table (introduced for
+        # ICMP advanced diagnostics Phase 3 — store-and-recall of past
+        # diagnostic runs).  CREATE TABLE IF NOT EXISTS is idempotent so
+        # re-running this on a freshly-built v3 schema is a safe no-op.
+        if ver == 2:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS icmp_diagnostic_history (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id          TEXT,
+                    host               TEXT    NOT NULL,
+                    mode               TEXT    NOT NULL,
+                    payload_size       INTEGER NOT NULL,
+                    df                 INTEGER NOT NULL,
+                    count              INTEGER NOT NULL,
+                    success_count      INTEGER NOT NULL,
+                    loss_count         INTEGER NOT NULL,
+                    avg_rtt_ms         REAL,
+                    min_rtt_ms         REAL,
+                    max_rtt_ms         REAL,
+                    estimated_path_mtu INTEGER,
+                    max_df_payload     INTEGER,
+                    error_summary      TEXT,
+                    conclusion         TEXT,
+                    details_json       TEXT,
+                    created_ts         REAL    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_diag_target_ts
+                    ON icmp_diagnostic_history(target_id, created_ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_diag_host_ts
+                    ON icmp_diagnostic_history(host, created_ts DESC);
+                PRAGMA user_version = 3;
+            """)
+            conn.commit()
+            ver = 3
+
+        # v3 → v4: add dns_diagnostic_history table (DNS advanced
+        # diagnostics Phase 3A — store-and-recall of past DNS resolution
+        # runs, mirror of icmp_diagnostic_history).  Shares the
+        # db_diag_retention_days knob with the ICMP table.  CREATE TABLE
+        # IF NOT EXISTS is idempotent so re-running this on a freshly
+        # built v4 schema is a safe no-op.
+        if ver == 3:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS dns_diagnostic_history (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id     TEXT,
+                    domain        TEXT    NOT NULL,
+                    qtype         TEXT    NOT NULL,
+                    trace_chain   INTEGER NOT NULL,
+                    resolver      TEXT,
+                    success       INTEGER NOT NULL,
+                    rcode         TEXT,
+                    elapsed_ms    REAL,
+                    answer_count  INTEGER NOT NULL,
+                    error_summary TEXT,
+                    message       TEXT,
+                    details_json  TEXT,
+                    created_ts    REAL    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_dns_diag_target_ts
+                    ON dns_diagnostic_history(target_id, created_ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_dns_diag_domain_ts
+                    ON dns_diagnostic_history(domain, created_ts DESC);
+                PRAGMA user_version = 4;
+            """)
+            conn.commit()
+            ver = 4
+
+        # v4 → v5: add incident_id column to traceroute_logs for exact
+        # incident<->snapshot binding (Level 2 forensic correlation).
+        # Old rows keep incident_id = NULL; export_excel automatically
+        # falls back to the time-window match (Level 1) for those, so
+        # historical reports remain complete.  CREATE INDEX is idempotent
+        # via IF NOT EXISTS so re-runs on a freshly-built v5 schema are
+        # a safe no-op.  PRAGMA table_info guards the ALTER against
+        # double-add if a previous run partially completed.
+        # Note: also (re)creates idx_tracert_target_ts here — it was
+        # introduced alongside Level 1 in the fresh-DB CREATE block but
+        # never given its own migration step, so a pre-Level-1 v4
+        # database upgrading straight to v5 would otherwise miss it.
+        if ver == 4:
+            existing = {r[1] for r in conn.execute(
+                "PRAGMA table_info(traceroute_logs)").fetchall()}
+            if 'incident_id' not in existing:
+                conn.execute(
+                    "ALTER TABLE traceroute_logs ADD COLUMN incident_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tracert_target_ts "
+                "ON traceroute_logs(target_id, ts)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tracert_incident "
+                "ON traceroute_logs(incident_id)")
+            conn.execute("PRAGMA user_version = 5")
+            conn.commit()
+            ver = 5
+
+        # v5 → v6: add lat_min column to pings_hourly so the waveform
+        # summary's "min latency" reflects the real per-hour minimum
+        # instead of min(of hourly averages), which previously masked
+        # short low-latency dips when looking at multi-day spans.
+        # Pre-migration rows keep lat_min = NULL; get_waveform's summary
+        # tolerates None entries (those points are skipped), so old
+        # historical ranges show min only from post-migration hours.
+        if ver == 5:
+            existing = {r[1] for r in conn.execute(
+                "PRAGMA table_info(pings_hourly)").fetchall()}
+            if 'lat_min' not in existing:
+                conn.execute(
+                    "ALTER TABLE pings_hourly ADD COLUMN lat_min REAL")
+            conn.execute("PRAGMA user_version = 6")
+            conn.commit()
+            ver = 6
+
+        # v6 → v7: add single-column timestamp indexes so weekly cleanup
+        # ("DELETE FROM pings_raw WHERE ts<?", etc.) doesn't fall back to
+        # a full table scan.  The existing composite (target_id, ts)
+        # indexes can't serve a ts-only range predicate efficiently;
+        # without these, a multi-million-row pings_raw cleanup could
+        # hold the writer lock for tens of seconds and back up live
+        # probe writes in memory.
+        if ver == 6:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_raw_ts_only ON pings_raw(ts)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_hourly_ts_only ON pings_hourly(hour_ts)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alert_ts_only ON alert_events(ts)")
+            conn.execute("PRAGMA user_version = 7")
+            conn.commit()
+
+        # Restore in-memory active-incident state from DB
+        self._restore_active_incidents(conn)
+
+    def _backfill_incident_ids(self, conn: sqlite3.Connection):
+        """Assign incident_ids to historical alert_events that lack them."""
+        rows = conn.execute(
+            "SELECT id, target_id, ts, old_status, new_status, category "
+            "FROM alert_events WHERE incident_id IS NULL "
+            "ORDER BY target_id, ts, id"
+        ).fetchall()
+
+        active: dict[str, str] = {}   # target_id → current incident_id
+        updates = []
+        from datetime import datetime as _dt
+
+        for row in rows:
+            # Renamed `os` -> `old_st` to avoid shadowing the imported `os`
+            # module at the top of this file. Functionality unchanged.
+            rid, tid, ts, old_st, ns, cat = row
+            if cat in ('paused', 'resumed'):
+                iid = active.get(tid)  # inherit incident if active
+                if iid:
+                    updates.append((iid, rid))
+                continue
+
+            iid = active.get(tid)
+            if ns in ('orange', 'red'):
+                if not iid:
+                    iid = f"INC-{_dt.fromtimestamp(ts).strftime('%Y%m%d%H%M%S')}-{tid[:6].upper()}"
+                    active[tid] = iid
+                updates.append((iid, rid))
+            elif ns == 'green':
+                if iid:
+                    updates.append((iid, rid))
+                    del active[tid]
+            # gray/others: no incident_id
+
+        if updates:
+            conn.executemany(
+                "UPDATE alert_events SET incident_id=? WHERE id=?", updates)
+            conn.commit()
+
+    def _restore_active_incidents(self, conn: sqlite3.Connection):
+        """
+        On startup, restore in-memory _active_incidents from the last DB state
+        per target so that incident continuity is preserved across restarts.
+        """
+        rows = conn.execute("""
+            SELECT target_id, incident_id, new_status
+            FROM alert_events
+            WHERE id IN (
+                SELECT MAX(id) FROM alert_events GROUP BY target_id
+            )
+            AND incident_id IS NOT NULL
+            AND new_status NOT IN ('green')
+        """).fetchall()
+        for tid, iid, _ in rows:
+            self._active_incidents[tid] = iid
+
+    def _flush(self, conn, ping_buf: list, alert_buf: list) -> bool:
+        """Persist all buffered probe and alert events to SQLite.
+
+        Returns:
+            True  — all rows committed; caller may clear the buffers.
+            False — transaction was rolled back; caller MUST preserve the
+                    buffers so the same batch is retried on the next flush
+                    cycle.  In-memory _active_incidents is restored to its
+                    pre-call state so the retry produces identical
+                    incident_id assignments.
+
+        Why the snapshot/rollback matters:
+            _assign_incident_ids() mutates self._active_incidents BEFORE the
+            INSERT runs (it needs the side-effects to thread the same
+            incident_id across the events of one batch).  If the INSERT
+            then fails, SQLite rolls back the transaction — but the
+            in-memory dict has already been advanced.  Without restoring
+            it, a green event that "closed" an incident on the first
+            attempt would no longer find that incident on retry, causing
+            the recovery row to be persisted with a NULL incident_id and
+            permanently breaking the incident's open→close pairing.
+        """
+        if not ping_buf and not alert_buf:
+            return True
+        # Final generation pass over ping_buf: a ping that survived the
+        # enqueue-time check could still have been overtaken by a wipe
+        # / removal while sitting in the buffer (ping_buf flushes at
+        # FLUSH_INTERVAL, so a stale row can wait up to ~60 s here).
+        # Filter in-place so the executemany below only sees rows
+        # whose captured generation still matches the current target
+        # generation.  Rows with no captured_generation (legacy /
+        # detached test paths) pass through unchanged.
+        if ping_buf:
+            kept = []
+            for p in ping_buf:
+                cg = p.get("captured_generation")
+                tid = p.get("target_id")
+                if (cg is None or tid is None
+                    or self.current_target_generation(tid) == cg):
+                    kept.append(p)
+            ping_buf[:] = kept
+        # Same final pass over alert_buf -- a stale recovery event
+        # that snuck through the enqueue-time guard (or pre-dates the
+        # guard for any reason) gets dropped here rather than landing
+        # as a phantom red->green transition.  Events synthesised by
+        # the writer thread itself (target_removed branch above)
+        # carry no captured_generation key and pass through unchanged.
+        if alert_buf:
+            kept_a = []
+            for a in alert_buf:
+                cg = a.get("captured_generation")
+                tid = a.get("target_id")
+                if (cg is None or tid is None
+                    or self.current_target_generation(tid) == cg):
+                    kept_a.append(a)
+            alert_buf[:] = kept_a
+        if not ping_buf and not alert_buf:
+            return True
+        # Shallow snapshot is sufficient: values are immutable str tokens.
+        incidents_snapshot = dict(self._active_incidents)
+        try:
+            with conn:
+                if ping_buf:
+                    conn.executemany(
+                        "INSERT INTO pings_raw "
+                        "(target_id,ts,status,latency_ms,loss_rate,"
+                        " status_code,failure_reason,ping_type) "
+                        "VALUES(:target_id,:ts,:status,:latency_ms,:loss_rate,"
+                        ":status_code,:failure_reason,:ping_type)",
+                        ping_buf)
+                    self._update_cum_stats(conn, ping_buf)
+                    # 更新 targets_meta 快照（只保留每个 tid 的最新值）
+                    seen = {p["target_id"]: p for p in ping_buf}
+                    now  = int(time.time())
+                    for p in seen.values():
+                        conn.execute(
+                            "INSERT OR REPLACE INTO targets_meta "
+                            "(target_id,label,ip,ping_type,updated_at) "
+                            "VALUES(?,?,?,?,?)",
+                            (p["target_id"], p.get("label",""),
+                             p.get("ip",""), p.get("ping_type","icmp"), now))
+                if alert_buf:
+                    self._assign_incident_ids(alert_buf)
+                    conn.executemany(
+                        "INSERT INTO alert_events "
+                        "(target_id,label,ip,ts,old_status,new_status,"
+                        " category,failure_reason,incident_id) "
+                        "VALUES(:target_id,:label,:ip,:ts,"
+                        ":old_status,:new_status,:category,"
+                        ":failure_reason,:incident_id)",
+                        alert_buf)
+            return True
+        except Exception as e:
+            # Restore incident state so the retry path is deterministic.
+            # Mutate in place rather than rebinding so any external code
+            # holding a reference to the original dict (unlikely but
+            # cheap insurance) still sees the rolled-back state.
+            self._active_incidents.clear()
+            self._active_incidents.update(incidents_snapshot)
+            print(f"[DataStore] _flush error (buffers preserved for retry): {e}")
+            return False
+
+    def _assign_incident_ids(self, alert_buf: list):
+        """
+        Assign incident_id to each event dict in alert_buf (in-place).
+
+        Rules:
+        - orange / red  → start or continue an incident
+        - green         → close an incident (recovery event gets same ID)
+        - paused / gray → transitional; inherit incident_id if in one
+
+        _active_incidents persists across flushes so incident continuity
+        survives program restarts (restored from DB in _init_schema).
+        """
+        from datetime import datetime as _dt
+
+        # Process in chronological order so multi-event flushes stay consistent
+        for ev in sorted(alert_buf, key=lambda e: e['ts']):
+            tid = ev['target_id']
+            ns  = ev.get('new_status', '')
+            cat = ev.get('category', '')
+            iid = self._active_incidents.get(tid)
+
+            if ns in ('orange', 'red'):
+                if not iid:
+                    # The (ts_str, tid[:6]) key collapses to the same
+                    # value when two independent outages happen in the
+                    # SAME WALL-CLOCK SECOND on the SAME target -- a
+                    # green→red→green→red→green flap within one
+                    # second produced four events that all shared one
+                    # incident_id, breaking the Level-2 traceroute
+                    # join (forensic snapshots for the second outage
+                    # would be matched against the first).  Append 4
+                    # hex chars of randomness so distinct incidents
+                    # always get distinct ids; collision probability
+                    # within a single (second, target) bucket is
+                    # 1/65536 even before the (very rare) third
+                    # outage in the same second.
+                    ts_str = _dt.fromtimestamp(ev['ts']).strftime('%Y%m%d%H%M%S')
+                    rand4  = os.urandom(2).hex().upper()
+                    iid = f"INC-{ts_str}-{tid[:6].upper()}-{rand4}"
+                    self._active_incidents[tid] = iid
+                ev['incident_id'] = iid
+
+            elif ns == 'green':
+                if iid:
+                    ev['incident_id'] = iid          # recovery closes incident
+                    del self._active_incidents[tid]
+                else:
+                    ev['incident_id'] = None          # normal green→green
+
+            elif ns in ('paused', 'gray') or cat in ('paused', 'resumed'):
+                ev['incident_id'] = iid              # None if not in incident
+
+            else:
+                ev['incident_id'] = None
+
+    def _update_cum_stats(self, conn, ping_buf: list):
+        """用 CMA 公式更新累计统计——与 WebServer 端保持一致的数值稳定性。"""
+        groups: dict[str, list] = defaultdict(list)
+        for p in ping_buf:
+            groups[p["target_id"]].append(p)
+
+        for tid, pings in groups.items():
+            row = conn.execute(
+                "SELECT total, success, lat_avg, lat_n FROM cum_stats "
+                "WHERE target_id=?", (tid,)).fetchone()
+            total   = row[0] if row else 0
+            success = row[1] if row else 0
+            lat_avg = row[2] if row else 0.0
+            lat_n   = row[3] if row else 0
+
+            for p in pings:
+                total += 1
+                if p["status"] in ("green", "orange"):
+                    success += 1
+                if p["latency_ms"] is not None:
+                    lat_n   += 1
+                    lat_avg += (p["latency_ms"] - lat_avg) / lat_n
+
+            conn.execute(
+                "INSERT OR REPLACE INTO cum_stats "
+                "(target_id,total,success,lat_avg,lat_n,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (tid, total, success, lat_avg, lat_n, int(time.time())))
+
+    def _hourly_agg(self, conn):
+        """Aggregate every hourly bucket we haven't already written.
+
+        Previously hard-coded to "the immediately-prior full hour", which
+        meant any hour the writer thread wasn't alive at minute :00 was
+        skipped FOREVER -- once pings_raw cleanup ran (default 7 days
+        later) and removed that hour's raw rows, the SLA report had a
+        permanent hole in pings_hourly that no future agg could fill.
+        Now: per target, find the highest hour already aggregated and
+        catch up every full hour from there to (but not including) the
+        current still-in-progress hour.
+
+        Idempotent: re-running this on a fully caught-up DB is cheap
+        (one MAX(hour_ts) lookup per target, while loop runs 0 times).
+        """
+        now          = int(time.time())
+        current_hour = (now // 3600) * 3600   # exclude the in-progress hour
+
+        # Targets are sourced from pings_raw (not targets_meta) so that
+        # a target removed in the last few days still gets its trailing
+        # raw rows aggregated before cleanup deletes them.  DISTINCT on
+        # the leading column of idx_raw_target_ts is a loose-index-scan
+        # in SQLite -- fast even on tens of millions of rows.
+        target_ids = [r[0] for r in conn.execute(
+            "SELECT DISTINCT target_id FROM pings_raw"
+        ).fetchall()]
+
+        with conn:
+            for tid in target_ids:
+                # Per-target high-water mark.  Without this we would
+                # rescan the entire raw retention window every hourly
+                # tick to find missed hours; with it the work is
+                # proportional to "hours since last successful agg"
+                # (typically 1, occasionally a handful after a restart).
+                hwm_row = conn.execute(
+                    "SELECT MAX(hour_ts) FROM pings_hourly WHERE target_id=?",
+                    (tid,)
+                ).fetchone()
+                hwm = hwm_row[0] if hwm_row else None
+
+                if hwm is not None:
+                    hour_start = hwm + 3600
+                else:
+                    # No prior aggregation: start from the earliest raw
+                    # probe so a fresh target / first run after upgrade
+                    # still gets its backlog aggregated.
+                    first = conn.execute(
+                        "SELECT MIN(ts) FROM pings_raw WHERE target_id=?",
+                        (tid,)
+                    ).fetchone()
+                    if not first or first[0] is None:
+                        continue
+                    hour_start = (first[0] // 3600) * 3600
+
+                while hour_start < current_hour:
+                    hour_end = hour_start + 3600
+                    rows = conn.execute(
+                        "SELECT latency_ms, status FROM pings_raw "
+                        "WHERE target_id=? AND ts >= ? AND ts < ?",
+                        (tid, hour_start, hour_end)
+                    ).fetchall()
+                    if rows:
+                        sample_n  = len(rows)
+                        success_n = sum(1 for _, s in rows
+                                        if s in ("green", "orange"))
+                        lats      = sorted(r[0] for r in rows
+                                           if r[0] is not None)
+                        lat_avg   = sum(lats) / len(lats) if lats else None
+                        lat_max   = lats[-1] if lats else None
+                        lat_min   = lats[0]  if lats else None
+                        # P95 by the nearest-rank method: ceil(0.95 * n)
+                        # then -1 for 0-based indexing.  int() (floor)
+                        # is wrong direction for percentiles: with n=2
+                        # it returns lats[0] = the MIN, with n=19 it
+                        # returns lats[17] instead of lats[18] = MAX.
+                        # On HTTP/DNS targets with low probe rates or
+                        # outage-heavy hours where success samples drop
+                        # to single digits, the floor formula made P95
+                        # come out LOWER than the average — a textbook
+                        # impossible percentile.
+                        lat_p95   = (lats[min(len(lats) - 1,
+                                              max(0, math.ceil(len(lats) * 0.95) - 1))]
+                                     if lats else None)
+                        loss_rate = 1 - success_n / sample_n
+
+                        # INSERT OR IGNORE keeps this safe under a race
+                        # where two writers somehow processed the same
+                        # (target, hour) -- the unique index on
+                        # (target_id, hour_ts) decides the winner.
+                        conn.execute(
+                            "INSERT OR IGNORE INTO pings_hourly "
+                            "(target_id,hour_ts,sample_n,success_n,"
+                            " lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)",
+                            (tid, hour_start, sample_n, success_n,
+                             lat_avg, lat_max, lat_min, lat_p95, loss_rate))
+                    hour_start = hour_end
+
+    def get_sla_stats(self, target_id: str,
+                      start_ts: float, end_ts: float) -> dict:
+        """
+        Compute SLA metrics for one target over [start_ts, end_ts].
+
+        Latency stats  — from pings_hourly (fast, pre-aggregated).
+        Outage stats   — from alert_events, status-transition based:
+
+        The query now selects by old/new_status rather than category, so
+        recovery events (which are stored with category='ok') are correctly
+        included.  The three boundary cases are handled:
+          Case A: outage started before start_ts → count from start_ts
+          Case B: outage not resolved by end_ts  → count to end_ts
+          Case C: node was red the ENTIRE period → whole span is downtime
+
+        Outage definition: service is DOWN while new_status == 'red'.
+        Recovery = first transition FROM red TO green/orange/gray.
+        """
+        import sqlite3, json
+        conn = None
+        try:
+            conn = self._read_conn()
+            conn.row_factory = sqlite3.Row
+
+            # ── Latency stats from pings_hourly ─────────────────────
+            # NOTE: weight by success_n, not sample_n.  lat_avg/lat_p95 in
+            # pings_hourly are computed from non-null latencies only (see
+            # _hourly_agg), so sample_n inflates the weight of failure-heavy
+            # hours and pulls SLA latency toward whatever the 2 lucky probes
+            # in a 3600-probe outage happened to clock.  NULLIF(SUM(success_n),0)
+            # also gives the right zero-guard: if no probes succeeded in the
+            # range, the latency average is genuinely undefined (NULL),
+            # rather than dividing by a sample_n that includes only failures.
+            row = conn.execute("""
+                SELECT
+                    SUM(sample_n)                          AS total,
+                    SUM(success_n)                         AS success,
+                    SUM(lat_avg * success_n) /
+                      NULLIF(SUM(success_n), 0)            AS lat_avg,
+                    MAX(lat_max)                           AS lat_max,
+                    -- weighted-average P95 (best approximation from hourly).
+                    -- Same success_n weighting rationale as lat_avg above.
+                    SUM(lat_p95 * success_n) /
+                      NULLIF(SUM(success_n), 0)            AS lat_p95
+                FROM pings_hourly
+                WHERE target_id = ?
+                  AND hour_ts BETWEEN ? AND ?
+            """, (target_id, start_ts, end_ts)).fetchone()
+
+            total   = row["total"]   or 0
+            success = row["success"] or 0
+            # `... or 0.0` would coerce NULL (which means "no successful
+            # probe in the range" — see the NULLIF(...) zero-guard in
+            # the SQL above) to 0.0, making a hour of 100% packet loss
+            # surface as "0.0 ms average".  Preserve None so consumers
+            # can render "—" instead of an absurd zero.  The error-path
+            # return below already uses None, so the calling shape is
+            # unchanged for non-data hours.
+            lat_avg = round(row["lat_avg"], 2) if row["lat_avg"] is not None else None
+            lat_max = round(row["lat_max"], 2) if row["lat_max"] is not None else None
+            lat_p95 = round(row["lat_p95"], 2) if row["lat_p95"] is not None else None
+
+            # ── Outage stats from alert_events ───────────────────────
+            # Query by STATUS TRANSITION, not by category.
+            # Recovery events are stored with category='ok' (not 'availability'),
+            # so a category filter would silently drop them — causing fault_start
+            # to never be cleared and wildly overstating outage duration.
+            #
+            # Split into TWO bounded queries instead of fetching the
+            # entire history with ts <= end_ts:
+            #   Q1: the single most recent red-touching event strictly
+            #       before start_ts → determines status_at_start.
+            #   Q2: every red-touching event INSIDE [start_ts, end_ts]
+            #       → walked to count outages and durations.
+            # The previous one-query "ts <= end_ts" pulled every
+            # red-touching event from the dawn of time to find Q1's
+            # one row, which on a 3-year-old DB with 50k events meant
+            # iterating 49,990 rows in Python just to determine the
+            # boundary state.  Multiply by 50 nodes in the batch path
+            # and a dashboard refresh was loading hundreds of MB of
+            # alert history into Flask's worker memory per request.
+            boundary = conn.execute("""
+                SELECT new_status FROM alert_events
+                WHERE target_id = ?
+                  AND (new_status = 'red' OR old_status = 'red')
+                  AND ts < ?
+                ORDER BY ts DESC LIMIT 1
+            """, (target_id, start_ts)).fetchone()
+            status_at_start = boundary["new_status"] if boundary else "green"
+
+            events = conn.execute("""
+                SELECT ts, old_status, new_status FROM alert_events
+                WHERE target_id = ?
+                  AND (new_status = 'red' OR old_status = 'red')
+                  AND ts >= ? AND ts <= ?
+                ORDER BY ts ASC
+            """, (target_id, start_ts, end_ts)).fetchall()
+
+            # Walk events within [start_ts, end_ts]
+            outage_secs  = 0.0
+            outage_count = 0
+            # Case A/C: outage was already active at window start
+            fault_start = start_ts if status_at_start == "red" else None
+            if status_at_start == "red":
+                outage_count = 1
+
+            for ev in events:
+                ts, old_s, new_s = ev["ts"], ev["old_status"], ev["new_status"]
+
+                if new_s == "red" and fault_start is None:
+                    # Fresh outage starts
+                    fault_start   = ts
+                    outage_count += 1
+                elif old_s == "red" and new_s != "red" and fault_start is not None:
+                    # Outage ends (recovery to green / orange / gray)
+                    outage_secs += ts - fault_start
+                    fault_start  = None
+
+            # Case B: outage is still ongoing at query time.
+            # Cap the end-of-outage at NOW (not at the query window's end_ts).
+            #
+            # Why: the SLA date picker uses end_ts = "today 23:59:59" (day granularity).
+            # If a node went red at 00:30 and the user queries at 00:35, the naive
+            # calculation gives outage_secs = 23:59:59 - 00:30 = 23.5 hours for a
+            # 5-minute outage.  By capping at the current time, we get 5 minutes —
+            # which is the actual elapsed downtime at query time.
+            #
+            # end_ts (the query window boundary) still matters for uptime% denominator
+            # and for past closed outages; it only affects the ONGOING outage endpoint.
+            if fault_start is not None:
+                case_b_end = min(end_ts, time.time())
+                outage_secs += max(0.0, case_b_end - fault_start)
+
+            # Connection is thread-local-cached — do not close here either.
+            # Was previously closing mid-method then again in finally; both
+            # are now removed.
+
+            # uptime% denominator: use the smaller of (query window, elapsed so far)
+            # so that a 7-day query made on day 1 isn't comparing against a full week.
+            elapsed = min(end_ts, time.time()) - start_ts
+            period_secs = max(elapsed, 1)
+            uptime_pct  = round(
+                max(0.0, (period_secs - outage_secs) / period_secs) * 100, 3)
+            return {
+                "uptime_pct":     uptime_pct,
+                "lat_avg":        lat_avg,
+                "lat_max":        lat_max,
+                "lat_p95":        lat_p95,
+                "outage_count":   outage_count,
+                "outage_minutes": round(outage_secs / 60, 1),
+                "sample_n":       total,
+            }
+        except Exception as e:
+            print(f"[SLA] {e}")
+            return {"uptime_pct": None, "lat_avg": None, "lat_max": None,
+                    "lat_p95": None, "outage_count": 0,
+                    "outage_minutes": 0, "sample_n": 0}
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_sla_stats_batch(self, target_ids: list,
+                            start_ts: float, end_ts: float) -> dict:
+        """
+        Bulk version of get_sla_stats() for the entire dashboard.
+
+        Old /api/sla loop: 50 nodes × 2 SQL each = 100 round-trips per
+        request.  Each round-trip is cheap in isolation but they're
+        serial because Flask's request handler is single-threaded.
+
+        This method issues two GROUP BY / IN (...) queries total, fans the
+        rows back out per target_id in Python, then runs the same outage
+        walk per target.  Result is byte-identical to calling
+        get_sla_stats() in a loop (verified by the chunking math: when one
+        target's events are isolated by target_id, the walk sees exactly
+        what the single-target query would have returned).
+
+        Returns {target_id: {uptime_pct, lat_avg, lat_max, lat_p95,
+        outage_count, outage_minutes, sample_n}}.  Targets present in
+        `target_ids` but absent from the DB get the "no data" defaults
+        (uptime_pct=100.0, outage_count=0, sample_n=0).
+        """
+        if not target_ids:
+            return {}
+
+        # Defensive chunking: SQLite 3.32+ allows 32766 parameters but
+        # older builds (some Python embed) cap at 999.  500 is comfortably
+        # under both while still cutting round-trips by ~50× vs the
+        # one-at-a-time loop.
+        CHUNK = 500
+        if len(target_ids) > CHUNK:
+            out = {}
+            for i in range(0, len(target_ids), CHUNK):
+                out.update(self.get_sla_stats_batch(
+                    target_ids[i:i+CHUNK], start_ts, end_ts))
+            return out
+
+        try:
+            conn = self._read_conn()
+            # row_factory persists on the cached conn (see _read_conn doc);
+            # we still set it locally to make this method's logic explicit.
+            conn.row_factory = sqlite3.Row
+
+            placeholders = ",".join("?" * len(target_ids))
+
+            # ── Query 1: aggregated latency per target ─────────────────
+            # Same success_n weighting as get_sla_stats above -- see that
+            # function for the full rationale.  This per-target rollup must
+            # agree with the single-target rollup, otherwise the Web SLA view
+            # and the Excel SLA sheet would disagree on the same data.
+            lat_rows = conn.execute(f"""
+                SELECT
+                    target_id,
+                    SUM(sample_n)                          AS total,
+                    SUM(success_n)                         AS success,
+                    SUM(lat_avg * success_n) /
+                      NULLIF(SUM(success_n), 0)            AS lat_avg,
+                    MAX(lat_max)                           AS lat_max,
+                    SUM(lat_p95 * success_n) /
+                      NULLIF(SUM(success_n), 0)            AS lat_p95
+                FROM pings_hourly
+                WHERE target_id IN ({placeholders})
+                  AND hour_ts BETWEEN ? AND ?
+                GROUP BY target_id
+            """, (*target_ids, start_ts, end_ts)).fetchall()
+            lat_by_tid = {r["target_id"]: r for r in lat_rows}
+
+            # ── Query 2: per-target boundary state (single row each).
+            # JOIN'ing on (target_id, MAX(ts)) lets SQLite resolve each
+            # target's "latest pre-window red-touching event" via the
+            # composite (target_id, ts) index in a single statement.
+            # The previous "ts <= end_ts" version pulled every historical
+            # red-touching event for every target just to find one
+            # boundary row per target — for 50 nodes × 50k events that
+            # was hundreds of MB into Flask's per-request memory.
+            boundary_rows = conn.execute(f"""
+                SELECT e.target_id, e.new_status
+                FROM alert_events e
+                INNER JOIN (
+                    SELECT target_id, MAX(ts) AS max_ts
+                    FROM alert_events
+                    WHERE target_id IN ({placeholders})
+                      AND (new_status = 'red' OR old_status = 'red')
+                      AND ts < ?
+                    GROUP BY target_id
+                ) latest ON e.target_id = latest.target_id
+                        AND e.ts        = latest.max_ts
+                WHERE e.target_id IN ({placeholders})
+                  AND (e.new_status = 'red' OR e.old_status = 'red')
+            """, (*target_ids, start_ts, *target_ids)).fetchall()
+            status_at_start_by_tid = {
+                r["target_id"]: r["new_status"] for r in boundary_rows
+            }
+
+            # ── Query 3: in-window red-touching events, sorted per target.
+            ev_rows = conn.execute(f"""
+                SELECT target_id, ts, old_status, new_status
+                FROM alert_events
+                WHERE target_id IN ({placeholders})
+                  AND (new_status = 'red' OR old_status = 'red')
+                  AND ts >= ? AND ts <= ?
+                ORDER BY target_id ASC, ts ASC
+            """, (*target_ids, start_ts, end_ts)).fetchall()
+            events_by_tid: dict = {}
+            for r in ev_rows:
+                events_by_tid.setdefault(r["target_id"], []).append(r)
+
+            # ── Per-target outage walk (identical to get_sla_stats) ────
+            now = time.time()
+            elapsed = min(end_ts, now) - start_ts
+            period_secs = max(elapsed, 1)
+
+            result = {}
+            for tid in target_ids:
+                lat = lat_by_tid.get(tid)
+                total   = (lat["total"]   if lat else None) or 0
+                success = (lat["success"] if lat else None) or 0
+                # Preserve None for "no successful probes" (same NULL→None
+                # rationale as get_sla_stats above).  `(... or 0.0)`
+                # collapses both "no row at all" and "row exists but
+                # success_n=0" to a misleading "0.0ms".
+                lat_avg = (round(lat["lat_avg"], 2) if lat and lat["lat_avg"] is not None
+                           else None)
+                lat_max = (round(lat["lat_max"], 2) if lat and lat["lat_max"] is not None
+                           else None)
+                lat_p95 = (round(lat["lat_p95"], 2) if lat and lat["lat_p95"] is not None
+                           else None)
+
+                events = events_by_tid.get(tid, [])
+                status_at_start = status_at_start_by_tid.get(tid, "green")
+
+                outage_secs  = 0.0
+                outage_count = 0
+                fault_start = start_ts if status_at_start == "red" else None
+                if status_at_start == "red":
+                    outage_count = 1
+
+                for ev in events:
+                    ts_ev = ev["ts"]
+                    old_s = ev["old_status"]
+                    new_s = ev["new_status"]
+                    if new_s == "red" and fault_start is None:
+                        fault_start   = ts_ev
+                        outage_count += 1
+                    elif old_s == "red" and new_s != "red" and fault_start is not None:
+                        outage_secs += ts_ev - fault_start
+                        fault_start  = None
+
+                if fault_start is not None:
+                    case_b_end = min(end_ts, now)
+                    outage_secs += max(0.0, case_b_end - fault_start)
+
+                uptime_pct = round(
+                    max(0.0, (period_secs - outage_secs) / period_secs) * 100, 3)
+                result[tid] = {
+                    "uptime_pct":     uptime_pct,
+                    "lat_avg":        lat_avg,
+                    "lat_max":        lat_max,
+                    "lat_p95":        lat_p95,
+                    "outage_count":   outage_count,
+                    "outage_minutes": round(outage_secs / 60, 1),
+                    "sample_n":       total,
+                }
+            return result
+        except Exception as e:
+            print(f"[SLA-batch] {e}")
+            # Fall back to per-target loop so a query bug doesn't break the
+            # whole dashboard for everyone — only the batch path silently
+            # degrades to the legacy 50× round-trip path.
+            return {tid: self.get_sla_stats(tid, start_ts, end_ts)
+                    for tid in target_ids}
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_outage_intervals(self, target_id: str,
+                             start_ts: float, end_ts: float) -> dict:
+        """
+        Return merged red / orange intervals + raw transition events for a
+        target within [start_ts, end_ts].
+
+        Designed for the waveform-chart "alert overlay" feature: callers
+        get back ready-to-render segments (no client-side event walking)
+        plus the original transition list so the UI can also annotate
+        precise red→/→green moments on top of the segment bands.
+
+        Output:
+          {
+            "red":    [{"start": ts, "end": ts, "ongoing": bool}, ...],
+            "orange": [{"start": ts, "end": ts, "ongoing": bool}, ...],
+            "events": [{"ts": ts, "old": "x", "new": "y", "category": "z"}, ...]
+          }
+
+        Boundary handling (mirrors get_sla_stats Case A/B/C):
+          - Case A: outage active before start_ts → segment clamped to start
+          - Case B: outage active at end_ts      → segment clamped to
+                    min(end_ts, now()), marked ongoing=True
+          - Case C: status was red the entire span → one segment covering
+                    the whole window
+        red and orange are tracked independently; a node moving red→orange
+        ends the red segment and opens an orange one, etc.
+        """
+        try:
+            conn = self._read_conn()
+            conn.row_factory = sqlite3.Row
+
+            # Split into TWO bounded queries (same rationale as
+            # get_sla_stats): one row for the pre-window boundary
+            # state, then only the events that actually fall inside
+            # [start_ts, end_ts].  Note we cannot filter by red-touching
+            # here -- orange segments need full transition history too.
+            boundary = conn.execute(
+                "SELECT new_status FROM alert_events "
+                "WHERE target_id=? AND ts<? "
+                "ORDER BY ts DESC LIMIT 1",
+                (target_id, start_ts)).fetchone()
+            status_at_start = boundary["new_status"] if boundary else "green"
+
+            rows = conn.execute(
+                "SELECT ts, old_status, new_status, category "
+                "FROM alert_events "
+                "WHERE target_id=? AND ts>=? AND ts<=? "
+                "ORDER BY ts ASC",
+                (target_id, start_ts, end_ts)).fetchall()
+
+            now_ts = time.time()
+
+            red_segs:    list[dict] = []
+            orange_segs: list[dict] = []
+
+            # Initialise open segments based on pre-window status (Case A/C)
+            red_open    = start_ts if status_at_start == "red"    else None
+            orange_open = start_ts if status_at_start == "orange" else None
+
+            for r in rows:
+                ts_ev = r["ts"]
+                old_s = r["old_status"]
+                new_s = r["new_status"]
+
+                # Close any RED segment when leaving red
+                if old_s == "red" and new_s != "red" and red_open is not None:
+                    red_segs.append({"start": red_open,
+                                     "end":   ts_ev,
+                                     "ongoing": False})
+                    red_open = None
+
+                # Close any ORANGE segment when leaving orange
+                if (old_s == "orange" and new_s != "orange"
+                        and orange_open is not None):
+                    orange_segs.append({"start": orange_open,
+                                        "end":   ts_ev,
+                                        "ongoing": False})
+                    orange_open = None
+
+                # Open new segment when entering the corresponding state
+                if new_s == "red" and red_open is None:
+                    red_open = ts_ev
+                if new_s == "orange" and orange_open is None:
+                    orange_open = ts_ev
+
+            # Case B: clamp ongoing segments to min(end_ts, now)
+            # — same reasoning as get_sla_stats: avoids overstating an
+            #   outage when end_ts is a future end-of-day timestamp.
+            cap = min(end_ts, now_ts)
+            if red_open is not None:
+                red_segs.append({"start": red_open,
+                                 "end":   cap,
+                                 "ongoing": True})
+            if orange_open is not None:
+                orange_segs.append({"start": orange_open,
+                                    "end":   cap,
+                                    "ongoing": True})
+
+            # Raw transition events within the window — used by the UI to
+            # draw vertical ▼/▲ markers at precise transition points.
+            # We include both directions touching red OR orange so the
+            # markers are meaningful for both severity levels.
+            events = [{"ts": r["ts"],
+                       "old": r["old_status"],
+                       "new": r["new_status"],
+                       "category": r["category"]}
+                      for r in rows
+                      if start_ts <= r["ts"] <= end_ts
+                      and (r["new_status"] in ("red", "orange")
+                           or r["old_status"] in ("red", "orange"))]
+
+            return {"red": red_segs, "orange": orange_segs, "events": events}
+        except Exception as e:
+            print(f"[outage] {e}")
+            return {"red": [], "orange": [], "events": []}
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def record_traceroute(self, target_id: str, label: str,
+                          ip: str, ts: float, hops: list,
+                          route_changed: bool = False,
+                          captured_generation: Optional[int] = None) -> None:
+        """Queue an auto-traceroute result for async DB write.
+
+        captured_generation: optional snapshot of
+        current_target_generation(target_id) taken when the
+        traceroute task captured its target identity in
+        _TracerouteScheduler._run_one.  Travels with the queued
+        message so the writer thread can re-check right before the
+        INSERT -- if an IP edit / removal / history wipe lands
+        between the scheduler's cache commit and this INSERT, the
+        writer drops the row instead of repopulating traceroute_logs
+        with stale-identity data.  Same shape as record_diag_result.
+        """
+        import json
+        # Encode route_changed flag into the hops JSON metadata so we don't
+        # need a schema migration — the flag travels with the data.
+        payload = {"hops": hops, "route_changed": bool(route_changed)}
+        self._queue.put(("traceroute", ((
+            target_id, label, ip, ts,
+            json.dumps(payload, ensure_ascii=False),
+        ), captured_generation)))
+
+    def wipe_target_history(self, target_id: str) -> None:
+        """Erase every historical row belonging to ``target_id``.
+
+        Used by the "更换监控对象（清空历史）" path in MainWindow._on_edit,
+        when the operator explicitly indicates that an IP/probe-type change
+        means this slot is being repurposed for a different physical node
+        rather than tracking the same logical entity across a renumbering.
+
+        Without this, the new node's data would be silently appended to the
+        old node's time series under the same target_id, producing nonsense
+        SLA averages and a "Frankenstein timeline" in the waveform chart.
+
+        Queued (not synchronous): the actual DELETE runs on the write
+        thread, preserving serialisation with any concurrent record_ping /
+        record_alert / record_traceroute / record_diag_result still in
+        flight from probes that fired just before the wipe.  Tables
+        covered: pings_raw, pings_hourly, alert_events, traceroute_logs,
+        icmp_diagnostic_history, dns_diagnostic_history, cum_stats.
+        targets_meta is intentionally NOT touched -- it will be overwritten
+        by the next probe with the new (label, ip, ping_type), and clearing
+        it here would just race with that write.
+
+        Also pops target_id from in-memory _active_incidents on the same
+        thread that owns that dict, so a stale open-incident pointer can't
+        leak into the next red transition.
+        """
+        # Bump generation SYNCHRONOUSLY before queuing the wipe so any
+        # ICMP / DNS diag task whose persist call lands AFTER the
+        # wipe job runs sees a generation mismatch and skips the
+        # write -- otherwise the stale diag result would re-insert
+        # the very rows the wipe just deleted.  Mirrors what the
+        # web_server._TracerouteScheduler.bump_generation hook does
+        # for tracert.
+        self.bump_target_generation(target_id)
+        self._queue.put(("wipe_target", {"target_id": target_id}))
+
+    def get_traceroute_history(self, target_id: str,
+                               limit: int = 5) -> list:
+        """Return the last N auto-traceroute snapshots for a target."""
+        import json
+        conn = None
+        try:
+            conn = self._read_conn()
+            rows = conn.execute(
+                "SELECT ts, hops FROM traceroute_logs"
+                " WHERE target_id=? ORDER BY ts DESC LIMIT ?",
+                (target_id, limit)).fetchall()
+            results = []
+            for r in rows:
+                raw = json.loads(r[1]) if r[1] else {}
+                # Support both old format (plain list) and new format (dict with hops+flag)
+                if isinstance(raw, list):
+                    results.append({"ts": r[0], "hops": raw, "route_changed": False})
+                else:
+                    results.append({"ts": r[0],
+                                    "hops": raw.get("hops", []),
+                                    "route_changed": raw.get("route_changed", False)})
+            return results
+        except Exception:
+            return []
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def get_incident_traceroute(self, target_id: str, red_ts: float,
+                                window_before: int = 10,
+                                window_after: int = 180,
+                                incident_id: Optional[str] = None) -> Optional[dict]:
+        """Return the auto-traceroute snapshot captured for one incident.
+
+        Used by export_excel to attach forensic "where did the path break"
+        evidence to each fault incident, even after the link has recovered
+        and the live tracert would show a healthy path.
+
+        Correlation strategy (incremental — see HANDOFF design notes):
+          • Level 2 (preferred, exact): if `incident_id` is given AND the
+            traceroute_logs table carries an incident_id column, match on it
+            directly.  No time heuristic.
+          • Level 1 (fallback, time-window): match the earliest tracert whose
+            ts falls in [red_ts - window_before, red_ts + window_after].
+            The auto-tracert is request_now()'d the instant a node turns red
+            and runs within ~5s, so the first row after red_ts is it.
+            This fallback also covers historical rows written before the
+            incident_id column existed, and the rare brief-outage race where
+            the node recovered (incident popped) before the tracert INSERT.
+
+        `red_ts` MUST be the timestamp of the *first red transition* of the
+        incident — auto-tracert only fires on red, never on orange-only
+        performance warnings.
+
+        Returns a dict {ts, hops, route_changed} or None if no snapshot found.
+        """
+        import json
+        conn = None
+        try:
+            conn = self._read_conn()
+            row = None
+
+            # ── Level 2: exact incident_id match (only if column present) ──
+            if incident_id and self._traceroute_has_incident_col(conn):
+                row = conn.execute(
+                    "SELECT ts, hops FROM traceroute_logs "
+                    "WHERE target_id=? AND incident_id=? "
+                    "ORDER BY ts ASC LIMIT 1",
+                    (target_id, incident_id)).fetchone()
+
+            # ── Level 1: time-window fallback ──────────────────────────────
+            if row is None:
+                row = conn.execute(
+                    "SELECT ts, hops FROM traceroute_logs "
+                    "WHERE target_id=? AND ts BETWEEN ? AND ? "
+                    "ORDER BY ts ASC LIMIT 1",
+                    (target_id, red_ts - window_before,
+                     red_ts + window_after)).fetchone()
+
+            if row is None:
+                return None
+
+            raw = json.loads(row[1]) if row[1] else {}
+            if isinstance(raw, list):       # legacy plain-list format
+                hops = raw
+                route_changed = False
+            else:
+                hops = raw.get("hops", [])
+                route_changed = raw.get("route_changed", False)
+            return {"ts": row[0], "hops": hops, "route_changed": route_changed}
+        except Exception:
+            return None
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def _traceroute_has_incident_col(self, conn) -> bool:
+        """Whether traceroute_logs has the incident_id column (Level 2 schema).
+
+        Cached after first probe.  Returns False on the Level-1-only schema
+        so get_incident_traceroute degrades cleanly to time-window matching.
+        """
+        cached = getattr(self, "_tracert_incident_col", None)
+        if cached is not None:
+            return cached
+        try:
+            cols = {r[1] for r in
+                    conn.execute("PRAGMA table_info(traceroute_logs)").fetchall()}
+            has = "incident_id" in cols
+        except Exception:
+            has = False
+        self._tracert_incident_col = has
+        return has
+
+    @staticmethod
+    def summarize_break(hops: list) -> dict:
+        """Reduce a hop list to a human-readable break-point summary.
+
+        run_traceroute() classifies each hop's status as:
+          ok | filtered | break | after | timeout_raw
+        where 'break' is the first unreachable hop *after* the last reachable
+        ('ok') hop — i.e. the point the path stops getting through.
+
+        Returns a dict:
+          {
+            'reached'      : bool,        # path reached destination (no break)
+            'last_ok'      : {hop, ip} | None,   # last reachable hop
+            'break_at'     : {hop, ip} | None,   # first hop that broke
+            'total_hops'   : int,
+            'text'         : str,         # ready-to-render Chinese summary
+          }
+        """
+        hops = hops or []
+        total = len(hops)
+        last_ok = None
+        break_at = None
+        for h in hops:
+            st = h.get("status")
+            if st == "ok":
+                last_ok = {"hop": h.get("hop"), "ip": h.get("ip")}
+            elif st == "break" and break_at is None:
+                # Carry `error` through so the ICMP-unreachable reason text
+                # captured by the parser (e.g. "报告: 无法访问目标网络")
+                # can be surfaced in the break-point summary instead of the
+                # misleading "断点无响应".
+                break_at = {"hop": h.get("hop"), "ip": h.get("ip"),
+                            "error": h.get("error")}
+
+        # A traceroute that returned a single synthetic "break" hop with an
+        # error (subprocess failure / no output) — surface that distinctly.
+        if total == 1 and hops[0].get("status") == "break" \
+                and hops[0].get("error"):
+            return {"reached": False, "last_ok": None, "break_at": None,
+                    "total_hops": 0,
+                    "text": f"追踪失败：{hops[0].get('error')}"}
+
+        if break_at is None:
+            # No break recorded → path completed (reached target or only
+            # ICMP-filtered intermediate hops).
+            tail = f"，最后可达 第{last_ok['hop']}跳 {last_ok['ip']}" \
+                   if last_ok and last_ok.get("ip") else ""
+            return {"reached": True, "last_ok": last_ok, "break_at": None,
+                    "total_hops": total,
+                    "text": f"路径完整、未发现明确断点（共{total}跳）{tail}"}
+
+        last_part = (f"最后可达 第{last_ok['hop']}跳 {last_ok['ip']}"
+                     if last_ok and last_ok.get("ip")
+                     else "首跳即不可达")
+        bip  = break_at.get("ip")
+        berr = break_at.get("error")
+        if bip and berr:
+            # Router replied with ICMP unreachable — show both IP and reason.
+            break_part = f"第{break_at['hop']}跳起中断（断点 {bip}，{berr}）"
+        elif bip:
+            break_part = f"第{break_at['hop']}跳起中断（断点 {bip}）"
+        else:
+            break_part = f"第{break_at['hop']}跳起中断（断点无响应）"
+        return {"reached": False, "last_ok": last_ok, "break_at": break_at,
+                "total_hops": total,
+                "text": f"{last_part} → {break_part}（共{total}跳）"}
+
+    # ── ICMP diagnostic history (Phase 3) ─────────────────────────────
+
+    def record_diag_result(self,
+                           target_id: Optional[str],
+                           host: str,
+                           mode: str,
+                           payload_size: int,
+                           df: bool,
+                           count: int,
+                           success_count: int,
+                           loss_count: int,
+                           avg_rtt_ms: Optional[float],
+                           min_rtt_ms: Optional[float],
+                           max_rtt_ms: Optional[float],
+                           estimated_path_mtu: Optional[int],
+                           max_df_payload: Optional[int],
+                           error_summary: Optional[str],
+                           conclusion: str,
+                           details: Optional[dict],
+                           created_ts: Optional[float] = None,
+                           captured_generation: Optional[int] = None) -> None:
+        """Queue an ICMP diagnostic result for async insertion.
+
+        target_id may be None for ad-hoc diagnostics not tied to a monitored
+        node (future Phase: allow diagnosing arbitrary IPs).  details should
+        be a small JSON-serialisable dict containing per-probe samples; it
+        is stored as a TEXT blob and only inflated when the history detail
+        panel is opened, keeping the history-list query lightweight.
+
+        captured_generation: optional snapshot of
+        current_target_generation(target_id) taken when the diag task
+        STARTED.  Travels with the queued message so the writer
+        thread can re-check it RIGHT BEFORE the INSERT.  The producer-
+        side check below is just a fast path -- the queue is FIFO but
+        the check + put are NOT atomic, so a wipe_target_history that
+        runs between this generation read and the put() lands its
+        DELETE first and our stale INSERT second.  The writer-side
+        check is the authoritative guard.
+        """
+        if (captured_generation is not None and target_id is not None
+            and self.current_target_generation(target_id) != captured_generation):
+            return
+        import json
+        details_json = json.dumps(details, ensure_ascii=False, default=str) \
+            if details is not None else None
+        ts = created_ts if created_ts is not None else time.time()
+        self._queue.put(("diag", ((
+            target_id, host, mode, int(payload_size), 1 if df else 0,
+            int(count), int(success_count), int(loss_count),
+            avg_rtt_ms, min_rtt_ms, max_rtt_ms,
+            estimated_path_mtu, max_df_payload,
+            error_summary, conclusion, details_json, float(ts),
+        ), captured_generation)))
+
+    def get_diag_history(self, target_id: Optional[str] = None,
+                         host: Optional[str] = None,
+                         limit: int = 50) -> list[dict]:
+        """Return recent diagnostic runs, optionally filtered by target.
+
+        If target_id is given, returns rows matching that target; otherwise
+        if host is given, returns rows matching the raw host string (useful
+        for cross-node diagnoses of the same IP); otherwise returns the
+        global recent-history (all diagnoses, newest first).
+
+        Each row is a dict with all summary fields plus the parsed details
+        dict (so callers can show per-probe samples without a second query).
+        """
+        import json
+        clauses, args = [], []
+        if target_id:
+            clauses.append("target_id = ?")
+            args.append(target_id)
+        elif host:
+            clauses.append("host = ?")
+            args.append(host)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        args.append(int(limit))
+
+        try:
+            conn = self._read_conn()
+            rows = conn.execute(
+                f"SELECT id, target_id, host, mode, payload_size, df, count, "
+                f"       success_count, loss_count, avg_rtt_ms, min_rtt_ms, "
+                f"       max_rtt_ms, estimated_path_mtu, max_df_payload, "
+                f"       error_summary, conclusion, details_json, created_ts "
+                f"FROM icmp_diagnostic_history {where} "
+                f"ORDER BY created_ts DESC LIMIT ?",
+                args).fetchall()
+            results = []
+            for r in rows:
+                details = None
+                if r[16]:
+                    try: details = json.loads(r[16])
+                    except Exception: details = None
+                results.append({
+                    "id":                 r[0],
+                    "target_id":          r[1],
+                    "host":               r[2],
+                    "mode":               r[3],
+                    "payload_size":       r[4],
+                    "df":                 bool(r[5]),
+                    "count":              r[6],
+                    "success_count":      r[7],
+                    "loss_count":         r[8],
+                    "avg_rtt_ms":         r[9],
+                    "min_rtt_ms":         r[10],
+                    "max_rtt_ms":         r[11],
+                    "estimated_path_mtu": r[12],
+                    "max_df_payload":     r[13],
+                    "error_summary":      r[14],
+                    "conclusion":         r[15],
+                    "details":            details,
+                    "created_ts":         r[17],
+                })
+            return results
+        except Exception:
+            return []
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    # ── DNS diagnostic history (Phase 3A) ─────────────────────────────
+
+    def record_dns_diag_result(self,
+                               target_id: Optional[str],
+                               domain: str,
+                               qtype: str,
+                               trace_chain: bool,
+                               resolver: Optional[str],
+                               success: bool,
+                               rcode: Optional[str],
+                               elapsed_ms: Optional[float],
+                               answer_count: int,
+                               error_summary: Optional[str],
+                               message: Optional[str],
+                               details: Optional[dict],
+                               created_ts: Optional[float] = None,
+                               captured_generation: Optional[int] = None) -> None:
+        """Queue a DNS diagnostic result for async insertion.
+
+        Mirrors record_diag_result() but for the DNS diagnostic engine
+        (src.dns_diag).  target_id may be None for ad-hoc diagnoses not
+        tied to a monitored node.  details should be a small
+        JSON-serialisable dict produced by dns_result_to_dict() —
+        stored as a TEXT blob and only inflated when the history detail
+        panel is opened, so the list query stays cheap.
+
+        Cancelled runs (rcode == ERROR_CANCELLED) MUST NOT reach this
+        method — the caller (dns_diag._persist_dns_result) gates that.
+
+        captured_generation: see record_diag_result.  Travels with
+        the queued message so the writer thread can re-check it
+        right before the INSERT -- the producer-side check below is
+        a fast path; the writer-side check is what closes the
+        check-vs-put race.
+        """
+        if (captured_generation is not None and target_id is not None
+            and self.current_target_generation(target_id) != captured_generation):
+            return
+        import json
+        details_json = json.dumps(details, ensure_ascii=False, default=str) \
+            if details is not None else None
+        ts = created_ts if created_ts is not None else time.time()
+        self._queue.put(("dns_diag", ((
+            target_id, domain, qtype, 1 if trace_chain else 0,
+            resolver, 1 if success else 0, rcode,
+            elapsed_ms, int(answer_count),
+            error_summary, message, details_json, float(ts),
+        ), captured_generation)))
+
+    def get_dns_diag_history(self, target_id: Optional[str] = None,
+                             domain: Optional[str] = None,
+                             limit: int = 50) -> list[dict]:
+        """Return recent DNS diagnostic runs, optionally filtered.
+
+        Filter precedence (matches get_diag_history):
+          target_id, then domain, then unfiltered (global recent).
+
+        Each row dict includes both summary columns and the parsed
+        details dict (cname_chain / answers / trace_steps as produced
+        by dns_result_to_dict()), so callers can render a replay
+        without a second query.
+        """
+        import json
+        clauses, args = [], []
+        if target_id:
+            clauses.append("target_id = ?")
+            args.append(target_id)
+        elif domain:
+            clauses.append("domain = ?")
+            args.append(domain)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        args.append(int(limit))
+
+        try:
+            conn = self._read_conn()
+            rows = conn.execute(
+                f"SELECT id, target_id, domain, qtype, trace_chain, "
+                f"       resolver, success, rcode, elapsed_ms, "
+                f"       answer_count, error_summary, message, "
+                f"       details_json, created_ts "
+                f"FROM dns_diagnostic_history {where} "
+                f"ORDER BY created_ts DESC LIMIT ?",
+                args).fetchall()
+            results = []
+            for r in rows:
+                details = None
+                if r[12]:
+                    try: details = json.loads(r[12])
+                    except Exception: details = None
+                results.append({
+                    "id":            r[0],
+                    "target_id":     r[1],
+                    "domain":        r[2],
+                    "qtype":         r[3],
+                    "trace_chain":   bool(r[4]),
+                    "resolver":      r[5],
+                    "success":       bool(r[6]),
+                    "rcode":         r[7],
+                    "elapsed_ms":    r[8],
+                    "answer_count":  r[9],
+                    "error_summary": r[10],
+                    "message":       r[11],
+                    "details":       details,
+                    "created_ts":    r[13],
+                })
+            return results
+        except Exception:
+            return []
+        # _read_conn() returns a thread-local cached connection — do NOT close.
+
+    def _cleanup(self, conn):
+        """删除超出保留期的数据。"""
+        now = int(time.time())
+        with conn:
+            conn.execute("DELETE FROM pings_raw WHERE ts<?",
+                         (now - self._raw_retention_days * 86400,))
+            conn.execute("DELETE FROM pings_hourly WHERE hour_ts<?",
+                         (now - self._hourly_retention_days * 86400,))
+            conn.execute("DELETE FROM alert_events WHERE ts<?",
+                         (now - self._alert_retention_days * 86400,))
+            conn.execute("DELETE FROM traceroute_logs WHERE ts<?",
+                         (now - self._traceroute_retention_days * 86400,))
+            conn.execute("DELETE FROM icmp_diagnostic_history WHERE created_ts<?",
+                         (now - self._diag_retention_days * 86400,))
+            conn.execute("DELETE FROM dns_diagnostic_history WHERE created_ts<?",
+                         (now - self._diag_retention_days * 86400,))
+
+    def _read_conn(self) -> sqlite3.Connection:
+        """
+        Return this thread's cached read-only SQLite connection, opening one
+        on first use.  WAL mode is configured once at open time so subsequent
+        get_*() calls go straight to queries with no PRAGMA overhead.
+
+        IMPORTANT: callers MUST NOT call conn.close() on the returned
+        connection.  Closing it would evict the cached instance but other
+        already-running code paths on the same thread may still hold a
+        reference and try to use it, raising sqlite3.ProgrammingError.
+        The connection's lifetime is tied to the thread; daemon worker
+        threads get cleaned up automatically at process exit, and SQLite's
+        own finalisation closes the underlying file handle there.
+
+        Side-effect cleanup: callers that set conn.row_factory (e.g. for
+        sqlite3.Row access) DO need to be aware the setting persists to
+        the next caller on the same thread.  This is acceptable today
+        because the only caller setting row_factory (get_sla_stats) sets
+        it to sqlite3.Row, which is harmless if inherited by tuple-index
+        callers (Row supports both numeric and name indexing).
+        """
+        conn = getattr(self._tls, "conn", None)
+        if conn is not None:
+            return conn
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro", uri=True,
+                check_same_thread=False)
+        except Exception:
+            # DB 文件可能还不存在（刚启动时 schema 还没建），回退到普通连接
+            conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        # WAL is set once per connection's lifetime; subsequent set on the
+        # same conn is a no-op but pointless overhead.
+        conn.execute("PRAGMA journal_mode=WAL")
+        self._tls.conn = conn
+        return conn
+
+    def release_read_conn(self) -> None:
+        """Close this thread's cached read connection (Flask teardown hook)."""
+        conn = getattr(self._tls, "conn", None)
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            del self._tls.conn
+        except AttributeError:
+            pass

@@ -1,0 +1,16 @@
+customtkinter>=5.2.0
+matplotlib>=3.7.0
+flask>=3.0.0
+werkzeug>=3.0.0
+pystray>=0.19.0
+Pillow>=9.0.0
+openpyxl>=3.1.0
+dnspython>=2.4.0
+# Phase 3C-5: required by dns.dnssec.validate for ECDSA / Ed25519 /
+# RSASHA256 verification. dnspython delegates the actual public-key
+# cryptography to python-cryptography for any algorithm beyond the
+# legacy RSA/SHA1 fallback. Without this the DNSSEC validator would
+# silently raise UnsupportedAlgorithm for ~all modern signed zones.
+# (Pure-ASCII comments here on purpose -- old pip on Windows tries to
+# decode requirements.txt as GBK and chokes on any non-ASCII byte.)
+cryptography>=41.0

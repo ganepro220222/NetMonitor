@@ -1,0 +1,242 @@
+From 93dca1b987951b62f8c8bdb8871d19321ee09a0d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 1 Jun 2026 07:15:23 +0000
+Subject: [PATCH] fix(P0): gray seed never closes red outages; (P1)
+ /api/history raw mode unbounded
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+P0 (lost SLA transition after edit):
+  The previous round's `_lst[target_id] = "gray"` seed avoided the
+  pop-then-no-transition regression but introduced its own SLA bug.
+  get_sla_stats closes an outage when:
+    `old_status == "red" and new_status != "red"`
+  A `gray -> green` event has old_status == "gray", so the query's
+  outage-close clause never fires; a target that recovered right
+  after a TCP-port / HTTP-URL / DNS-domain edit kept its prior outage
+  open forever, and `outage_minutes` kept climbing.  Same shape for
+  the IP/type-change keep-history branch.
+
+  Reseed _last_statuses[target_id] from the LAST PERSISTED ping
+  status instead.  New DataStore.get_last_persisted_status(tid)
+  queries pings_raw (the source of truth -- alert_events only
+  records transitions and would miss a never-transitioned target).
+  After an edit:
+    pre-edit green, post-edit red  -> writes (green, red)  ✓
+    pre-edit red,   post-edit green -> writes (red,   green) ✓
+  Both close / open SLA outages cleanly via the existing
+  get_sla_stats clause.  Wipe paths still pop (operator explicitly
+  asked to discard prior history).
+
+  Residual race: a stale callback whose record_ping + record_alert
+  were flushed to DB BEFORE invalidate_target_settings ran can still
+  poison the seed.  The commit_lock + writer-side
+  captured_generation guard makes that window vanishingly narrow;
+  the 99.9% case is fully fixed and the worst-case behaviour is no
+  worse than the prior round.
+
+P1 (/api/history?type=raw unbounded JSON):
+  /api/history accepted arbitrary time ranges with type=raw, calling
+  get_history with no LIMIT.  A 1Hz target on 7d raw retention can
+  produce ~600k rows = ~70 MB of JSON for a single request; the
+  Flask worker thread serialises that synchronously, blocking every
+  other request and risking OOM under concurrent load.  Reachable
+  via the dashboard's public-by-default port.
+
+  Two caps:
+    * Span cap: when type=raw and end-start > 24h (mirrors
+      /api/waveform's auto-downsample threshold), force type=hourly.
+      Anything longer must be paginated.
+    * Row cap: even within the 24h raw window, slice the response to
+      the most-recent 50000 rows.  Defence in depth against
+      sub-second probe rates.
+---
+ src/data_store.py     | 32 +++++++++++++++++
+ src/ui/main_window.py | 80 +++++++++++++++++++++++++------------------
+ src/web_server.py     | 21 ++++++++++++
+ 3 files changed, 99 insertions(+), 34 deletions(-)
+
+diff --git a/src/data_store.py b/src/data_store.py
+index 1717df3..6d7cc3a 100644
+--- a/src/data_store.py
++++ b/src/data_store.py
+@@ -404,6 +404,38 @@ class DataStore:
+             return {}
+         # _read_conn() returns a thread-local cached connection — do NOT close.
+ 
++    def get_last_persisted_status(self, target_id: str) -> Optional[str]:
++        """Return the most recently persisted ping status for one target,
++        or None if no ping rows exist.
++
++        Used by MainWindow._on_edit to reseed _last_statuses across a
++        config edit, so the FIRST probe under the new config can
++        write a proper transition event (e.g. red->green to close a
++        prior outage, or green->red to open a new one).
++
++        Why pings_raw rather than alert_events:
++          alert_events only records TRANSITIONS, not steady state.
++          A target that has been green since startup with no transition
++          would return None from get_last_known_statuses, and the
++          edit's reseed would have nothing to anchor against -- the
++          first post-edit transition would still be lost.
++          pings_raw, in contrast, is the source of truth for "what
++          was the status of the very last probe accepted by the
++          DataStore writer thread".  That value is the only baseline
++          that lets the next probe synthesise an SLA-correct
++          transition.
++        """
++        conn = self._read_conn()
++        try:
++            row = conn.execute(
++                "SELECT status FROM pings_raw WHERE target_id = ? "
++                "ORDER BY ts DESC LIMIT 1",
++                (target_id,)).fetchone()
++            return row[0] if row is not None else None
++        except Exception:
++            return None
++        # _read_conn() returns a thread-local cached connection — do NOT close.
++
+     def get_targets_meta(self) -> dict:
+         """返回 {target_id: {label, ip, ping_type}}"""
+         conn = self._read_conn()
+diff --git a/src/ui/main_window.py b/src/ui/main_window.py
+index 4332f9f..98dbbdf 100644
+--- a/src/ui/main_window.py
++++ b/src/ui/main_window.py
+@@ -1762,34 +1762,37 @@ class MainWindow(ctk.CTk):
+             new_view = {k: combined.get(k, _MISSING) for k in _SEM}
+             if old_view != new_view:
+                 self.engine.invalidate_target_settings(target_id)
+-                # Reset _last_statuses to "gray" (NOT pop) so the
+-                # next probe under the new config has a defined
+-                # transition baseline.  The previous round popped
+-                # _last_statuses outright -- which prevented the
+-                # stale-callback phantom transition, but ALSO
+-                # silently swallowed the FIRST real transition
+-                # after the edit (old_st was None so the if-old_st
+-                # guard in _on_state_update skipped record_alert
+-                # entirely): a green target that broke right after
+-                # a port change never recorded its outage start, a
+-                # red target that recovered right after a port
+-                # change never closed its outage.
++                # Reseed _last_statuses from the LAST PERSISTED ping
++                # status, NOT from an in-memory constant.  The previous
++                # round set it to "gray", but `gray -> green` is not
++                # recognised by get_sla_stats's outage-close clause
++                # (which requires `old_status == "red"` to close), so
++                # a target that recovered right after a port edit
++                # left its outage open forever.  Reading the latest
++                # actually-persisted status keeps SLA continuity: a
++                # pre-edit red baseline produces `red -> green` /
++                # `red -> red`; a pre-edit green baseline produces
++                # `green -> red` / `green -> green`.  Both close /
++                # open outages correctly.
+                 #
+-                # Setting "gray" lets the next probe write a real
+-                # transition (gray -> red opens an outage, gray ->
+-                # green closes any still-open incident via
+-                # _assign_incident_ids' "ns == green pops
+-                # _active_incidents" branch) without inheriting the
+-                # OLD identity's status as a baseline.  A stale
+-                # callback racing the edit either lost the
+-                # commit_lock race and its in-lock recheck rejected
+-                # it, or it won the race and committed under the
+-                # OLD generation; in the latter case
+-                # invalidate_target_settings runs right after and
+-                # this gray reset overrides anything the callback
+-                # wrote.
++                # Falls back to leaving the in-memory value untouched
++                # when the DataStore isn't wired or has no persisted
++                # ping yet -- a never-probed target has no SLA
++                # baseline to preserve.  Residual race: a stale
++                # callback whose record_ping + record_alert flushed
++                # to DB BEFORE invalidate_target_settings ran can
++                # still poison the seed, but the commit_lock makes
++                # that window vanishingly narrow and the writer-side
++                # captured_generation guard catches the common case.
+                 _lst = self.__dict__.get("_last_statuses", {})
+-                _lst[target_id] = "gray"
++                _ds  = self.__dict__.get("data_store")
++                if _ds is not None and hasattr(_ds, "get_last_persisted_status"):
++                    try:
++                        last = _ds.get_last_persisted_status(target_id)
++                        if last is not None:
++                            _lst[target_id] = last
++                    except Exception:
++                        pass
+ 
+         if ip_changed or type_changed:
+             # Invalidate any in-flight probe issued against the OLD ip
+@@ -1856,17 +1859,26 @@ class MainWindow(ctk.CTk):
+             self.alerter.on_target_removed(target_id)   # clear alert/sound state
+             # _last_statuses: pop on "wipe" (operator chose to wipe
+             # history, so prior status has no meaning for the new
+-            # target); set "gray" on "keep history" so the first
+-            # probe under the new identity produces a real
+-            # transition event -- otherwise a green->red right after
+-            # an IP edit silently lost its outage-start event, and
+-            # a red->green right after an IP edit left the prior
+-            # outage open forever.  Same rationale as the
+-            # semantic-edit branch above.
++            # target); on "keep history" reseed from the DB-side
++            # last persisted status so the first probe under the
++            # new identity produces a proper transition event.  An
++            # earlier round used a constant "gray" seed; that
++            # neither closed prior red outages (get_sla_stats's
++            # outage-close clause requires `old_status == "red"`)
++            # nor opened new ones cleanly, so SLA continuity was
++            # broken on every IP / type edit that kept history.
+             if wipe_intent:
+                 self._last_statuses.pop(target_id, None)
+             else:
+-                self._last_statuses[target_id] = "gray"
++                _ds_seed = self.__dict__.get("data_store")
++                if _ds_seed is not None \
++                   and hasattr(_ds_seed, "get_last_persisted_status"):
++                    try:
++                        last = _ds_seed.get_last_persisted_status(target_id)
++                        if last is not None:
++                            self._last_statuses[target_id] = last
++                    except Exception:
++                        pass
+             old = self._current_statuses.pop(target_id, "gray")
+             self._status_counts[old] = max(0, self._status_counts.get(old, 0) - 1)
+             self._status_counts["gray"] = self._status_counts.get("gray", 0) + 1
+diff --git a/src/web_server.py b/src/web_server.py
+index d58758d..9d320be 100644
+--- a/src/web_server.py
++++ b/src/web_server.py
+@@ -6910,8 +6910,29 @@ class WebServer:
+             start = _qnum("start", int(time.time()) - 86400)
+             end   = _qnum("end",   int(time.time()))
+             dtype = request.args.get("type", "raw")
++            # Auto-downsample for over-long raw windows.  A 1Hz target
++            # with 7d raw retention can produce ~600k rows = ~70 MB of
++            # JSON for a single request; serialising that on the Flask
++            # worker thread blocks every other request and can OOM the
++            # process under concurrent load.  Anything wider than 24h
++            # is forced to the hourly aggregate (same threshold
++            # /api/waveform already uses for its 1m -> 1h switch).
++            # Callers that want truly fine-grained data over a long
++            # window must paginate by issuing multiple narrower
++            # requests.
++            _RAW_SPAN_CAP = 86400   # 24 h
++            if dtype == "raw" and (end - start) > _RAW_SPAN_CAP:
++                dtype = "hourly"
+             rows  = self._data_store.get_history(
+                         tid, start, end, use_hourly=(dtype == "hourly"))
++            # Defence in depth: even within the 24h raw window a
++            # corrupt request with sub-second probes could blow past
++            # a reasonable response size.  Slice to the most-recent
++            # 50k rows (the time series's tail is what the dashboard
++            # actually plots).
++            _ROW_CAP = 50000
++            if len(rows) > _ROW_CAP:
++                rows = rows[-_ROW_CAP:]
+             return json.dumps(rows), 200, {"Content-Type":"application/json"}
+ 
+         @app.route("/api/export/sla")
+-- 
+2.43.0
+
