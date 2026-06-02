@@ -450,10 +450,10 @@ class AddTargetDialog(_BaseDialog):
         if iv_str:
             try:
                 iv = float(iv_str)
-                if iv <= 0: raise ValueError
+                if iv < 0.5: raise ValueError
                 thresholds["ping_interval"] = iv
             except ValueError:
-                self._error("Ping 间隔必须是正数（如 1 或 30）"); return
+                self._error("Ping 间隔不能低于 0.5 秒（与全局设置一致）"); return
 
         self.result = {"label": label, "ip": ip,
                        "thresholds": thresholds or None, **type_result}
@@ -606,11 +606,11 @@ class EditTargetDialog(_BaseDialog):
         if iv_str:
             try:
                 iv = float(iv_str)
-                if iv <= 0:
+                if iv < 0.5:
                     raise ValueError
                 thresholds["ping_interval"] = iv
             except ValueError:
-                self._error("Ping 间隔必须是正数（如 1 或 30）")
+                self._error("Ping 间隔不能低于 0.5 秒（与全局设置一致）")
                 return
 
         self.result = {

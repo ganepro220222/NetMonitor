@@ -78,7 +78,7 @@ class MainWindow(ctk.CTk):
         self.engine     = ping_engine
         self.alerter    = alert_manager
         self.logger     = logger
-        self.history    = HistoryStore(maxlen_per_target=300)
+        self.history    = HistoryStore()
         self.web_server     = web_server
         # Store via object.__setattr__ to bypass tkinter __setattr__ proxy
         object.__setattr__(self, "data_store",    data_store)

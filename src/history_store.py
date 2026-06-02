@@ -50,8 +50,11 @@ class TargetHistory:
     """
 
     WINDOW_SECONDS: int = 300   # 所有图表统一显示最近 N 秒
+    # At global min ping_interval (0.5s) a full window needs ~600 samples;
+    # 1000 leaves headroom for per-target overrides down to 0.5s.
+    DEFAULT_MAXLEN: int = 1000
 
-    def __init__(self, maxlen: int = 1000):
+    def __init__(self, maxlen: int = DEFAULT_MAXLEN):
         # maxlen 是内存安全上限，与显示窗口无关
         self._buffer: deque[DataPoint] = deque(maxlen=maxlen)
 
@@ -102,7 +105,7 @@ class HistoryStore:
     主窗口持有这个实例，在每次 Ping 回调时调用 update()。
     """
 
-    def __init__(self, maxlen_per_target: int = 300):
+    def __init__(self, maxlen_per_target: int = TargetHistory.DEFAULT_MAXLEN):
         self._maxlen = maxlen_per_target
         self._histories: dict[str, TargetHistory] = {}
 
