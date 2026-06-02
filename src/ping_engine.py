@@ -1339,10 +1339,15 @@ class HTTPMonitor(TargetMonitor):
             body = None
             body_framing_complete = True
             is_chunked = "chunked" in (transfer_encoding or "")
+            # RFC 9112: 204/304 end at the header block — no body to wait for
+            # even when the connection stays open (keep-alive).
+            no_message_body = status_code in (204, 304)
             if method == "GET" and body_limit > 0:
                 body = body_start
                 try:
-                    if is_chunked:
+                    if no_message_body:
+                        body = body_start[:body_limit]
+                    elif is_chunked:
                         body, chunk_err = HTTPMonitor._read_chunked_body(
                             sock, body, body_limit, deadline)
                         if chunk_err:
