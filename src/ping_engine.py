@@ -657,7 +657,9 @@ class TargetMonitor:
                 self._consecutive_high_lat = 0
         else:
             self._consecutive_loss += 1
-            # _consecutive_high_lat untouched — a hard failure isn't "low latency"
+            # Probe failure has no latency sample — it must not bridge two
+            # high-latency streaks (see consecutive_lat_orange semantics).
+            self._consecutive_high_lat = 0
 
         # Remember extended attributes for UI persistence
         if latest.status_code is not None:    self._last_status_code   = latest.status_code
