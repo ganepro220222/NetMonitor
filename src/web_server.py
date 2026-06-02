@@ -5625,14 +5625,6 @@ class WebServer:
         self._sound_dir    = sound_dir  # writable WAV dir (DATA_DIR/assets)
         self._running      = False
         self._server       = None       # werkzeug BaseWSGIServer; set in _run()
-        # Used by start() / restart() to wait for the background _run()
-        # thread to ACTUALLY bind (or fail to bind) the listening port
-        # before reporting success.  Without this handshake, start()
-        # returns True the instant the thread is launched -- the caller
-        # then advertises the Web URL on the UI even if the port was
-        # already in use and the bind threw EADDRINUSE inside _run.
-        self._bind_done    = threading.Event()
-        self._bind_ok      = False
         self._targets: dict[str, dict] = {}
         self._stats: dict[str, dict] = {}   # see comment below
         self._history: list[dict] = []
@@ -5712,30 +5704,31 @@ class WebServer:
             self._setup_routes()
             logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
+    def _launch_server_thread(self):
+        """Start a _run() thread with a per-generation bind handshake."""
+        bind_done = threading.Event()
+        bind_ok = [False]
+        threading.Thread(target=self._run, args=(bind_done, bind_ok),
+                         daemon=True, name="web-server").start()
+        return bind_done, bind_ok
+
+    def _await_bind(self, bind_done: threading.Event, bind_ok: list) -> bool:
+        """Wait until the matching _run() thread binds or definitively fails."""
+        if not bind_done.wait(timeout=3.0):
+            self._running = False
+            return False
+        if not bind_ok[0]:
+            self._running = False
+            return False
+        return True
+
     def start(self) -> bool:
         if not FLASK_AVAILABLE: return False
         if self._running: return True
-        # Reset the bind-done handshake before launching the thread so
-        # repeated start() calls (e.g. after a prior failure) don't see
-        # a stale "yes I bound!" event from a previous attempt.
-        self._bind_done.clear()
-        self._bind_ok = False
         self._running = True
         _add_firewall_rule(self.port)
-        threading.Thread(target=self._run, daemon=True, name="web-server").start()
-        # Wait for the background thread to actually bind the port (or
-        # fail to).  make_server() either returns immediately (success)
-        # or raises (port-in-use / permission denied), so 3 s is far
-        # more than enough on any reasonable machine.  The previous
-        # "return True" returned BEFORE the bind, so the caller's UI
-        # advertised the URL even on EADDRINUSE -- browser then refused
-        # the connection while the user saw "started successfully".
-        if not self._bind_done.wait(timeout=3.0):
-            # Timed out waiting -- treat as failure and force the flag
-            # back so a follow-up start()/restart() can try again.
-            self._running = False
-            return False
-        return self._bind_ok
+        bind_done, bind_ok = self._launch_server_thread()
+        return self._await_bind(bind_done, bind_ok)
 
     def stop(self):
         """Signal the web server to stop. Returns immediately; shutdown is async."""
@@ -5775,30 +5768,9 @@ class WebServer:
             while self._server is not None and _t.time() < deadline:
                 _t.sleep(0.1)
         _add_firewall_rule(self.port)
-        # Reset the bind-done handshake before relaunching (see start()
-        # for the rationale).
-        self._bind_done.clear()
-        self._bind_ok = False
         self._running = True
-        threading.Thread(target=self._run, daemon=True,
-                         name="web-server").start()
-        # Synchronously wait for the new bind result, same as start().
-        # The previous fire-and-forget contract advertised the new URL
-        # on the UI even when the port was already in use, leaving the
-        # operator clicking a non-functional link with no error feedback.
-        if not self._bind_done.wait(timeout=3.0):
-            self._running = False
-            return False
-        if not self._bind_ok:
-            # _run's finally only clears self._running when its srv
-            # local matches self._server -- on a make_server() raise,
-            # srv was never assigned and the identity check can go
-            # either way depending on whether the OLD server's
-            # finally has caught up.  Force the state explicitly so
-            # is_running() can't lie to the caller.
-            self._running = False
-            return False
-        return True
+        bind_done, bind_ok = self._launch_server_thread()
+        return self._await_bind(bind_done, bind_ok)
 
     def set_data_store(self, ds):
         """Attach a DataStore. Called from main() after both are created."""
@@ -6281,9 +6253,13 @@ class WebServer:
     @property
     def is_running(self) -> bool: return self._running
 
-    def _run(self):
+    def _run(self, bind_done: threading.Event, bind_ok: list):
         """
         Flask server thread.
+
+        bind_done / bind_ok belong to THIS generation only so an old
+        thread exiting cannot wake restart() while the new port is
+        still binding.
 
         Diagnostics:  writes  web_server.log  next to the exe (frozen) or
         project root (dev) **before** app.run() so we know if the issue is
@@ -6354,8 +6330,8 @@ class WebServer:
             # report success.  serve_forever() blocks indefinitely so the
             # signal MUST happen before it; otherwise start() times out
             # even on a perfectly healthy launch.
-            self._bind_ok = True
-            self._bind_done.set()
+            bind_ok[0] = True
+            bind_done.set()
             srv.serve_forever()   # blocks until srv.shutdown() is called
             _write("server stopped cleanly")
         except Exception:
@@ -6377,11 +6353,9 @@ class WebServer:
             if self._server is srv_local:
                 self._running = False
                 self._server  = None
-            # Wake any start() still blocked on bind_done so failure paths
-            # (port-in-use, permission denied, import error, …) don't make
-            # the caller wait the full 3 s timeout for a result it could
-            # already know is False.
-            self._bind_done.set()
+            # Wake the matching start()/restart() waiter on failure paths
+            # (port-in-use, permission denied, import error, …).
+            bind_done.set()
 
     def _setup_routes(self):
         app = self._app
