@@ -660,6 +660,10 @@ class TargetMonitor:
             # Probe failure has no latency sample — it must not bridge two
             # high-latency streaks (see consecutive_lat_orange semantics).
             self._consecutive_high_lat = 0
+            # Recovery requires consecutive successes (recovery_count); a
+            # failed probe must restart the debounce window.
+            self._recovery_counter = 0
+            self._pending_natural  = None
 
         # Remember extended attributes for UI persistence
         if latest.status_code is not None:    self._last_status_code   = latest.status_code
@@ -714,28 +718,22 @@ class TargetMonitor:
             self._recovery_counter = 0
             self._pending_natural  = None
         elif nat_sev < cur_sev:
-            # De-escalation: must see `recovery_need` consecutive
-            # observations AT THE SAME lower-severity natural state before
-            # status updates.  If the natural flips during the recovery
-            # window (e.g. green → orange → green while cur=red), reset
-            # the counter -- a flapping link is not "stably recovered" no
-            # matter how many low-severity ticks accumulate.
-            #
-            # Note this means a red → orange → green walk takes 2×
-            # recovery_need ticks in total -- intentional, since each
-            # demotion deserves its own confirmation window.  A direct
-            # red → green natural skips the orange stop and only needs
-            # one recovery_need cycle.
-            if self._pending_natural != natural:
-                self._pending_natural  = natural
-                self._recovery_counter = 1
-            else:
-                self._recovery_counter += 1
-            if self._recovery_counter >= recovery_need:
-                self._status          = natural
-                self._last_category   = category
-                self._recovery_counter = 0
-                self._pending_natural  = None
+            # De-escalation: `recovery_count` means consecutive successful
+            # probes, not merely consecutive "green natural" ticks — a
+            # single loss can leave natural=green while cur is still red.
+            if latest.success:
+                # Must see `recovery_need` consecutive successes at the
+                # same lower-severity natural state before status updates.
+                if self._pending_natural != natural:
+                    self._pending_natural  = natural
+                    self._recovery_counter = 1
+                else:
+                    self._recovery_counter += 1
+                if self._recovery_counter >= recovery_need:
+                    self._status          = natural
+                    self._last_category   = category
+                    self._recovery_counter = 0
+                    self._pending_natural  = None
         else:
             # Same severity: keep _status as-is.  Update category so a
             # swap between e.g. orange/performance ↔ orange/availability
