@@ -1465,6 +1465,10 @@ class DataStore:
                         last_flush = now
 
                     if now - last_hourly >= self.HOURLY_AGG_INTERVAL:
+                        if ping_buf or alert_buf:
+                            if self._flush(conn, ping_buf, alert_buf):
+                                ping_buf.clear(); alert_buf.clear()
+                                last_flush = now
                         self._hourly_agg(conn)
                         last_hourly = now
 
@@ -1485,6 +1489,10 @@ class DataStore:
                         # making it unconditional before every cleanup
                         # closes the gap without complicating the
                         # periodic-aggregation logic.
+                        if ping_buf or alert_buf:
+                            if self._flush(conn, ping_buf, alert_buf):
+                                ping_buf.clear(); alert_buf.clear()
+                                last_flush = now
                         self._hourly_agg(conn)
                         last_hourly = now
                         self._cleanup(conn)
@@ -2064,13 +2072,17 @@ class DataStore:
         permanent hole in pings_hourly that no future agg could fill.
         Now: per target, find the highest hour already aggregated and
         catch up every full hour from there to (but not including) the
-        current still-in-progress hour.
+        current still-in-progress hour.  The last two *completed* hours
+        are always recomputed (INSERT OR REPLACE) so pings that flush
+        into pings_raw after an hour bucket was first written are still
+        folded into pings_hourly.
 
         Idempotent: re-running this on a fully caught-up DB is cheap
         (one MAX(hour_ts) lookup per target, while loop runs 0 times).
         """
         now          = int(time.time())
         current_hour = (now // 3600) * 3600   # exclude the in-progress hour
+        recompute_floor = current_hour - 7200  # last two complete hours
 
         # Targets are sourced from pings_raw (not targets_meta) so that
         # a target removed in the last few days still gets its trailing
@@ -2108,6 +2120,9 @@ class DataStore:
                         continue
                     hour_start = (first[0] // 3600) * 3600
 
+                # Re-aggregate recent complete hours to absorb late flushes.
+                hour_start = min(hour_start, recompute_floor)
+
                 while hour_start < current_hour:
                     hour_end = hour_start + 3600
                     rows = conn.execute(
@@ -2139,12 +2154,8 @@ class DataStore:
                                      if lats else None)
                         loss_rate = 1 - success_n / sample_n
 
-                        # INSERT OR IGNORE keeps this safe under a race
-                        # where two writers somehow processed the same
-                        # (target, hour) -- the unique index on
-                        # (target_id, hour_ts) decides the winner.
                         conn.execute(
-                            "INSERT OR IGNORE INTO pings_hourly "
+                            "INSERT OR REPLACE INTO pings_hourly "
                             "(target_id,hour_ts,sample_n,success_n,"
                             " lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
                             "VALUES(?,?,?,?,?,?,?,?,?)",

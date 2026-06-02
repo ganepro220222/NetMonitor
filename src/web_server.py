@@ -44,6 +44,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from src.diag_sem import DIAG_TASK_SEM
+
 try:
     from flask import Flask, Response, request
     FLASK_AVAILABLE = True
@@ -6533,8 +6535,17 @@ class WebServer:
                 is_win   = platform.system().lower() == "windows"
                 max_hops = str(self._scheduler.max_hops)
                 proc     = None
-                # Acquire semaphore — reject immediately if 3 are already running
+                diag_sem_held = False
+                if not DIAG_TASK_SEM.acquire(blocking=False):
+                    yield (b"data: " +
+                           json.dumps({"type": "error",
+                                       "message": "当前有诊断任务正在进行，请稍后再试"})
+                           .encode() + b"\n\n")
+                    return
+                diag_sem_held = True
                 if not self._quick_trace_sem.acquire(blocking=False):
+                    DIAG_TASK_SEM.release()
+                    diag_sem_held = False
                     yield (b"data: " +
                            json.dumps({"type": "error",
                                        "message": "当前快速追踪任务过多（最多3个并发），请稍后再试"})
@@ -6606,6 +6617,8 @@ class WebServer:
                         pass
                 finally:
                     self._quick_trace_sem.release()
+                    if diag_sem_held:
+                        DIAG_TASK_SEM.release()
                     if proc and proc.poll() is None:
                         try: proc.kill()
                         except Exception: pass

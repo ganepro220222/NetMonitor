@@ -958,6 +958,40 @@ class HTTPMonitor(TargetMonitor):
                                       failure_reason=f"status_{single.status_code}",
                                       timings=timings, cert_days_left=cert_days)
 
+                # Content-Length framing: truncated body must not pass
+                # absent-keyword checks; contains may succeed if the
+                # keyword is already in the bytes we received.
+                cl = getattr(single, "_content_length", None)
+                framing_ok = getattr(single, "_body_framing_complete", True)
+                if (m == "GET" and single._body is not None
+                        and cl is not None and not framing_ok):
+                    required = min(cl, body_limit)
+                    if len(single._body) < required:
+                        if keyword:
+                            if kw_mode == "contains":
+                                kw_ok = HTTPMonitor._keyword_match(
+                                    single._body,
+                                    single._content_type or "",
+                                    keyword, kw_mode)
+                                if not kw_ok:
+                                    return PingResult(
+                                        success=False, latency_ms=total_ms,
+                                        status_code=single.status_code,
+                                        failure_reason="body_incomplete",
+                                        timings=timings,
+                                        cert_days_left=cert_days,
+                                        keyword_ok=False)
+                            else:
+                                return PingResult(
+                                    success=False, latency_ms=total_ms,
+                                    status_code=single.status_code,
+                                    failure_reason="body_incomplete",
+                                    timings=timings,
+                                    cert_days_left=cert_days,
+                                    keyword_ok=False)
+                        # No keyword: status-code-only probes may treat a
+                        # partial body as available once headers + code OK.
+
                 # Keyword check (only when GET returned a body)
                 kw_ok = None
                 if keyword and m == "GET" and single._body is not None:
@@ -1273,43 +1307,46 @@ class HTTPMonitor(TargetMonitor):
 
             # ── Read body (GET only, up to body_limit bytes) ─────────
             body = None
+            body_framing_complete = True
+            is_chunked = "chunked" in (transfer_encoding or "")
             if method == "GET" and body_limit > 0:
                 body = body_start
-                # Stop target: Content-Length wins (when valid) so we
-                # don't wait for the server to close the socket --
-                # well-behaved servers / gateways often keep the
-                # connection open after the framed body even when the
-                # client sent `Connection: close`, and the old "read
-                # until EOF" loop would treat that as
-                # body_recv_timeout despite the body already being
-                # fully delivered.  body_limit still caps the
-                # absolute read size; whichever bound trips first
-                # ends the loop.  chunked responses fall through to
-                # the EOF / timeout path -- handling chunked framing
-                # properly requires a full chunk parser we don't have
-                # yet, but the same body_limit cap still applies.
-                if content_length is not None and transfer_encoding != "chunked":
-                    body_stop = min(content_length, body_limit)
-                else:
-                    body_stop = body_limit
                 try:
-                    while len(body) < body_stop:
-                        remain = deadline - time.time()
-                        if remain <= 0:
-                            raise socket.timeout("body read total timeout")
-                        sock.settimeout(max(0.01, remain))
-                        chunk = sock.recv(4096)
-                        if not chunk:
-                            break
-                        body += chunk
+                    if is_chunked:
+                        body, chunk_err = HTTPMonitor._read_chunked_body(
+                            sock, body, body_limit, deadline)
+                        if chunk_err:
+                            r = PingResult(success=False, latency_ms=None,
+                                            failure_reason=chunk_err,
+                                            timings=timings,
+                                            cert_days_left=cert_days)
+                            r._redirect_to = r._body = r._content_type = None
+                            return r
+                    elif content_length is not None:
+                        body_stop = min(content_length, body_limit)
+                        while len(body) < body_stop:
+                            remain = deadline - time.time()
+                            if remain <= 0:
+                                raise socket.timeout("body read total timeout")
+                            sock.settimeout(max(0.01, remain))
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                body_framing_complete = False
+                                break
+                            body += chunk
+                        if len(body) < body_stop:
+                            body_framing_complete = False
+                    else:
+                        while len(body) < body_limit:
+                            remain = deadline - time.time()
+                            if remain <= 0:
+                                raise socket.timeout("body read total timeout")
+                            sock.settimeout(max(0.01, remain))
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            body += chunk
                 except socket.timeout:
-                    # Body read blew through the total-request deadline.
-                    # MUST be treated as failure, not "success with partial
-                    # body": a tarpit / overloaded gateway that holds the
-                    # response open until our timeout would otherwise
-                    # return success=True with latency≈timeout, surfacing
-                    # only as a yellow "performance warning" while the
-                    # service is effectively dead.
                     r = PingResult(success=False, latency_ms=None,
                                     failure_reason="body_recv_timeout",
                                     timings=timings,
@@ -1317,11 +1354,8 @@ class HTTPMonitor(TargetMonitor):
                     r._redirect_to = r._body = r._content_type = None
                     return r
                 except OSError:
-                    # Connection reset / broken pipe MID-body is fine:
-                    # we already have status + headers from the server,
-                    # so the service was responsive.  Keep whatever body
-                    # bytes arrived for the keyword check.
-                    pass
+                    if content_length is not None and not is_chunked:
+                        body_framing_complete = False
                 body = body[:body_limit]
 
             r = PingResult(success=True, latency_ms=None,
@@ -1330,6 +1364,8 @@ class HTTPMonitor(TargetMonitor):
             r._redirect_to = location
             r._body        = body
             r._content_type = content_type
+            r._content_length = content_length
+            r._body_framing_complete = body_framing_complete
             return r
 
         except Exception as e:
@@ -1343,6 +1379,74 @@ class HTTPMonitor(TargetMonitor):
                 try: sock.close()
                 except Exception: pass
 
+
+    @staticmethod
+    def _read_chunked_body(sock, initial: bytes, body_limit: int,
+                           deadline: float) -> tuple[bytes, Optional[str]]:
+        """
+        Minimal HTTP/1.1 chunked decoder.  Stops at the zero-length
+        chunk without waiting for the server to close the socket.
+        Returns (body, failure_reason).  failure_reason is None on success.
+        """
+        buf = initial
+        out = b""
+
+        def _recv_more() -> bool:
+            nonlocal buf
+            remain = deadline - time.time()
+            if remain <= 0:
+                raise socket.timeout("body read total timeout")
+            sock.settimeout(max(0.01, remain))
+            chunk = sock.recv(4096)
+            if chunk:
+                buf += chunk
+            return bool(chunk)
+
+        def _need(n: int) -> bool:
+            while len(buf) < n:
+                if not _recv_more():
+                    return False
+            return True
+
+        try:
+            while True:
+                while b"\r\n" not in buf:
+                    if not _recv_more():
+                        return out[:body_limit], "chunked_premature_eof"
+                    if len(buf) > 65536:
+                        return out[:body_limit], "chunked_bad_framing"
+                size_line, _, buf = buf.partition(b"\r\n")
+                try:
+                    chunk_size = int(size_line.split(b";", 1)[0].strip(), 16)
+                except ValueError:
+                    return out[:body_limit], "chunked_bad_size"
+                if chunk_size < 0:
+                    return out[:body_limit], "chunked_bad_size"
+                if chunk_size > body_limit - len(out):
+                    return out[:body_limit], "chunked_chunk_too_large"
+                if not _need(chunk_size + 2):
+                    return out[:body_limit], "chunked_premature_eof"
+                out += buf[:chunk_size]
+                buf = buf[chunk_size:]
+                if not buf.startswith(b"\r\n"):
+                    return out[:body_limit], "chunked_bad_framing"
+                buf = buf[2:]
+                if chunk_size == 0:
+                    # After 0\r\n the message is complete unless trailers
+                    # follow.  An empty buf means 0\r\n\r\n already
+                    # arrived — do not recv() on a kept-alive socket.
+                    while buf:
+                        while b"\r\n" not in buf:
+                            if not _recv_more():
+                                return out[:body_limit], None
+                        trailer, _, buf = buf.partition(b"\r\n")
+                        if trailer == b"":
+                            break
+                    return out[:body_limit], None
+                if len(out) >= body_limit:
+                    return out[:body_limit], None
+        except socket.timeout:
+            return out[:body_limit], "body_recv_timeout"
 
     @staticmethod
     def _keyword_match(body: bytes, content_type: str, keyword: str, mode: str) -> bool:
