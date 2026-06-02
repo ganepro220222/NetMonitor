@@ -1424,17 +1424,9 @@ class HTTPMonitor(TargetMonitor):
                     return out[:body_limit], "chunked_bad_size"
                 if chunk_size > body_limit - len(out):
                     return out[:body_limit], "chunked_chunk_too_large"
-                if not _need(chunk_size + 2):
-                    return out[:body_limit], "chunked_premature_eof"
-                out += buf[:chunk_size]
-                buf = buf[chunk_size:]
-                if not buf.startswith(b"\r\n"):
-                    return out[:body_limit], "chunked_bad_framing"
-                buf = buf[2:]
                 if chunk_size == 0:
-                    # After 0\r\n the message is complete unless trailers
-                    # follow.  An empty buf means 0\r\n\r\n already
-                    # arrived — do not recv() on a kept-alive socket.
+                    # 0\r\n ends chunk data; trailer lines (if any) follow
+                    # immediately — they do NOT start with \r\n.
                     while buf:
                         while b"\r\n" not in buf:
                             if not _recv_more():
@@ -1443,6 +1435,13 @@ class HTTPMonitor(TargetMonitor):
                         if trailer == b"":
                             break
                     return out[:body_limit], None
+                if not _need(chunk_size + 2):
+                    return out[:body_limit], "chunked_premature_eof"
+                out += buf[:chunk_size]
+                buf = buf[chunk_size:]
+                if not buf.startswith(b"\r\n"):
+                    return out[:body_limit], "chunked_bad_framing"
+                buf = buf[2:]
                 if len(out) >= body_limit:
                     return out[:body_limit], None
         except socket.timeout:

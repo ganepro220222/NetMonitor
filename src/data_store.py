@@ -528,11 +528,13 @@ class DataStore:
                 # lat_min was added in schema v6; pre-migration rows have
                 # lat_min = NULL.  Those points contribute None to min_ms
                 # and are skipped by the summary (see valid_min below).
+                ch = self._current_hour_start()
                 rows = conn.execute(
                     "SELECT hour_ts, lat_avg, sample_n, success_n, lat_max, lat_min "
                     "FROM pings_hourly "
-                    "WHERE target_id=? AND hour_ts BETWEEN ? AND ? ORDER BY hour_ts",
-                    (target_id, start_ts, end_ts)).fetchall()
+                    "WHERE target_id=? AND hour_ts >= ? AND hour_ts <= ? "
+                    "AND hour_ts < ? ORDER BY hour_ts",
+                    (target_id, start_ts, end_ts, ch)).fetchall()
                 points = [{"ts": r[0],
                            "rtt_ms": round(r[1], 2) if r[1] is not None else None,
                            "max_ms": round(r[4], 2) if r[4] is not None else None,
@@ -552,6 +554,21 @@ class DataStore:
                                                        and r[3] < r[2])
                                else "ok")}
                           for r in rows]
+                live = self._current_hour_bucket(conn, target_id, start_ts, end_ts)
+                if live:
+                    points.append({
+                        "ts": live["hour_ts"],
+                        "rtt_ms": round(live["lat_avg"], 2) if live["lat_avg"] is not None else None,
+                        "max_ms": round(live["lat_max"], 2) if live["lat_max"] is not None else None,
+                        "min_ms": round(live["lat_min"], 2) if live["lat_min"] is not None else None,
+                        "sample_n":  live["sample_n"],
+                        "success_n": live["success_n"],
+                        "ok": live["lat_avg"] is not None,
+                        "bucket_state": (
+                            "all_fail" if live["lat_avg"] is None
+                            else "partial_fail" if live["success_n"] < live["sample_n"]
+                            else "ok"),
+                    })
                 resolution = "1h"
 
             # Summary - probe-weighted across buckets (matches export_excel / SLA).
@@ -588,27 +605,115 @@ class DataStore:
             return {"resolution": "raw", "points": [], "summary": {}}
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
+    @staticmethod
+    def _current_hour_start(now: Optional[int] = None) -> int:
+        t = int(now if now is not None else time.time())
+        return (t // 3600) * 3600
+
+    @staticmethod
+    def _compute_hourly_bucket(lat_status_rows) -> Optional[dict]:
+        """Aggregate (latency_ms, status) rows into one hourly bucket."""
+        if not lat_status_rows:
+            return None
+        sample_n  = len(lat_status_rows)
+        success_n = sum(1 for _, s in lat_status_rows if s in ("green", "orange"))
+        lats      = sorted(r[0] for r in lat_status_rows if r[0] is not None)
+        lat_avg   = sum(lats) / len(lats) if lats else None
+        lat_max   = lats[-1] if lats else None
+        lat_min   = lats[0]  if lats else None
+        lat_p95   = (lats[min(len(lats) - 1,
+                              max(0, math.ceil(len(lats) * 0.95) - 1))]
+                     if lats else None)
+        loss_rate = 1 - success_n / sample_n
+        return {
+            "sample_n":  sample_n,
+            "success_n": success_n,
+            "lat_avg":   lat_avg,
+            "lat_max":   lat_max,
+            "lat_min":   lat_min,
+            "lat_p95":   lat_p95,
+            "loss_rate": loss_rate,
+        }
+
+    def _current_hour_bucket(self, conn, target_id: str,
+                             start_ts: int, end_ts: int) -> Optional[dict]:
+        """In-memory hourly bucket for the still-open current hour."""
+        now = int(time.time())
+        ch  = self._current_hour_start(now)
+        if end_ts < ch:
+            return None
+        win_start = max(int(start_ts), ch)
+        win_end   = min(int(end_ts), now)
+        rows = conn.execute(
+            "SELECT latency_ms, status FROM pings_raw "
+            "WHERE target_id=? AND ts >= ? AND ts <= ?",
+            (target_id, win_start, win_end)).fetchall()
+        bucket = self._compute_hourly_bucket(rows)
+        if not bucket:
+            return None
+        bucket["hour_ts"] = ch
+        return bucket
+
+    def _merge_sla_latency(self, base: dict, extra: Optional[dict]) -> dict:
+        """Combine pings_hourly SQL rollup with a current-hour raw bucket."""
+        if not extra:
+            return base
+        total   = (base.get("total") or 0) + extra["sample_n"]
+        success = (base.get("success") or 0) + extra["success_n"]
+        old_sn  = base.get("success") or 0
+        new_sn  = extra["success_n"]
+        lat_avg = base.get("lat_avg")
+        if extra["lat_avg"] is not None and new_sn:
+            if lat_avg is not None and old_sn:
+                lat_avg = ((lat_avg * old_sn) + (extra["lat_avg"] * new_sn)
+                           / (old_sn + new_sn))
+            else:
+                lat_avg = extra["lat_avg"]
+        lat_max = base.get("lat_max")
+        if extra["lat_max"] is not None:
+            lat_max = max(lat_max, extra["lat_max"]) if lat_max is not None else extra["lat_max"]
+        lat_p95 = base.get("lat_p95")
+        if extra["lat_p95"] is not None and new_sn:
+            if lat_p95 is not None and old_sn:
+                lat_p95 = ((lat_p95 * old_sn) + (extra["lat_p95"] * new_sn)
+                           / (old_sn + new_sn))
+            else:
+                lat_p95 = extra["lat_p95"]
+        return {
+            "total":   total,
+            "success": success,
+            "lat_avg": lat_avg,
+            "lat_max": lat_max,
+            "lat_p95": lat_p95,
+        }
+
     def get_history(self, target_id: str, start_ts: int, end_ts: int,
                     use_hourly: bool = False) -> list:
         """
         查询单节点历史数据。
         use_hourly=False → pings_raw（秒级）
-        use_hourly=True  → pings_hourly（小时级）
+        use_hourly=True  → pings_hourly（小时级）+ 当前未结束小时的临时桶
         """
         conn = self._read_conn()
         try:
             if use_hourly:
+                ch = self._current_hour_start()
                 rows = conn.execute(
                     "SELECT hour_ts, sample_n, success_n, lat_avg, lat_max, "
                     "lat_p95, loss_rate FROM pings_hourly "
-                    "WHERE target_id=? AND hour_ts BETWEEN ? AND ? "
+                    "WHERE target_id=? AND hour_ts >= ? AND hour_ts <= ? "
+                    "AND hour_ts < ? "
                     "ORDER BY hour_ts",
-                    (target_id, start_ts, end_ts)).fetchall()
-                return [{"hour_ts":  r[0], "sample_n": r[1],
-                         "success_n": r[2], "lat_avg":  r[3],
-                         "lat_max":   r[4], "lat_p95":  r[5],
-                         "loss_rate": r[6]}
-                        for r in rows]
+                    (target_id, start_ts, end_ts, ch)).fetchall()
+                out = [{"hour_ts":  r[0], "sample_n": r[1],
+                        "success_n": r[2], "lat_avg":  r[3],
+                        "lat_max":   r[4], "lat_p95":  r[5],
+                        "loss_rate": r[6]}
+                       for r in rows]
+                live = self._current_hour_bucket(conn, target_id, start_ts, end_ts)
+                if live:
+                    out.append(live)
+                return out
             else:
                 rows = conn.execute(
                     "SELECT ts, status, latency_ms, loss_rate, "
@@ -2082,7 +2187,10 @@ class DataStore:
         """
         now          = int(time.time())
         current_hour = (now // 3600) * 3600   # exclude the in-progress hour
-        recompute_floor = current_hour - 7200  # last two complete hours
+        # Re-aggregate every complete hour still covered by raw retention so
+        # rows that land hours late (lock contention, recovery, backfill) are
+        # folded into pings_hourly, not only the most recent two hours.
+        recompute_floor = current_hour - int(self._raw_retention_days * 86400)
 
         # Targets are sourced from pings_raw (not targets_meta) so that
         # a target removed in the last few days still gets its trailing
@@ -2130,37 +2238,18 @@ class DataStore:
                         "WHERE target_id=? AND ts >= ? AND ts < ?",
                         (tid, hour_start, hour_end)
                     ).fetchall()
-                    if rows:
-                        sample_n  = len(rows)
-                        success_n = sum(1 for _, s in rows
-                                        if s in ("green", "orange"))
-                        lats      = sorted(r[0] for r in rows
-                                           if r[0] is not None)
-                        lat_avg   = sum(lats) / len(lats) if lats else None
-                        lat_max   = lats[-1] if lats else None
-                        lat_min   = lats[0]  if lats else None
-                        # P95 by the nearest-rank method: ceil(0.95 * n)
-                        # then -1 for 0-based indexing.  int() (floor)
-                        # is wrong direction for percentiles: with n=2
-                        # it returns lats[0] = the MIN, with n=19 it
-                        # returns lats[17] instead of lats[18] = MAX.
-                        # On HTTP/DNS targets with low probe rates or
-                        # outage-heavy hours where success samples drop
-                        # to single digits, the floor formula made P95
-                        # come out LOWER than the average — a textbook
-                        # impossible percentile.
-                        lat_p95   = (lats[min(len(lats) - 1,
-                                              max(0, math.ceil(len(lats) * 0.95) - 1))]
-                                     if lats else None)
-                        loss_rate = 1 - success_n / sample_n
-
+                    bucket = self._compute_hourly_bucket(rows)
+                    if bucket:
                         conn.execute(
                             "INSERT OR REPLACE INTO pings_hourly "
                             "(target_id,hour_ts,sample_n,success_n,"
                             " lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
                             "VALUES(?,?,?,?,?,?,?,?,?)",
-                            (tid, hour_start, sample_n, success_n,
-                             lat_avg, lat_max, lat_min, lat_p95, loss_rate))
+                            (tid, hour_start,
+                             bucket["sample_n"], bucket["success_n"],
+                             bucket["lat_avg"], bucket["lat_max"],
+                             bucket["lat_min"], bucket["lat_p95"],
+                             bucket["loss_rate"]))
                     hour_start = hour_end
 
     def get_sla_stats(self, target_id: str,
@@ -2168,7 +2257,8 @@ class DataStore:
         """
         Compute SLA metrics for one target over [start_ts, end_ts].
 
-        Latency stats  — from pings_hourly (fast, pre-aggregated).
+        Latency stats  — from pings_hourly plus the in-progress current
+        hour aggregated from pings_raw (not written to pings_hourly).
         Outage stats   — from alert_events, status-transition based:
 
         The query now selects by old/new_status rather than category, so
@@ -2212,8 +2302,14 @@ class DataStore:
                   AND hour_ts BETWEEN ? AND ?
             """, (target_id, start_ts, end_ts)).fetchone()
 
-            total   = row["total"]   or 0
-            success = row["success"] or 0
+            merged = self._merge_sla_latency(
+                {"total": row["total"], "success": row["success"],
+                 "lat_avg": row["lat_avg"], "lat_max": row["lat_max"],
+                 "lat_p95": row["lat_p95"]},
+                self._current_hour_bucket(conn, target_id, start_ts, end_ts))
+
+            total   = merged["total"]   or 0
+            success = merged["success"] or 0
             # `... or 0.0` would coerce NULL (which means "no successful
             # probe in the range" — see the NULLIF(...) zero-guard in
             # the SQL above) to 0.0, making a hour of 100% packet loss
@@ -2221,9 +2317,9 @@ class DataStore:
             # can render "—" instead of an absurd zero.  The error-path
             # return below already uses None, so the calling shape is
             # unchanged for non-data hours.
-            lat_avg = round(row["lat_avg"], 2) if row["lat_avg"] is not None else None
-            lat_max = round(row["lat_max"], 2) if row["lat_max"] is not None else None
-            lat_p95 = round(row["lat_p95"], 2) if row["lat_p95"] is not None else None
+            lat_avg = round(merged["lat_avg"], 2) if merged["lat_avg"] is not None else None
+            lat_max = round(merged["lat_max"], 2) if merged["lat_max"] is not None else None
+            lat_p95 = round(merged["lat_p95"], 2) if merged["lat_p95"] is not None else None
 
             # ── Outage stats from alert_events ───────────────────────
             # Query by STATUS TRANSITION, not by category.
@@ -2387,6 +2483,30 @@ class DataStore:
                 GROUP BY target_id
             """, (*target_ids, start_ts, end_ts)).fetchall()
             lat_by_tid = {r["target_id"]: r for r in lat_rows}
+            for tid in target_ids:
+                lat = lat_by_tid.get(tid)
+                base = {"total": lat["total"] if lat else None,
+                        "success": lat["success"] if lat else None,
+                        "lat_avg": lat["lat_avg"] if lat else None,
+                        "lat_max": lat["lat_max"] if lat else None,
+                        "lat_p95": lat["lat_p95"] if lat else None}
+                merged = self._merge_sla_latency(
+                    base,
+                    self._current_hour_bucket(conn, tid, start_ts, end_ts))
+                if lat:
+                    lat_by_tid[tid] = {
+                        "target_id": tid,
+                        "total":   merged["total"],
+                        "success": merged["success"],
+                        "lat_avg": merged["lat_avg"],
+                        "lat_max": merged["lat_max"],
+                        "lat_p95": merged["lat_p95"],
+                    }
+                elif merged.get("total"):
+                    lat_by_tid[tid] = {
+                        "target_id": tid,
+                        **merged,
+                    }
 
             # ── Query 2: per-target boundary state (single row each).
             # JOIN'ing on (target_id, MAX(ts)) lets SQLite resolve each

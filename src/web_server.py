@@ -6616,12 +6616,20 @@ class WebServer:
                     except Exception:
                         pass
                 finally:
-                    self._quick_trace_sem.release()
-                    if diag_sem_held:
-                        DIAG_TASK_SEM.release()
-                    if proc and proc.poll() is None:
-                        try: proc.kill()
-                        except Exception: pass
+                    try:
+                        if proc is not None and proc.poll() is None:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                            try:
+                                proc.wait(timeout=2)
+                            except Exception:
+                                pass
+                    finally:
+                        self._quick_trace_sem.release()
+                        if diag_sem_held:
+                            DIAG_TASK_SEM.release()
 
             from flask import stream_with_context, Response
             return Response(
