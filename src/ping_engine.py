@@ -1255,6 +1255,14 @@ class HTTPMonitor(TargetMonitor):
                 return r
             timings["ttfb_ms"] = ttfb if ttfb is not None else 0.0
 
+            if b"\r\n\r\n" not in raw:
+                r = PingResult(success=False, latency_ms=None,
+                                failure_reason="header_incomplete",
+                                timings=timings,
+                                cert_days_left=cert_days)
+                r._redirect_to = r._body = r._content_type = None
+                return r
+
             # ── Parse status + headers ────────────────────────────────
             try:
                 hdr_block, _, body_start = raw.partition(b"\r\n\r\n")
