@@ -695,15 +695,27 @@ class DataStore:
         """
         Partial-hour bucket: precise pings_raw slice when available.
 
-        When pings_raw has been purged (default 7d) but pings_hourly still
-        exists (default 90d), fall back to the full hourly bucket — better
-        than dropping the hour entirely, though sub-hour window clipping is
-        no longer possible outside raw retention.
+        One pings_raw read for the whole hour, then slice in Python so we
+        can tell an empty window from "raw purged":
+
+          * slice has rows → precise bucket;
+          * slice empty but hour still has raw → None (no out-of-window bleed);
+          * hour has no raw → fall back to pings_hourly full bucket (approx).
         """
-        b = self._raw_window_bucket(conn, target_id, hour_ts,
-                                    win_start, win_end)
-        if b:
-            return b
+        rows = conn.execute(
+            "SELECT ts, latency_ms, status FROM pings_raw "
+            "WHERE target_id=? AND ts >= ? AND ts < ?",
+            (target_id, hour_ts, hour_ts + 3600)).fetchall()
+        slice_rows = [(lat, st) for ts, lat, st in rows
+                      if win_start <= int(ts) <= win_end]
+        if slice_rows:
+            bucket = self._compute_hourly_bucket(slice_rows)
+            if bucket:
+                bucket["hour_ts"] = hour_ts
+                return bucket
+            return None
+        if rows:
+            return None
         return hourly_by_hour.get(hour_ts)
 
     def _bounded_hourly_buckets(self, conn, target_id: str,
