@@ -449,22 +449,54 @@ class DataStore:
             return {}
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
+    def _waveform_points_hourly(self, conn, target_id: str,
+                                start_ts: int, end_ts: int) -> list:
+        """Build waveform points from _bounded_hourly_buckets."""
+        points = []
+        for b in self._bounded_hourly_buckets(conn, target_id, start_ts, end_ts):
+            lat_min = b.get("lat_min")
+            points.append({
+                "ts": b["hour_ts"],
+                "rtt_ms": round(b["lat_avg"], 2) if b["lat_avg"] is not None else None,
+                "max_ms": round(b["lat_max"], 2) if b["lat_max"] is not None else None,
+                "min_ms": round(lat_min, 2) if lat_min is not None else None,
+                "sample_n":  b["sample_n"],
+                "success_n": b["success_n"],
+                "ok": b["lat_avg"] is not None,
+                "bucket_state": (
+                    "all_fail" if b["lat_avg"] is None
+                    else "partial_fail" if b["success_n"] < b["sample_n"]
+                    else "ok"),
+            })
+        return points
+
     def get_waveform(self, target_id: str, start_ts: int, end_ts: int) -> dict:
         """
-        Return waveform data auto-aggregated by time span:
+        Return waveform data auto-aggregated by span and raw retention.
+
+        If any part of [start_ts, end_ts] is older than pings_raw retention,
+        use hourly buckets (pings_hourly) for the whole window so the chart
+        does not silently omit the pre-cutoff portion.  Otherwise:
           span ≤ 2h   → raw second-level data
           span ≤ 48h  → minute-level aggregation from pings_raw
-          span ≤ 8d   → hourly data from pings_hourly
-          otherwise   → hourly data (longer periods)
+          span > 48h  → hourly data from pings_hourly
+
         Returns:
           { "resolution": "raw"|"1m"|"1h",
             "points": [{"ts": int, "rtt_ms": float|null, "ok": bool}, ...],
             "summary": {"avg_ms","min_ms","max_ms","loss_rate","sample_n"} }
         """
         span = end_ts - start_ts
+        raw_cutoff = int(time.time()) - self._raw_retention_days * 86400
+        use_hourly = start_ts < raw_cutoff or span > 172800
         conn = self._read_conn()
         try:
-            if span <= 7200:                        # ≤ 2 hours → raw
+            if use_hourly:
+                points = self._waveform_points_hourly(
+                    conn, target_id, start_ts, end_ts)
+                resolution = "1h"
+
+            elif span <= 7200:                        # ≤ 2 hours → raw
                 rows = conn.execute(
                     "SELECT ts, latency_ms, status FROM pings_raw "
                     "WHERE target_id=? AND ts BETWEEN ? AND ? ORDER BY ts",
@@ -523,30 +555,6 @@ class DataStore:
                                else "ok")}
                           for r in rows]
                 resolution = "1m"
-
-            else:                                   # > 48 hours → hourly aggregates
-                # lat_min was added in schema v6; pre-migration rows have
-                # lat_min = NULL.  Those points contribute None to min_ms
-                # and are skipped by the summary (see valid_min below).
-                buckets = self._bounded_hourly_buckets(
-                    conn, target_id, start_ts, end_ts)
-                points = []
-                for b in buckets:
-                    lat_min = b.get("lat_min")
-                    points.append({
-                        "ts": b["hour_ts"],
-                        "rtt_ms": round(b["lat_avg"], 2) if b["lat_avg"] is not None else None,
-                        "max_ms": round(b["lat_max"], 2) if b["lat_max"] is not None else None,
-                        "min_ms": round(lat_min, 2) if lat_min is not None else None,
-                        "sample_n":  b["sample_n"],
-                        "success_n": b["success_n"],
-                        "ok": b["lat_avg"] is not None,
-                        "bucket_state": (
-                            "all_fail" if b["lat_avg"] is None
-                            else "partial_fail" if b["success_n"] < b["sample_n"]
-                            else "ok"),
-                    })
-                resolution = "1h"
 
             # Summary - probe-weighted across buckets (matches export_excel / SLA).
             total_n   = sum(p.get("sample_n") or 0 for p in points)
