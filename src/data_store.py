@@ -633,22 +633,102 @@ class DataStore:
                 "lat_max":   row[4], "lat_min":   row[5],
                 "lat_p95":  row[6], "loss_rate": row[7]}
 
+    def _fetch_hourly_map(self, conn, target_id: str,
+                          hour_lo: int, hour_hi: int) -> dict:
+        """All pings_hourly buckets for one target in [hour_lo, hour_hi]."""
+        if hour_lo > hour_hi:
+            return {}
+        rows = conn.execute(
+            "SELECT hour_ts, sample_n, success_n, lat_avg, lat_max, "
+            "lat_min, lat_p95, loss_rate FROM pings_hourly "
+            "WHERE target_id=? AND hour_ts >= ? AND hour_ts <= ?",
+            (target_id, hour_lo, hour_hi)).fetchall()
+        return {r[0]: self._hourly_row_to_bucket(r) for r in rows}
+
+    def _fetch_hourly_map_batch(self, conn, target_ids: list,
+                                hour_lo: int, hour_hi: int) -> dict:
+        """{(target_id, hour_ts): bucket} for many targets, one SQL round-trip."""
+        if not target_ids or hour_lo > hour_hi:
+            return {}
+        ph = ",".join("?" * len(target_ids))
+        rows = conn.execute(
+            f"SELECT target_id, hour_ts, sample_n, success_n, lat_avg, "
+            f"lat_max, lat_min, lat_p95, loss_rate FROM pings_hourly "
+            f"WHERE target_id IN ({ph}) "
+            f"AND hour_ts >= ? AND hour_ts <= ?",
+            (*target_ids, hour_lo, hour_hi)).fetchall()
+        out = {}
+        for r in rows:
+            out[(r[0], r[1])] = {
+                "hour_ts":  r[1], "sample_n": r[2], "success_n": r[3],
+                "lat_avg":  r[4], "lat_max":   r[5], "lat_min":   r[6],
+                "lat_p95":  r[7], "loss_rate": r[8],
+            }
+        return out
+
+    def _raw_buckets_for_hours(self, conn, target_id: str,
+                               hours: list, range_lo: int,
+                               range_hi: int) -> dict:
+        """One pings_raw SELECT, bucket rows into full-hour shapes."""
+        if not hours:
+            return {}
+        qlo = max(int(range_lo), min(hours))
+        qhi = min(int(range_hi), max(hours) + 3599)
+        rows = conn.execute(
+            "SELECT ts, latency_ms, status FROM pings_raw "
+            "WHERE target_id=? AND ts >= ? AND ts <= ?",
+            (target_id, qlo, qhi)).fetchall()
+        by_hour = defaultdict(list)
+        for ts, lat, st in rows:
+            by_hour[(int(ts) // 3600) * 3600].append((lat, st))
+        out = {}
+        for h in hours:
+            bucket = self._compute_hourly_bucket(by_hour.get(h, []))
+            if bucket:
+                bucket["hour_ts"] = h
+                out[h] = bucket
+        return out
+
+    def _partial_boundary_bucket(self, conn, target_id: str, hour_ts: int,
+                                 win_start: int, win_end: int,
+                                 hourly_by_hour: dict) -> Optional[dict]:
+        """
+        Partial-hour bucket: precise pings_raw slice when available.
+
+        When pings_raw has been purged (default 7d) but pings_hourly still
+        exists (default 90d), fall back to the full hourly bucket — better
+        than dropping the hour entirely, though sub-hour window clipping is
+        no longer possible outside raw retention.
+        """
+        b = self._raw_window_bucket(conn, target_id, hour_ts,
+                                    win_start, win_end)
+        if b:
+            return b
+        return hourly_by_hour.get(hour_ts)
+
     def _bounded_hourly_buckets(self, conn, target_id: str,
-                                start_ts: int, end_ts: int) -> list:
+                                start_ts: int, end_ts: int,
+                                hourly_by_hour: Optional[dict] = None) -> list:
         """
         Hourly buckets aligned to [start_ts, end_ts].
 
-        Full interior hours come from pings_hourly.  Partial hours at the
-        start/end boundaries (and the current open hour) are aggregated from
-        pings_raw so samples outside the window are excluded.
+        Full interior hours come from pings_hourly (one range query).
+        Partial hours at boundaries prefer pings_raw; if raw is gone,
+        approximate with the stored pings_hourly bucket.
         """
         start_ts = int(start_ts)
         end_ts   = int(end_ts)
         if end_ts < start_ts:
             return []
         ch = self._current_hour_start()
+        h_first = (start_ts // 3600) * 3600
+        h_last  = (min(end_ts, ch - 1) // 3600) * 3600
+        if hourly_by_hour is None:
+            hourly_by_hour = (self._fetch_hourly_map(conn, target_id, h_first, h_last)
+                              if h_first <= h_last else {})
         out = []
-        h  = (start_ts // 3600) * 3600
+        missing_full = []
+        h  = h_first
         while h <= end_ts and h < ch:
             if h + 3600 <= start_ts:
                 h += 3600
@@ -659,29 +739,49 @@ class DataStore:
                 h += 3600
                 continue
             if start_ts <= h and end_ts >= h + 3600:
-                row = conn.execute(
-                    "SELECT hour_ts, sample_n, success_n, lat_avg, lat_max, "
-                    "lat_min, lat_p95, loss_rate FROM pings_hourly "
-                    "WHERE target_id=? AND hour_ts=?",
-                    (target_id, h)).fetchone()
-                if row:
-                    out.append(self._hourly_row_to_bucket(row))
+                b = hourly_by_hour.get(h)
+                if b:
+                    out.append(b)
                 else:
-                    # Hourly row missing (not yet aggregated or cleaned raw).
-                    b = self._raw_window_bucket(conn, target_id, h,
-                                                win_start, win_end)
-                    if b:
-                        out.append(b)
+                    missing_full.append(h)
             else:
-                b = self._raw_window_bucket(conn, target_id, h,
-                                            win_start, win_end)
+                b = self._partial_boundary_bucket(
+                    conn, target_id, h, win_start, win_end, hourly_by_hour)
                 if b:
                     out.append(b)
             h += 3600
+        if missing_full:
+            for h, b in self._raw_buckets_for_hours(
+                    conn, target_id, missing_full, start_ts, end_ts).items():
+                out.append(b)
+        out.sort(key=lambda b: b["hour_ts"])
         live = self._current_hour_bucket(conn, target_id, start_ts, end_ts)
         if live:
             out.append(live)
         return out
+
+    def _bounded_hourly_buckets_for_targets(
+            self, conn, target_ids: list,
+            start_ts: int, end_ts: int) -> dict:
+        """Per-target bounded buckets; one batch pings_hourly SELECT."""
+        start_ts = int(start_ts)
+        end_ts   = int(end_ts)
+        if not target_ids or end_ts < start_ts:
+            return {tid: [] for tid in target_ids}
+        ch = self._current_hour_start()
+        h_first = (start_ts // 3600) * 3600
+        h_last  = (min(end_ts, ch - 1) // 3600) * 3600
+        batch = (self._fetch_hourly_map_batch(conn, target_ids, h_first, h_last)
+                 if h_first <= h_last else {})
+        per_tid = defaultdict(dict)
+        for (tid, h), bucket in batch.items():
+            per_tid[tid][h] = bucket
+        return {
+            tid: self._bounded_hourly_buckets(
+                conn, tid, start_ts, end_ts,
+                hourly_by_hour=per_tid.get(tid))
+            for tid in target_ids
+        }
 
     @staticmethod
     def _rollup_hourly_buckets(buckets: list) -> dict:
@@ -2455,12 +2555,10 @@ class DataStore:
         request.  Each round-trip is cheap in isolation but they're
         serial because Flask's request handler is single-threaded.
 
-        This method issues two GROUP BY / IN (...) queries total, fans the
-        rows back out per target_id in Python, then runs the same outage
-        walk per target.  Result is byte-identical to calling
-        get_sla_stats() in a loop (verified by the chunking math: when one
-        target's events are isolated by target_id, the walk sees exactly
-        what the single-target query would have returned).
+        Latency: one batch pings_hourly SELECT plus at most a few pings_raw
+        queries per target for partial boundary hours (not per target-hour).
+        Outage: two alert_events IN (...) queries, then the same per-target
+        walk as get_sla_stats().
 
         Returns {target_id: {uptime_pct, lat_avg, lat_max, lat_p95,
         outage_count, outage_minutes, sample_n}}.  Targets present in
@@ -2495,11 +2593,12 @@ class DataStore:
             # function for the full rationale.  This per-target rollup must
             # agree with the single-target rollup, otherwise the Web SLA view
             # and the Excel SLA sheet would disagree on the same data.
+            buckets_by_tid = self._bounded_hourly_buckets_for_targets(
+                conn, target_ids, int(start_ts), int(end_ts))
             lat_by_tid = {}
             for tid in target_ids:
                 merged = self._rollup_hourly_buckets(
-                    self._bounded_hourly_buckets(
-                        conn, tid, int(start_ts), int(end_ts)))
+                    buckets_by_tid.get(tid, []))
                 if merged.get("total"):
                     lat_by_tid[tid] = {"target_id": tid, **merged}
 
