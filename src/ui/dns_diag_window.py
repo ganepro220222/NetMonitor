@@ -3265,6 +3265,23 @@ class DnsDiagWindow(ctk.CTkToplevel):
                 pass
         self.destroy()
 
+    def _sync_history_list_scrollbar(self, listbox):
+        self._hide_scrollbar_now(listbox)
+        self.after_idle(self._autohide_scrollbar, listbox)
+
+    def _bind_history_scrollbar_sync(self, win, listbox):
+        job = [None]
+
+        def _on_configure(_event=None):
+            if job[0] is not None:
+                try:
+                    win.after_cancel(job[0])
+                except Exception:
+                    pass
+            job[0] = win.after(150, lambda: self._sync_history_list_scrollbar(listbox))
+
+        win.bind("<Configure>", _on_configure, add="+")
+
     # ------------------------------------------------------------------
     # History list (Phase 3A)
     # ------------------------------------------------------------------
@@ -3310,6 +3327,8 @@ class DnsDiagWindow(ctk.CTkToplevel):
         listbox.grid(row=1, column=0, sticky="nsew",
                       padx=10, pady=(8, 10))
         listbox.grid_columnconfigure(0, weight=1)
+        self._hide_scrollbar_now(listbox)
+        self._bind_history_scrollbar_sync(win, listbox)
 
         self._refresh_history_list(listbox)
 
@@ -3320,127 +3339,118 @@ class DnsDiagWindow(ctk.CTkToplevel):
 
     def _refresh_history_list(self, listbox):
         """Re-query DB and re-render row list (mirror ICMP)."""
-        for child in listbox.winfo_children():
-            try: child.destroy()
-            except Exception: pass
-
-        if self._data_store is None:
-            ctk.CTkLabel(listbox,
-                         text="DataStore 未初始化，无法读取历史",
-                         font=F(11), text_color="gray50").grid(
-                row=0, column=0, pady=20)
-            return
-
         try:
-            rows = self._data_store.get_dns_diag_history(
-                target_id=self._target_id, limit=100)
-        except Exception as e:
-            ctk.CTkLabel(listbox, text=f"读取失败：{e}",
-                         font=F(11), text_color="#ef4444").grid(
-                row=0, column=0, pady=20)
-            return
+            for child in listbox.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
 
-        if not rows:
-            ctk.CTkLabel(listbox,
-                         text="暂无历史记录。完成一次 DNS 诊断后将在此列出。",
-                         font=F(11), text_color="gray50").grid(
-                row=0, column=0, pady=20)
-            return
+            if self._data_store is None:
+                ctk.CTkLabel(listbox,
+                             text="DataStore 未初始化，无法读取历史",
+                             font=F(11), text_color="gray50").grid(
+                    row=0, column=0, pady=20)
+                return
 
-        import datetime
+            try:
+                rows = self._data_store.get_dns_diag_history(
+                    target_id=self._target_id, limit=100)
+            except Exception as e:
+                ctk.CTkLabel(listbox, text=f"读取失败：{e}",
+                             font=F(11), text_color="#ef4444").grid(
+                    row=0, column=0, pady=20)
+                return
 
-        for i, rec in enumerate(rows):
-            ts_str = datetime.datetime.fromtimestamp(
-                rec["created_ts"]).strftime("%Y-%m-%d %H:%M:%S")
+            if not rows:
+                ctk.CTkLabel(
+                    listbox,
+                    text="暂无历史记录。完成一次 DNS 诊断后将在此列出。",
+                    font=F(11), text_color="gray50").grid(
+                    row=0, column=0, pady=20)
+                return
 
-            qtype  = rec.get("qtype", "?")
-            domain = rec.get("domain", "")
-            ok     = bool(rec.get("success"))
-            rcode  = rec.get("rcode") or "—"
-            n_ans  = rec.get("answer_count", 0) or 0
-            ems    = rec.get("elapsed_ms")
-            ems_s  = f"{ems:.1f} ms" if isinstance(ems, (int, float)) \
-                                     else "—"
+            import datetime
 
-            # Phase 3C-5 — pre-read details.mode so we can override the
-            # row colour mapping for dnssec.  INSECURE rows are
-            # success=False (strict per Q2) but MUST NOT paint red —
-            # the operator's eye correctly reads red as incident, and
-            # CN domains' overwhelming INSECURE rate would cause
-            # alert-fatigue.  We split the four states into:
-            #   SECURE        → green (default)
-            #   INSECURE      → grey neutral (NOT red)
-            #   BOGUS         → red (real incident)
-            #   INDETERMINATE → amber
-            details = rec.get("details") or {}
-            d_mode  = details.get("mode") or ""
-            sec_status = ""
-            if d_mode == "dnssec":
-                sec_status = (rcode or "").upper()
-            # Row colour reflects success at a glance.
-            if d_mode == "dnssec" and sec_status == "INSECURE":
-                fg = ("gray90", "gray22")        # neutral, NOT red
-            elif d_mode == "dnssec" and sec_status == "INDETERMINATE":
-                fg = ("#ffedd5", "#7c2d12")      # amber
-            elif ok:
-                fg = ("gray90", "gray22")
-            else:
-                fg = ("#fecaca", "#451a1a")
+            for i, rec in enumerate(rows):
+                ts_str = datetime.datetime.fromtimestamp(
+                    rec["created_ts"]).strftime("%Y-%m-%d %H:%M:%S")
 
-            row = ctk.CTkFrame(listbox, fg_color=fg, corner_radius=6)
-            row.grid(row=i, column=0, sticky="ew", padx=6, pady=3)
-            row.grid_columnconfigure(0, weight=1)
+                qtype  = rec.get("qtype", "?")
+                domain = rec.get("domain", "")
+                ok     = bool(rec.get("success"))
+                rcode  = rec.get("rcode") or "—"
+                n_ans  = rec.get("answer_count", 0) or 0
+                ems    = rec.get("elapsed_ms")
+                ems_s  = (f"{ems:.1f} ms" if isinstance(ems, (int, float))
+                          else "—")
 
-            ctk.CTkLabel(row, text=ts_str, font=F(10),
-                         text_color="gray50", anchor="w").grid(
-                row=0, column=0, sticky="w", padx=10, pady=(6, 0))
+                details = rec.get("details") or {}
+                d_mode  = details.get("mode") or ""
+                sec_status = ""
+                if d_mode == "dnssec":
+                    sec_status = (rcode or "").upper()
+                if d_mode == "dnssec" and sec_status == "INSECURE":
+                    fg = ("gray90", "gray22")
+                elif d_mode == "dnssec" and sec_status == "INDETERMINATE":
+                    fg = ("#ffedd5", "#7c2d12")
+                elif ok:
+                    fg = ("gray90", "gray22")
+                else:
+                    fg = ("#fecaca", "#451a1a")
 
-            if d_mode == "dnssec":
-                if sec_status == "SECURE":
-                    badge_color = "#16a34a"
-                elif sec_status == "INSECURE":
-                    badge_color = "#6b7280"   # grey — same neutral as bg
-                elif sec_status == "INDETERMINATE":
-                    badge_color = "#ea580c"   # amber
-                else:                          # BOGUS
-                    badge_color = "#dc2626"
-            else:
-                badge_color = "#16a34a" if ok else "#dc2626"
-            if d_mode == "compare":
-                mode_tag = "对比  "
-            elif d_mode == "trace_auth":
-                mode_tag = "🌲 权威  "
-            elif d_mode == "dnssec":
-                # Phase 3C-5 — fourth mode badge; matches the Web list
-                # row's cyan-ish accent.  No emoji rendered (the Tk
-                # font fallback on Windows handles the lock glyph
-                # inconsistently); we use a parenthesised tag instead.
-                mode_tag = "🔐 DNSSEC  "
-            else:
-                mode_tag = ""
-            summary = (f"{mode_tag}{qtype}  {domain}    "
-                       f"RCODE={rcode}    {n_ans} 条记录    {ems_s}")
-            ctk.CTkLabel(row, text=summary, font=F(11, "bold"),
-                         anchor="w", text_color=badge_color
-                         ).grid(row=1, column=0, sticky="w",
-                                padx=10, pady=(0, 2))
+                row = ctk.CTkFrame(listbox, fg_color=fg, corner_radius=6)
+                row.grid(row=i, column=0, sticky="ew", padx=6, pady=3)
+                row.grid_columnconfigure(0, weight=1)
 
-            msg = (rec.get("message") or "")[:140]
-            if msg:
-                ctk.CTkLabel(row, text=msg,
-                             font=F(10),
-                             text_color=("gray30", "gray70"),
-                             anchor="w", wraplength=680,
-                             justify="left").grid(
-                    row=2, column=0, sticky="w", padx=10, pady=(0, 6))
+                ctk.CTkLabel(row, text=ts_str, font=F(10),
+                             text_color="gray50", anchor="w").grid(
+                    row=0, column=0, sticky="w", padx=10, pady=(6, 0))
 
-            def _bind(widget, r=rec):
-                widget.bind("<Button-1>",
-                             lambda _e, rec=r: self._replay_history(rec))
-                widget.configure(cursor="hand2")
-            _bind(row)
-            for child in row.winfo_children():
-                _bind(child)
+                if d_mode == "dnssec":
+                    if sec_status == "SECURE":
+                        badge_color = "#16a34a"
+                    elif sec_status == "INSECURE":
+                        badge_color = "#6b7280"
+                    elif sec_status == "INDETERMINATE":
+                        badge_color = "#ea580c"
+                    else:
+                        badge_color = "#dc2626"
+                else:
+                    badge_color = "#16a34a" if ok else "#dc2626"
+                if d_mode == "compare":
+                    mode_tag = "对比  "
+                elif d_mode == "trace_auth":
+                    mode_tag = "🌲 权威  "
+                elif d_mode == "dnssec":
+                    mode_tag = "🔐 DNSSEC  "
+                else:
+                    mode_tag = ""
+                summary = (f"{mode_tag}{qtype}  {domain}    "
+                           f"RCODE={rcode}    {n_ans} 条记录    {ems_s}")
+                ctk.CTkLabel(row, text=summary, font=F(11, "bold"),
+                             anchor="w", text_color=badge_color).grid(
+                    row=1, column=0, sticky="w", padx=10, pady=(0, 2))
+
+                msg = (rec.get("message") or "")[:140]
+                if msg:
+                    ctk.CTkLabel(row, text=msg,
+                                 font=F(10),
+                                 text_color=("gray30", "gray70"),
+                                 anchor="w", wraplength=680,
+                                 justify="left").grid(
+                        row=2, column=0, sticky="w", padx=10, pady=(0, 6))
+
+                def _bind(widget, r=rec):
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, rec=r: self._replay_history(rec))
+                    widget.configure(cursor="hand2")
+                _bind(row)
+                for child in row.winfo_children():
+                    _bind(child)
+        finally:
+            self._sync_history_list_scrollbar(listbox)
 
     def _replay_history(self, rec: dict):
         """Re-render a historical record into the parent result panel.

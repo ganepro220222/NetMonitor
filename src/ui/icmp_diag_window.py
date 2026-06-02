@@ -567,6 +567,60 @@ class IcmpDiagWindow(ctk.CTkToplevel):
             pass
 
     # ------------------------------------------------------------------
+    # Scrollbar autohide (history list — mirrors DnsDiagWindow)
+    # ------------------------------------------------------------------
+
+    def _hide_scrollbar_now(self, scroll) -> None:
+        try:
+            bar = getattr(scroll, "_scrollbar", None)
+            if bar is not None:
+                bar.grid_remove()
+        except Exception:
+            pass
+
+    def _autohide_scrollbar(self, scroll, _retries: int = 3):
+        try:
+            scroll.update_idletasks()
+            canvas = getattr(scroll, "_parent_canvas", None)
+            bar = getattr(scroll, "_scrollbar", None)
+            if canvas is None or bar is None:
+                return
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            visible_h = canvas.winfo_height()
+            if visible_h > 1:
+                content_h = (bbox[3] - bbox[1]) if bbox else 0
+                if content_h > visible_h + 2:
+                    bar.grid()
+                else:
+                    bar.grid_remove()
+            if _retries > 0:
+                delay_ms = (50, 120, 280)[3 - _retries]
+                self.after(
+                    delay_ms,
+                    lambda: self._autohide_scrollbar(scroll, _retries - 1))
+        except Exception:
+            pass
+
+    def _sync_history_list_scrollbar(self, listbox, win):
+        self._hide_scrollbar_now(listbox)
+        win.after_idle(lambda: self._autohide_scrollbar(listbox))
+
+    def _bind_history_scrollbar_sync(self, win, listbox):
+        job = [None]
+
+        def _on_configure(_event=None):
+            if job[0] is not None:
+                try:
+                    win.after_cancel(job[0])
+                except Exception:
+                    pass
+            job[0] = win.after(
+                150, lambda: self._sync_history_list_scrollbar(listbox, win))
+
+        win.bind("<Configure>", _on_configure, add="+")
+
+    # ------------------------------------------------------------------
     # History list (Phase 3)
     # ------------------------------------------------------------------
 
@@ -615,8 +669,9 @@ class IcmpDiagWindow(ctk.CTkToplevel):
         listbox = ctk.CTkScrollableFrame(win, fg_color=("gray95","gray16"))
         listbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=(8, 10))
         listbox.grid_columnconfigure(0, weight=1)
+        self._hide_scrollbar_now(listbox)
+        self._bind_history_scrollbar_sync(win, listbox)
 
-        # Empty-state placeholder; replaced by _refresh_history_list
         self._refresh_history_list(listbox, win)
 
         # Close cleanup
@@ -628,86 +683,91 @@ class IcmpDiagWindow(ctk.CTkToplevel):
     def _refresh_history_list(self, listbox, win):
         """Re-query DB and re-render the row list.  Used on initial open
         and after explicit user refresh."""
-        # Clear existing children
-        for child in listbox.winfo_children():
-            try: child.destroy()
-            except Exception: pass
-
-        if self._data_store is None:
-            ctk.CTkLabel(listbox, text="DataStore 未初始化，无法读取历史",
-                         font=F(11), text_color="gray50").grid(
-                row=0, column=0, pady=20)
-            return
-
         try:
-            rows = self._data_store.get_diag_history(
-                target_id=self._target_id, limit=100)
-        except Exception as e:
-            ctk.CTkLabel(listbox, text=f"读取失败：{e}",
-                         font=F(11), text_color="#ef4444").grid(
-                row=0, column=0, pady=20)
-            return
+            for child in listbox.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
 
-        if not rows:
-            ctk.CTkLabel(listbox, text="暂无历史记录。完成一次诊断后将在此列出。",
-                         font=F(11), text_color="gray50").grid(
-                row=0, column=0, pady=20)
-            return
+            if self._data_store is None:
+                ctk.CTkLabel(listbox, text="DataStore 未初始化，无法读取历史",
+                             font=F(11), text_color="gray50").grid(
+                    row=0, column=0, pady=20)
+                return
 
-        import datetime
-        _MODE_TEXT = {"single": "单次", "stability": "稳定性", "pmtu": "PMTU"}
+            try:
+                rows = self._data_store.get_diag_history(
+                    target_id=self._target_id, limit=100)
+            except Exception as e:
+                ctk.CTkLabel(listbox, text=f"读取失败：{e}",
+                             font=F(11), text_color="#ef4444").grid(
+                    row=0, column=0, pady=20)
+                return
 
-        for i, rec in enumerate(rows):
-            ts_str = datetime.datetime.fromtimestamp(
-                rec["created_ts"]).strftime("%Y-%m-%d %H:%M:%S")
-            mode_txt = _MODE_TEXT.get(rec["mode"], rec["mode"])
-            # Compose a one-line summary per row.
-            if rec["mode"] == "pmtu":
-                if rec.get("max_df_payload") is not None:
-                    summary = (f"PMTU: 最大 {rec['max_df_payload']} B  "
-                               f"≈ {rec.get('estimated_path_mtu','?')} B MTU")
+            if not rows:
+                ctk.CTkLabel(
+                    listbox,
+                    text="暂无历史记录。完成一次诊断后将在此列出。",
+                    font=F(11), text_color="gray50").grid(
+                    row=0, column=0, pady=20)
+                return
+
+            import datetime
+            _MODE_TEXT = {"single": "单次", "stability": "稳定性", "pmtu": "PMTU"}
+
+            for i, rec in enumerate(rows):
+                ts_str = datetime.datetime.fromtimestamp(
+                    rec["created_ts"]).strftime("%Y-%m-%d %H:%M:%S")
+                mode_txt = _MODE_TEXT.get(rec["mode"], rec["mode"])
+                if rec["mode"] == "pmtu":
+                    if rec.get("max_df_payload") is not None:
+                        summary = (f"PMTU: 最大 {rec['max_df_payload']} B  "
+                                   f"≈ {rec.get('estimated_path_mtu','?')} B MTU")
+                    else:
+                        summary = "PMTU: 未能通过"
                 else:
-                    summary = "PMTU: 未能通过"
-            else:
-                loss = rec["loss_count"]
-                ok   = rec["success_count"]
-                df   = " DF" if rec["df"] else ""
-                avg  = (f"  avg {rec['avg_rtt_ms']} ms"
-                        if rec["avg_rtt_ms"] is not None else "")
-                summary = (f"{mode_txt}{df}  payload={rec['payload_size']}B  "
-                           f"{ok}/{ok+loss}{avg}")
+                    loss = rec["loss_count"]
+                    ok   = rec["success_count"]
+                    df   = " DF" if rec["df"] else ""
+                    avg  = (f"  avg {rec['avg_rtt_ms']} ms"
+                            if rec["avg_rtt_ms"] is not None else "")
+                    summary = (f"{mode_txt}{df}  payload={rec['payload_size']}B  "
+                               f"{ok}/{ok+loss}{avg}")
 
-            # Row colour reflects severity at a glance.
-            n_total = rec["success_count"] + rec["loss_count"]
-            if n_total > 0 and rec["loss_count"] == 0:
-                fg = ("gray90", "gray22")     # all ok
-            elif rec["loss_count"] >= n_total and n_total > 0:
-                fg = ("#fecaca", "#451a1a")   # total fail
-            else:
-                fg = ("#fef3c7", "#3d3017")   # partial
+                n_total = rec["success_count"] + rec["loss_count"]
+                if n_total > 0 and rec["loss_count"] == 0:
+                    fg = ("gray90", "gray22")
+                elif rec["loss_count"] >= n_total and n_total > 0:
+                    fg = ("#fecaca", "#451a1a")
+                else:
+                    fg = ("#fef3c7", "#3d3017")
 
-            row = ctk.CTkFrame(listbox, fg_color=fg, corner_radius=6)
-            row.grid(row=i, column=0, sticky="ew", padx=6, pady=3)
-            row.grid_columnconfigure(0, weight=1)
+                row = ctk.CTkFrame(listbox, fg_color=fg, corner_radius=6)
+                row.grid(row=i, column=0, sticky="ew", padx=6, pady=3)
+                row.grid_columnconfigure(0, weight=1)
 
-            ctk.CTkLabel(row, text=ts_str, font=F(10),
-                         text_color="gray50", anchor="w").grid(
-                row=0, column=0, sticky="w", padx=10, pady=(6, 0))
-            ctk.CTkLabel(row, text=summary, font=F(11, "bold"),
-                         anchor="w").grid(
-                row=1, column=0, sticky="w", padx=10, pady=(0, 2))
-            ctk.CTkLabel(row, text=rec["conclusion"][:140],
-                         font=F(10), text_color=("gray30","gray70"),
-                         anchor="w", wraplength=620, justify="left").grid(
-                row=2, column=0, sticky="w", padx=10, pady=(0, 6))
+                ctk.CTkLabel(row, text=ts_str, font=F(10),
+                             text_color="gray50", anchor="w").grid(
+                    row=0, column=0, sticky="w", padx=10, pady=(6, 0))
+                ctk.CTkLabel(row, text=summary, font=F(11, "bold"),
+                             anchor="w").grid(
+                    row=1, column=0, sticky="w", padx=10, pady=(0, 2))
+                ctk.CTkLabel(row, text=rec["conclusion"][:140],
+                             font=F(10), text_color=("gray30", "gray70"),
+                             anchor="w", wraplength=620, justify="left").grid(
+                    row=2, column=0, sticky="w", padx=10, pady=(0, 6))
 
-            # Click-to-replay binding — show on the parent window.
-            def _bind(widget, r=rec):
-                widget.bind("<Button-1>", lambda _e, rec=r: self._replay_history(rec))
-                widget.configure(cursor="hand2")
-            _bind(row)
-            for child in row.winfo_children():
-                _bind(child)
+                def _bind(widget, r=rec):
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, rec=r: self._replay_history(rec))
+                    widget.configure(cursor="hand2")
+                _bind(row)
+                for child in row.winfo_children():
+                    _bind(child)
+        finally:
+            self._sync_history_list_scrollbar(listbox, win)
 
     def _replay_history(self, rec: dict):
         """Show a historical record's summary + conclusion back in the
