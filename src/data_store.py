@@ -449,6 +449,22 @@ class DataStore:
             return {}
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
+    def should_use_hourly(self, start_ts: int, end_ts: int,
+                          raw_span_limit: int) -> bool:
+        """
+        True when get_history() must use pings_hourly for [start_ts, end_ts].
+
+        Any window starting before pings_raw retention, or longer than
+        raw_span_limit seconds, cannot rely on pings_raw alone.
+        """
+        start_ts = int(start_ts)
+        end_ts   = int(end_ts)
+        if end_ts < start_ts:
+            return False
+        raw_cutoff = int(time.time()) - self._raw_retention_days * 86400
+        return (start_ts < raw_cutoff
+                or (end_ts - start_ts) > int(raw_span_limit))
+
     def _waveform_points_hourly(self, conn, target_id: str,
                                 start_ts: int, end_ts: int) -> list:
         """Build waveform points from _bounded_hourly_buckets."""
@@ -487,8 +503,7 @@ class DataStore:
             "summary": {"avg_ms","min_ms","max_ms","loss_rate","sample_n"} }
         """
         span = end_ts - start_ts
-        raw_cutoff = int(time.time()) - self._raw_retention_days * 86400
-        use_hourly = start_ts < raw_cutoff or span > 172800
+        use_hourly = self.should_use_hourly(start_ts, end_ts, 172800)
         conn = self._read_conn()
         try:
             if use_hourly:
@@ -930,9 +945,8 @@ class DataStore:
                      targets_meta: Optional[dict] = None) -> str:
         """
         导出 Excel 报表。
-        时间跨度 ≤ 24 小时 → 秒级原始数据
-        时间跨度 > 24 小时  → 小时级聚合数据（控制行数，避免 Excel 溢出）
-        每个节点一个 Sheet，首页汇总。
+        窗口起点早于 pings_raw 保留期，或跨度 > 24 小时 → 小时级聚合；
+        否则 → 秒级原始数据。每个节点一个 Sheet，首页汇总。
         """
         try:
             import openpyxl
@@ -943,8 +957,7 @@ class DataStore:
         if targets_meta is None:
             targets_meta = self.get_targets_meta()
 
-        span_hours = (end_ts - start_ts) / 3600
-        use_hourly = span_hours > 24
+        use_hourly = self.should_use_hourly(start_ts, end_ts, 24 * 3600)
 
         wb = openpyxl.Workbook()
         wb.remove(wb.active)

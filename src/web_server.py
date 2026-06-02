@@ -6663,15 +6663,15 @@ class WebServer:
             """
             GET /api/stats?start=<unix_ts>&end=<unix_ts>
             Returns per-target aggregated stats for a time range.
-            Auto-selects pings_raw (span<=24h) or pings_hourly (span>24h).
+            Auto-selects pings_raw or pings_hourly via should_use_hourly().
             Used by the frontend charts for time-range-aware rendering.
             """
             if not self._data_store:
                 return json.dumps({}), 200, {"Content-Type":"application/json"}
             start = _qnum("start", int(time.time()) - 86400)
             end   = _qnum("end",   int(time.time()))
-            span  = end - start
-            use_hourly = span > 86400
+            use_hourly = self._data_store.should_use_hourly(
+                start, end, raw_span_limit=86400)
             result = {}
             # Only query active targets — deleted nodes stay in DB (soft-delete)
             # but must never appear in API responses.
