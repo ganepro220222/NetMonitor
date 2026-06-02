@@ -40,25 +40,28 @@ from pathlib import Path
 # Below this, ICMP subprocess round-trips dominate; values are clamped
 # at runtime and rejected in settings / per-target dialogs.
 MIN_PING_INTERVAL_S: float = 0.05
+MAX_PING_INTERVAL_S: float = 120.0
 
 
 def is_valid_ping_interval(value) -> bool:
-    """True when value is a finite float >= MIN_PING_INTERVAL_S."""
+    """True when value is a finite float within [MIN, MAX] seconds."""
     try:
         iv = float(value)
     except (TypeError, ValueError):
         return False
-    return math.isfinite(iv) and iv >= MIN_PING_INTERVAL_S
+    return (math.isfinite(iv)
+            and MIN_PING_INTERVAL_S <= iv <= MAX_PING_INTERVAL_S)
 
 
 def normalize_ping_interval(value, default: float = 1.0) -> float:
-    """Clamp configured ping_interval to a finite supported minimum."""
+    """Clamp configured ping_interval to a finite supported [MIN, MAX] range."""
     try:
         fallback = float(default)
     except (TypeError, ValueError):
         fallback = 1.0
     if not math.isfinite(fallback):
         fallback = 1.0
+    fallback = min(MAX_PING_INTERVAL_S, max(MIN_PING_INTERVAL_S, fallback))
 
     try:
         interval = float(value)
@@ -67,7 +70,7 @@ def normalize_ping_interval(value, default: float = 1.0) -> float:
     if not math.isfinite(interval):
         interval = fallback
 
-    return max(MIN_PING_INTERVAL_S, interval)
+    return min(MAX_PING_INTERVAL_S, max(MIN_PING_INTERVAL_S, interval))
 
 
 # 配置文件的默认内容。如果用户是第一次运行程序，
