@@ -712,19 +712,27 @@ class DataStore:
                 out[h] = bucket
         return out
 
+    def _raw_retention_cutoff(self) -> int:
+        """Earliest ts still present in pings_raw (exclusive lower bound)."""
+        return int(time.time()) - self._raw_retention_days * 86400
+
     def _partial_boundary_bucket(self, conn, target_id: str, hour_ts: int,
                                  win_start: int, win_end: int,
                                  hourly_by_hour: dict) -> Optional[dict]:
         """
         Partial-hour bucket: precise pings_raw slice when available.
 
-        One pings_raw read for the whole hour, then slice in Python so we
-        can tell an empty window from "raw purged":
+        One pings_raw read for the whole hour, then slice in Python.
 
-          * slice has rows → precise bucket;
-          * slice empty but hour still has raw → None (no out-of-window bleed);
-          * hour has no raw → fall back to pings_hourly full bucket (approx).
+          * window starts before raw retention cutoff → hourly approx
+            (purged slice cannot be rebuilt from later in-hour raw);
+          * else slice has rows → precise bucket;
+          * else hour still has raw → None (Bug 21, no out-of-window bleed);
+          * else → hourly approx (Bug 19, raw fully purged).
         """
+        raw_cutoff = self._raw_retention_cutoff()
+        if int(win_start) < raw_cutoff:
+            return hourly_by_hour.get(hour_ts)
         rows = conn.execute(
             "SELECT ts, latency_ms, status FROM pings_raw "
             "WHERE target_id=? AND ts >= ? AND ts < ?",
