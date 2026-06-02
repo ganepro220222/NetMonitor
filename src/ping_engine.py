@@ -721,20 +721,27 @@ class TargetMonitor:
             # De-escalation uses consecutive *successful* probes only.
             if latest.success:
                 if cur_sev == 2:
-                    # Red → orange on first success (partial recovery).
-                    # Orange → green still needs `recovery_need` successes.
-                    self._status = "orange"
-                    self._last_category = "availability"
-                    if self._pending_natural != "green":
-                        self._pending_natural  = "green"
-                        self._recovery_counter = 1
-                    else:
-                        self._recovery_counter += 1
-                    if self._recovery_counter >= recovery_need:
+                    if recovery_need <= 1:
+                        # Single-success recovery: skip orange partial step.
                         self._status          = "green"
                         self._last_category   = category
                         self._recovery_counter = 0
                         self._pending_natural  = None
+                    else:
+                        # Red → orange on first success (partial recovery).
+                        # Orange → green still needs `recovery_need` successes.
+                        self._status = "orange"
+                        self._last_category = "availability"
+                        if self._pending_natural != "green":
+                            self._pending_natural  = "green"
+                            self._recovery_counter = 1
+                        else:
+                            self._recovery_counter += 1
+                        if self._recovery_counter >= recovery_need:
+                            self._status          = "green"
+                            self._last_category   = category
+                            self._recovery_counter = 0
+                            self._pending_natural  = None
                 else:
                     # Orange (or gray) → green: full recovery debounce.
                     if self._pending_natural != natural:
