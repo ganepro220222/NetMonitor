@@ -41,7 +41,9 @@ def test_red_recovery_interrupted_by_failure():
     for i, row in enumerate(seq, 1):
         print(f"  {i} {row}")
     last = seq[-1]
-    ok = last["status"] == "red" and last["recovery_counter"] == 2
+    # After Bug33 partial recovery, successes leave red for orange;
+    # failure still resets the green-recovery counter (Bug32).
+    ok = last["status"] == "orange" and last["recovery_counter"] == 2
     print(f"Bug32 red interrupt: status={last['status']} rc="
           f"{last['recovery_counter']} -> {ok}")
     return ok

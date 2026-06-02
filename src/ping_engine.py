@@ -718,22 +718,35 @@ class TargetMonitor:
             self._recovery_counter = 0
             self._pending_natural  = None
         elif nat_sev < cur_sev:
-            # De-escalation: `recovery_count` means consecutive successful
-            # probes, not merely consecutive "green natural" ticks — a
-            # single loss can leave natural=green while cur is still red.
+            # De-escalation uses consecutive *successful* probes only.
             if latest.success:
-                # Must see `recovery_need` consecutive successes at the
-                # same lower-severity natural state before status updates.
-                if self._pending_natural != natural:
-                    self._pending_natural  = natural
-                    self._recovery_counter = 1
+                if cur_sev == 2:
+                    # Red → orange on first success (partial recovery).
+                    # Orange → green still needs `recovery_need` successes.
+                    self._status = "orange"
+                    self._last_category = "availability"
+                    if self._pending_natural != "green":
+                        self._pending_natural  = "green"
+                        self._recovery_counter = 1
+                    else:
+                        self._recovery_counter += 1
+                    if self._recovery_counter >= recovery_need:
+                        self._status          = "green"
+                        self._last_category   = category
+                        self._recovery_counter = 0
+                        self._pending_natural  = None
                 else:
-                    self._recovery_counter += 1
-                if self._recovery_counter >= recovery_need:
-                    self._status          = natural
-                    self._last_category   = category
-                    self._recovery_counter = 0
-                    self._pending_natural  = None
+                    # Orange (or gray) → green: full recovery debounce.
+                    if self._pending_natural != natural:
+                        self._pending_natural  = natural
+                        self._recovery_counter = 1
+                    else:
+                        self._recovery_counter += 1
+                    if self._recovery_counter >= recovery_need:
+                        self._status          = natural
+                        self._last_category   = category
+                        self._recovery_counter = 0
+                        self._pending_natural  = None
         else:
             # Same severity: keep _status as-is.  Update category so a
             # swap between e.g. orange/performance ↔ orange/availability
