@@ -1232,21 +1232,61 @@ class HTTPMonitor(TargetMonitor):
             raw = b""
             ttfb = None
             deadline = time.time() + timeout   # total per-request deadline
+            max_hdr  = 65536
+            body_start = b""
+            hdr_lines  = None
+            status_code = None
             try:
-                while b"\r\n\r\n" not in raw and len(raw) < 65536:
-                    remain = deadline - time.time()
-                    if remain <= 0:
-                        raise socket.timeout("total request timeout")
-                    sock.settimeout(max(0.01, remain))
-                    try:
-                        chunk = sock.recv(4096)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    if ttfb is None:
-                        ttfb = round((time.time()-t_sent)*1000, 1)
-                    raw += chunk
+                while True:
+                    while b"\r\n\r\n" not in raw and len(raw) < max_hdr:
+                        remain = deadline - time.time()
+                        if remain <= 0:
+                            raise socket.timeout("total request timeout")
+                        sock.settimeout(max(0.01, remain))
+                        try:
+                            chunk = sock.recv(4096)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        if ttfb is None:
+                            ttfb = round((time.time()-t_sent)*1000, 1)
+                        raw += chunk
+                    if b"\r\n\r\n" not in raw:
+                        r = PingResult(success=False, latency_ms=None,
+                                        failure_reason="header_incomplete",
+                                        timings=timings,
+                                        cert_days_left=cert_days)
+                        r._redirect_to = r._body = r._content_type = None
+                        return r
+                    hdr_block, _, remainder = raw.partition(b"\r\n\r\n")
+                    lines = hdr_block.split(b"\r\n")
+                    if not lines:
+                        r = PingResult(success=False, latency_ms=None,
+                                        failure_reason="bad_response",
+                                        timings=timings,
+                                        cert_days_left=cert_days)
+                        r._redirect_to = r._body = r._content_type = None
+                        return r
+                    status_line = lines[0].decode("ascii", errors="replace")
+                    code = HTTPMonitor._parse_http_status_code(status_line)
+                    if code is None:
+                        r = PingResult(success=False, latency_ms=None,
+                                        failure_reason="bad_response",
+                                        timings=timings,
+                                        cert_days_left=cert_days)
+                        r._redirect_to = r._body = r._content_type = None
+                        return r
+                    # Skip 1xx informational blocks (103 Early Hints, 100
+                    # Continue, …).  101 Switching Protocols is final here
+                    # because we do not perform protocol upgrades.
+                    if HTTPMonitor._is_informational_status(code):
+                        raw = remainder
+                        continue
+                    status_code = code
+                    hdr_lines   = lines
+                    body_start  = remainder
+                    break
             except socket.timeout:
                 r = PingResult(success=False, latency_ms=None,
                                 failure_reason="recv_timeout", timings=timings,
@@ -1254,27 +1294,6 @@ class HTTPMonitor(TargetMonitor):
                 r._redirect_to = r._body = r._content_type = None
                 return r
             timings["ttfb_ms"] = ttfb if ttfb is not None else 0.0
-
-            if b"\r\n\r\n" not in raw:
-                r = PingResult(success=False, latency_ms=None,
-                                failure_reason="header_incomplete",
-                                timings=timings,
-                                cert_days_left=cert_days)
-                r._redirect_to = r._body = r._content_type = None
-                return r
-
-            # ── Parse status + headers ────────────────────────────────
-            try:
-                hdr_block, _, body_start = raw.partition(b"\r\n\r\n")
-                hdr_lines   = hdr_block.split(b"\r\n")
-                status_line = hdr_lines[0].decode("ascii", errors="replace")
-                status_code = int(status_line.split(None, 2)[1])
-            except (ValueError, IndexError):
-                r = PingResult(success=False, latency_ms=None,
-                                failure_reason="bad_response", timings=timings,
-                                cert_days_left=cert_days)
-                r._redirect_to = r._body = r._content_type = None
-                return r
 
             location     = None
             content_type = None
@@ -1407,6 +1426,29 @@ class HTTPMonitor(TargetMonitor):
                 try: sock.close()
                 except Exception: pass
 
+
+    _HTTP_VERSION_RE = re.compile(r"^HTTP/\d+\.\d+$", re.ASCII)
+
+    @staticmethod
+    def _parse_http_status_code(status_line: str) -> Optional[int]:
+        """Return numeric status when the line is a valid HTTP/ response."""
+        parts = status_line.split(None, 2)
+        if len(parts) < 2:
+            return None
+        version, code_text = parts[0], parts[1]
+        if not HTTPMonitor._HTTP_VERSION_RE.match(version):
+            return None
+        if len(code_text) != 3 or not code_text.isdigit():
+            return None
+        code = int(code_text)
+        if code < 100 or code > 599:
+            return None
+        return code
+
+    @staticmethod
+    def _is_informational_status(code: int) -> bool:
+        """True for 1xx responses that may precede a final status line."""
+        return 100 <= code < 200 and code != 101
 
     @staticmethod
     def _read_chunked_body(sock, initial: bytes, body_limit: int,
