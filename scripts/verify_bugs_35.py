@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config_manager import (
     DEFAULT_CONFIG,
     MIN_PING_INTERVAL_S,
+    is_valid_ping_interval,
     normalize_ping_interval,
 )
 from src.history_store import DataPoint, HistoryStore, TargetHistory
@@ -34,7 +35,7 @@ def _plot_at_anchor(hist: TargetHistory):
 
 def _dialog_accepts(iv: float) -> bool:
     """Same rule as AddTargetDialog / EditTargetDialog."""
-    return iv >= MIN_PING_INTERVAL_S
+    return is_valid_ping_interval(iv)
 
 
 def test_defaults_are_7000():

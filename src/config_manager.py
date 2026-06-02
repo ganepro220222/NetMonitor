@@ -31,6 +31,7 @@ EDIT_MANAGED_KEYS = (
     "dns_domain", "dns_expected",
     "ipv6_only", "timeout",
 )
+import math
 import threading
 from pathlib import Path
 
@@ -41,12 +42,31 @@ from pathlib import Path
 MIN_PING_INTERVAL_S: float = 0.05
 
 
+def is_valid_ping_interval(value) -> bool:
+    """True when value is a finite float >= MIN_PING_INTERVAL_S."""
+    try:
+        iv = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(iv) and iv >= MIN_PING_INTERVAL_S
+
+
 def normalize_ping_interval(value, default: float = 1.0) -> float:
-    """Clamp configured ping_interval to the supported minimum."""
+    """Clamp configured ping_interval to a finite supported minimum."""
+    try:
+        fallback = float(default)
+    except (TypeError, ValueError):
+        fallback = 1.0
+    if not math.isfinite(fallback):
+        fallback = 1.0
+
     try:
         interval = float(value)
     except (TypeError, ValueError):
-        interval = default
+        interval = fallback
+    if not math.isfinite(interval):
+        interval = fallback
+
     return max(MIN_PING_INTERVAL_S, interval)
 
 

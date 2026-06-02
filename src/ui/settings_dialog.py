@@ -9,6 +9,8 @@ Settings are validated before saving.  Changes are applied immediately
 via on_save callback (engine settings, web-server state, etc.).
 """
 
+import math
+
 import customtkinter as ctk
 from tkinter import messagebox
 from src.config_manager import MIN_PING_INTERVAL_S
@@ -367,6 +369,10 @@ class SettingsDialog(ctk.CTkToplevel):
                     new_val = int(raw)
             except ValueError:
                 errors.append(f"「{key}」必须是{'小数' if dtype=='float' else '整数'}")
+                continue
+
+            if dtype == "float" and not math.isfinite(new_val):
+                errors.append(f"「{key}」必须是有限数值")
                 continue
 
             if lo is not None and new_val < lo:

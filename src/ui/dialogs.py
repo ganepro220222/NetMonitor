@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.config_manager import MIN_PING_INTERVAL_S
+from src.config_manager import MIN_PING_INTERVAL_S, is_valid_ping_interval
 
 """
 dialogs.py
@@ -453,10 +453,11 @@ class AddTargetDialog(_BaseDialog):
         if iv_str:
             try:
                 iv = float(iv_str)
-                if iv < MIN_PING_INTERVAL_S: raise ValueError
+                if not is_valid_ping_interval(iv):
+                    raise ValueError
                 thresholds["ping_interval"] = iv
             except ValueError:
-                self._error("Ping 间隔不能低于 0.05 秒"); return
+                self._error("Ping 间隔必须是 0.05~120 秒之间的有效数值"); return
 
         self.result = {"label": label, "ip": ip,
                        "thresholds": thresholds or None, **type_result}
@@ -609,11 +610,11 @@ class EditTargetDialog(_BaseDialog):
         if iv_str:
             try:
                 iv = float(iv_str)
-                if iv < MIN_PING_INTERVAL_S:
+                if not is_valid_ping_interval(iv):
                     raise ValueError
                 thresholds["ping_interval"] = iv
             except ValueError:
-                self._error("Ping 间隔不能低于 0.05 秒")
+                self._error("Ping 间隔必须是 0.05~120 秒之间的有效数值")
                 return
 
         self.result = {
