@@ -1458,20 +1458,46 @@ class HTTPMonitor(TargetMonitor):
                 return None, "chunked_bad_size"
             return chunk_size, None
 
-        def _consume_chunk_data(chunk_size: int, accumulate: bool
-                                ) -> Optional[str]:
-            nonlocal buf, out
-            if not _need(chunk_size + 2):
-                return "chunked_premature_eof"
-            if accumulate:
-                take = min(chunk_size, body_limit - len(out))
-                if take > 0:
-                    out += buf[:take]
-            buf = buf[chunk_size:]
+        def _consume_crlf() -> Optional[str]:
+            nonlocal buf
+            while len(buf) < 2:
+                if not _recv_more():
+                    return "chunked_premature_eof"
             if not buf.startswith(b"\r\n"):
                 return "chunked_bad_framing"
             buf = buf[2:]
             return None
+
+        def _consume_chunk_data(chunk_size: int, accumulate: bool
+                                ) -> Optional[str]:
+            nonlocal buf, out
+            remaining = chunk_size
+            while remaining > 0:
+                if buf:
+                    n = min(len(buf), remaining, 4096)
+                else:
+                    remain = deadline - time.time()
+                    if remain <= 0:
+                        raise socket.timeout("body read total timeout")
+                    sock.settimeout(max(0.01, remain))
+                    try:
+                        piece = sock.recv(min(remaining, 4096))
+                    except OSError:
+                        return "chunked_premature_eof"
+                    if not piece:
+                        return "chunked_premature_eof"
+                    if accumulate and len(out) < body_limit:
+                        take = min(len(piece), body_limit - len(out))
+                        out += piece[:take]
+                    remaining -= len(piece)
+                    continue
+                n = min(len(buf), remaining, 4096)
+                if accumulate and len(out) < body_limit:
+                    take = min(n, body_limit - len(out))
+                    out += buf[:take]
+                buf = buf[n:]
+                remaining -= n
+            return _consume_crlf()
 
         try:
             accumulate = True
