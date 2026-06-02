@@ -45,14 +45,14 @@ class TargetHistory:
     视觉上一致，排查近期故障时细节不会被长时间跨度淹没。
 
     WINDOW_SECONDS = 300：所有节点的图表均显示最近 5 分钟。
-    maxlen = 1000：内存安全上限（1s 间隔 = 16 分钟存储，远超显示窗口）。
+    maxlen = 7000：内存安全上限（0.05s 间隔 ≈ 5.8 分钟存储，覆盖 5 分钟窗口）。
     每次读取数据时过滤掉 WINDOW_SECONDS 之前的点，不存额外数据到图表。
     """
 
     WINDOW_SECONDS: int = 300   # 所有图表统一显示最近 N 秒
-    # At global min ping_interval (0.5s) a full window needs ~600 samples;
-    # 1000 leaves headroom for per-target overrides down to 0.5s.
-    DEFAULT_MAXLEN: int = 1000
+    # At MIN_PING_INTERVAL_S (0.05s) a full window needs ~6000 samples;
+    # 7000 leaves headroom for scheduling jitter and boundary inclusion.
+    DEFAULT_MAXLEN: int = 7000
 
     def __init__(self, maxlen: int = DEFAULT_MAXLEN):
         # maxlen 是内存安全上限，与显示窗口无关

@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+from src.config_manager import MIN_PING_INTERVAL_S
+
 """
 dialogs.py
 ==========
@@ -450,10 +453,10 @@ class AddTargetDialog(_BaseDialog):
         if iv_str:
             try:
                 iv = float(iv_str)
-                if iv < 0.5: raise ValueError
+                if iv < MIN_PING_INTERVAL_S: raise ValueError
                 thresholds["ping_interval"] = iv
             except ValueError:
-                self._error("Ping 间隔不能低于 0.5 秒（与全局设置一致）"); return
+                self._error("Ping 间隔不能低于 0.05 秒"); return
 
         self.result = {"label": label, "ip": ip,
                        "thresholds": thresholds or None, **type_result}
@@ -606,11 +609,11 @@ class EditTargetDialog(_BaseDialog):
         if iv_str:
             try:
                 iv = float(iv_str)
-                if iv < 0.5:
+                if iv < MIN_PING_INTERVAL_S:
                     raise ValueError
                 thresholds["ping_interval"] = iv
             except ValueError:
-                self._error("Ping 间隔不能低于 0.5 秒（与全局设置一致）")
+                self._error("Ping 间隔不能低于 0.05 秒")
                 return
 
         self.result = {

@@ -77,6 +77,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from src.config_manager import normalize_ping_interval
+
 
 # ======================================================================
 # Data classes
@@ -455,7 +457,8 @@ class TargetMonitor:
         while not self._stop_event.is_set():
             if self._pause_event.is_set():
                 self._stop_event.wait(0.5); continue
-            interval = self.settings.get("ping_interval", 1.0)
+            interval = normalize_ping_interval(
+                self.settings.get("ping_interval", 1.0))
             t0 = time.time()
             try:
                 # Capture the IP version we're about to probe.  If

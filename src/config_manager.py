@@ -35,6 +35,21 @@ import threading
 from pathlib import Path
 
 
+# Shortest ping interval the product formally supports (50 ms).
+# Below this, ICMP subprocess round-trips dominate; values are clamped
+# at runtime and rejected in settings / per-target dialogs.
+MIN_PING_INTERVAL_S: float = 0.05
+
+
+def normalize_ping_interval(value, default: float = 1.0) -> float:
+    """Clamp configured ping_interval to the supported minimum."""
+    try:
+        interval = float(value)
+    except (TypeError, ValueError):
+        interval = default
+    return max(MIN_PING_INTERVAL_S, interval)
+
+
 # 配置文件的默认内容。如果用户是第一次运行程序，
 # config.json 不存在，我们就用这个内容创建一个。
 DEFAULT_CONFIG = {

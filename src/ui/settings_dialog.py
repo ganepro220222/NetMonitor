@@ -11,6 +11,7 @@ via on_save callback (engine settings, web-server state, etc.).
 
 import customtkinter as ctk
 from tkinter import messagebox
+from src.config_manager import MIN_PING_INTERVAL_S
 from src.ui.fonts import make as F
 
 
@@ -19,7 +20,8 @@ from src.ui.fonts import make as F
 
 _SECTIONS = [
     ("监测参数", [
-        ("ping_interval",           "全局 Ping 间隔 (秒)",      "float", 0.5, 120, "ICMP 建议 1~2 秒，HTTP 建议 30~60 秒"),
+        ("ping_interval",           "全局 Ping 间隔 (秒)",      "float", MIN_PING_INTERVAL_S, 120,
+         "最短 0.05 秒（50ms）；ICMP 建议 1~2 秒，HTTP 建议 30~60 秒"),
         ("window_size",             "滑动窗口大小",              "int",   5,   30,  "用最近 N 次 ping 计算丢包率和抖动"),
         ("consecutive_loss_orange", "连续丢包 → 橙色 (次)",     "int",   1,   20,  "连续丢包达到此次数变为警告"),
         ("consecutive_loss_red",    "连续丢包 → 红色 (次)",     "int",   2,   30,  "连续丢包达到此次数变为告警"),
