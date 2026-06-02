@@ -5619,10 +5619,23 @@ def _add_firewall_rule(port: int):
 class WebServer:
     MAX_HISTORY = 60
 
-    def __init__(self, port: int = 8765, log_dir: str = None, sound_dir: str = None):
+    def __init__(self, port: int = 8765, log_dir: str = None, sound_dir: str = None,
+                 allow_lan: bool = False):
         self.port          = port
         self._log_dir      = log_dir    # None = auto-detect in _run()
         self._sound_dir    = sound_dir  # writable WAV dir (DATA_DIR/assets)
+        # Default to loopback-only binding.  Pre-2025 the server bound
+        # 0.0.0.0 unconditionally AND netsh-added a Windows firewall
+        # rule for every profile (domain/private/public), so the
+        # dashboard + every API endpoint -- including
+        # /api/traceroute/quick which runs subprocess.Popen on an
+        # operator-supplied IP -- was reachable to any host that
+        # could route to the box, with no authentication of any
+        # kind.  Loopback-only by default keeps the dashboard usable
+        # without exposing it.  Operators who genuinely need LAN
+        # access can flip web_allow_lan in settings; that path also
+        # gates the Windows firewall add.
+        self._allow_lan    = bool(allow_lan)
         self._running      = False
         self._server       = None       # werkzeug BaseWSGIServer; set in _run()
         # Used by start() / restart() to wait for the background _run()
@@ -5721,9 +5734,13 @@ class WebServer:
         self._bind_done.clear()
         self._bind_ok = False
         self._running = True
-        # Windows: 自动添加防火墙入站规则，允许局域网访问。
-        # netsh 无需重启，规则立即生效；已存在时静默忽略。
-        _add_firewall_rule(self.port)
+        # Windows: only add the netsh firewall rule when LAN access
+        # is explicitly enabled.  In loopback-only mode the bind is
+        # 127.0.0.1 so the OS firewall already drops every remote
+        # packet -- opening the public profile would be misleading
+        # (and a misconfiguration risk).
+        if self._allow_lan:
+            _add_firewall_rule(self.port)
         threading.Thread(target=self._run, daemon=True, name="web-server").start()
         # Wait for the background thread to actually bind the port (or
         # fail to).  make_server() either returns immediately (success)
@@ -5776,7 +5793,9 @@ class WebServer:
             deadline = _t.time() + 2.0
             while self._server is not None and _t.time() < deadline:
                 _t.sleep(0.1)
-        _add_firewall_rule(self.port)
+        # Same loopback-only / LAN-only gate as start() above.
+        if self._allow_lan:
+            _add_firewall_rule(self.port)
         # Reset the bind-done handshake before relaunching (see start()
         # for the rationale).
         self._bind_done.clear()
@@ -6340,7 +6359,10 @@ class WebServer:
 
         try:
             from werkzeug.serving import make_server as _make_wsgi_server
-            srv = _make_wsgi_server("0.0.0.0", self.port, self._app,
+            # Loopback by default; bind 0.0.0.0 only when the operator
+            # explicitly opted into LAN access via web_allow_lan.
+            bind_host = "0.0.0.0" if self._allow_lan else "127.0.0.1"
+            srv = _make_wsgi_server(bind_host, self.port, self._app,
                                     threaded=True)
             self._server = srv
             # Re-assert _running in case an OLD _run thread's finally
@@ -6351,7 +6373,7 @@ class WebServer:
             # whether the old thread exits before, during, or after the
             # new thread finishes binding.
             self._running = True
-            _write(f"serving on http://0.0.0.0:{self.port}")
+            _write(f"serving on http://{bind_host}:{self.port}")
             # Bind succeeded — signal start() so it can stop blocking and
             # report success.  serve_forever() blocks indefinitely so the
             # signal MUST happen before it; otherwise start() times out

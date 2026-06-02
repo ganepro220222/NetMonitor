@@ -1469,6 +1469,24 @@ class DataStore:
                         last_hourly = now
 
                     if now - last_cleanup >= 86400:
+                        # MUST run the hourly aggregation BEFORE the
+                        # cleanup that deletes expired pings_raw rows.
+                        # Without this ordering, the very first
+                        # post-startup iteration fires _cleanup (because
+                        # last_cleanup was initialised to now-86400 to
+                        # trigger immediately) but skips _hourly_agg
+                        # (because last_hourly was initialised to now),
+                        # so any unsummed raw rows older than the raw-
+                        # retention window get DELETE'd without ever
+                        # being folded into pings_hourly -- the SLA /
+                        # waveform record for that window is then
+                        # permanently lost.  Re-aggregating here is a
+                        # cheap no-op when there's nothing pending, so
+                        # making it unconditional before every cleanup
+                        # closes the gap without complicating the
+                        # periodic-aggregation logic.
+                        self._hourly_agg(conn)
+                        last_hourly = now
                         self._cleanup(conn)
                         last_cleanup = now
 

@@ -125,9 +125,16 @@ def main():
     alerter = AlertManager(enabled=(True if _sound_pref is None else bool(_sound_pref)),
                             assets_dir=_assets_rw)
     logger  = Logger(log_dir=os.path.join(DATA_DIR, "logs"))
+    # web_allow_lan defaults to False -- the dashboard + API endpoints
+    # (some of which run subprocess.Popen on operator-supplied IPs)
+    # have no authentication, so loopback-only is the safe default.
+    # Operators who genuinely need LAN access set
+    # web_allow_lan = true in config; that path also gates the
+    # Windows netsh firewall rule add.
     web     = WebServer(port=config.get_setting("web_port") or 8765,
                         log_dir=os.path.join(DATA_DIR, "logs"),
-                        sound_dir=_assets_rw)
+                        sound_dir=_assets_rw,
+                        allow_lan=bool(config.get_setting("web_allow_lan") or False))
 
     # MAIN-1: apply saved traceroute settings immediately so the scheduler
     # uses the user's config from the first second, not the defaults.

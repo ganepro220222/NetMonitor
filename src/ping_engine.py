@@ -1233,6 +1233,8 @@ class HTTPMonitor(TargetMonitor):
 
             location     = None
             content_type = None
+            content_length = None
+            transfer_encoding = None
             for line in hdr_lines[1:]:
                 try:
                     decoded = line.decode("latin-1", errors="replace")
@@ -1246,13 +1248,52 @@ class HTTPMonitor(TargetMonitor):
                     location = value.strip()
                 elif name_lower == "content-type":
                     content_type = value.strip()
+                elif name_lower == "content-length":
+                    # Parse the response-body length now so the body
+                    # read loop below can stop the moment the framed
+                    # body is fully received.  Pre-2025 the loop only
+                    # exited on body_limit / EOF / timeout, so a
+                    # well-formed Content-Length response from a server
+                    # that kept the socket open (proxies, gateways,
+                    # custom services) was misclassified as
+                    # body_recv_timeout even though the body had
+                    # already arrived in full and the keyword had
+                    # already matched.  Tolerate bogus values
+                    # silently -- a server that lies about the length
+                    # falls back to the existing "read until EOF /
+                    # body_limit" path.
+                    try:
+                        n = int(value.strip())
+                        if n >= 0:
+                            content_length = n
+                    except ValueError:
+                        pass
+                elif name_lower == "transfer-encoding":
+                    transfer_encoding = value.strip().lower()
 
             # ── Read body (GET only, up to body_limit bytes) ─────────
             body = None
             if method == "GET" and body_limit > 0:
                 body = body_start
+                # Stop target: Content-Length wins (when valid) so we
+                # don't wait for the server to close the socket --
+                # well-behaved servers / gateways often keep the
+                # connection open after the framed body even when the
+                # client sent `Connection: close`, and the old "read
+                # until EOF" loop would treat that as
+                # body_recv_timeout despite the body already being
+                # fully delivered.  body_limit still caps the
+                # absolute read size; whichever bound trips first
+                # ends the loop.  chunked responses fall through to
+                # the EOF / timeout path -- handling chunked framing
+                # properly requires a full chunk parser we don't have
+                # yet, but the same body_limit cap still applies.
+                if content_length is not None and transfer_encoding != "chunked":
+                    body_stop = min(content_length, body_limit)
+                else:
+                    body_stop = body_limit
                 try:
-                    while len(body) < body_limit:
+                    while len(body) < body_stop:
                         remain = deadline - time.time()
                         if remain <= 0:
                             raise socket.timeout("body read total timeout")
@@ -1454,12 +1495,27 @@ class DNSMonitor(TargetMonitor):
             sock      = socket.socket(af, socket.SOCK_DGRAM)
             t0        = time.time()
             deadline  = t0 + timeout
-            sock.sendto(query, (self.ip, 53))
+            # connect() the UDP socket to the configured DNS server so
+            # the OS only delivers packets whose source matches
+            # (self.ip, 53).  Without this any forged UDP packet that
+            # happens to carry our transaction id is accepted as a
+            # "successful" reply -- which lets an attacker who can
+            # inject UDP into the probe socket make a dead DNS server
+            # look healthy on the monitor.  send() + recv() (instead
+            # of sendto/recvfrom) ensures the kernel's source filter
+            # is what enforces this, not application-level matching
+            # we'd otherwise have to add to every recv path below.
+            sock.connect((self.ip, 53))
+            sock.send(query)
 
             # Keep reading until we see OUR txid or the total deadline passes.
             # Stray / delayed UDP packets (previous timed-out query, port
             # noise) must be discarded — a single mismatch must not be
             # treated as probe failure while the real answer may still arrive.
+            # NB: with connect() above, the OS already filters out any
+            # packet whose source is not (self.ip, 53), so a recv()
+            # here will only ever return bytes from the configured
+            # DNS server.
             data = None
             while time.time() < deadline:
                 remaining = deadline - time.time()
@@ -1467,7 +1523,7 @@ class DNSMonitor(TargetMonitor):
                     break
                 sock.settimeout(max(0.01, remaining))
                 try:
-                    packet, _ = sock.recvfrom(4096)
+                    packet = sock.recv(4096)
                 except socket.timeout:
                     break
                 if len(packet) >= 2 and packet[:2] == txid_sent:
