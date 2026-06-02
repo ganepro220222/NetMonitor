@@ -1408,42 +1408,62 @@ class HTTPMonitor(TargetMonitor):
                     return False
             return True
 
-        try:
+        def _read_trailer_section() -> Optional[str]:
+            """Require the blank line that ends the trailer section."""
+            nonlocal buf
             while True:
                 while b"\r\n" not in buf:
                     if not _recv_more():
-                        return out[:body_limit], "chunked_premature_eof"
-                    if len(buf) > 65536:
-                        return out[:body_limit], "chunked_bad_framing"
-                size_line, _, buf = buf.partition(b"\r\n")
-                try:
-                    chunk_size = int(size_line.split(b";", 1)[0].strip(), 16)
-                except ValueError:
-                    return out[:body_limit], "chunked_bad_size"
-                if chunk_size < 0:
-                    return out[:body_limit], "chunked_bad_size"
-                if chunk_size > body_limit - len(out):
-                    return out[:body_limit], "chunked_chunk_too_large"
+                        return "chunked_premature_eof"
+                line, _, buf = buf.partition(b"\r\n")
+                if line == b"":
+                    return None
+
+        def _read_chunk_header() -> tuple[Optional[int], Optional[str]]:
+            nonlocal buf
+            while b"\r\n" not in buf:
+                if not _recv_more():
+                    return None, "chunked_premature_eof"
+                if len(buf) > 65536:
+                    return None, "chunked_bad_framing"
+            size_line, _, buf = buf.partition(b"\r\n")
+            try:
+                chunk_size = int(size_line.split(b";", 1)[0].strip(), 16)
+            except ValueError:
+                return None, "chunked_bad_size"
+            if chunk_size < 0:
+                return None, "chunked_bad_size"
+            return chunk_size, None
+
+        def _consume_chunk_data(chunk_size: int, accumulate: bool
+                                ) -> Optional[str]:
+            nonlocal buf, out
+            if not _need(chunk_size + 2):
+                return "chunked_premature_eof"
+            if accumulate:
+                take = min(chunk_size, body_limit - len(out))
+                if take > 0:
+                    out += buf[:take]
+            buf = buf[chunk_size:]
+            if not buf.startswith(b"\r\n"):
+                return "chunked_bad_framing"
+            buf = buf[2:]
+            return None
+
+        try:
+            accumulate = True
+            while True:
+                chunk_size, err = _read_chunk_header()
+                if err:
+                    return out[:body_limit], err
                 if chunk_size == 0:
-                    # 0\r\n ends chunk data; trailer lines (if any) follow
-                    # immediately — they do NOT start with \r\n.
-                    while buf:
-                        while b"\r\n" not in buf:
-                            if not _recv_more():
-                                return out[:body_limit], None
-                        trailer, _, buf = buf.partition(b"\r\n")
-                        if trailer == b"":
-                            break
-                    return out[:body_limit], None
-                if not _need(chunk_size + 2):
-                    return out[:body_limit], "chunked_premature_eof"
-                out += buf[:chunk_size]
-                buf = buf[chunk_size:]
-                if not buf.startswith(b"\r\n"):
-                    return out[:body_limit], "chunked_bad_framing"
-                buf = buf[2:]
-                if len(out) >= body_limit:
-                    return out[:body_limit], None
+                    err = _read_trailer_section()
+                    return out[:body_limit], err
+                err = _consume_chunk_data(chunk_size, accumulate)
+                if err:
+                    return out[:body_limit], err
+                if accumulate and len(out) >= body_limit:
+                    accumulate = False
         except socket.timeout:
             return out[:body_limit], "body_recv_timeout"
 

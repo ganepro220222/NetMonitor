@@ -665,7 +665,7 @@ class DataStore:
         lat_avg = base.get("lat_avg")
         if extra["lat_avg"] is not None and new_sn:
             if lat_avg is not None and old_sn:
-                lat_avg = ((lat_avg * old_sn) + (extra["lat_avg"] * new_sn)
+                lat_avg = (((lat_avg * old_sn) + (extra["lat_avg"] * new_sn))
                            / (old_sn + new_sn))
             else:
                 lat_avg = extra["lat_avg"]
@@ -675,7 +675,7 @@ class DataStore:
         lat_p95 = base.get("lat_p95")
         if extra["lat_p95"] is not None and new_sn:
             if lat_p95 is not None and old_sn:
-                lat_p95 = ((lat_p95 * old_sn) + (extra["lat_p95"] * new_sn)
+                lat_p95 = (((lat_p95 * old_sn) + (extra["lat_p95"] * new_sn))
                            / (old_sn + new_sn))
             else:
                 lat_p95 = extra["lat_p95"]

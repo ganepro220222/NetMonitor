@@ -74,7 +74,7 @@ def test_bug11_current_hour_stats():
         conn.execute(
             "INSERT INTO pings_raw (target_id,ts,status,latency_ms,loss_rate,"
             "status_code,failure_reason,ping_type) VALUES (?,?,?,?,?,?,?,?)",
-            (tid, ch + 30, "green", 99.0, 0.0, None, None, "icmp"))
+            (tid, ch + 30, "green", 30.0, 0.0, None, None, "icmp"))
         conn.commit()
         ds._hourly_agg(conn)
         conn.close()
@@ -82,9 +82,13 @@ def test_bug11_current_hour_stats():
         hist = ds.get_history(tid, start, now, use_hourly=True)
         total = sum(r["sample_n"] for r in hist)
         sla = ds.get_sla_stats(tid, start, now)
-        ok = total >= 2 and sla.get("sample_n", 0) >= 2 and any(
-            abs(r.get("lat_avg", 0) - 99) < 1 for r in hist if r["hour_ts"] == ch)
-        print(f"Bug11: hist_samples={total} sla_n={sla.get('sample_n')} -> {ok}")
+        batch = ds.get_sla_stats_batch([tid], start, now)[tid]
+        expected_avg = 20.0  # (10 + 30) / 2
+        ok = (total >= 2 and sla.get("sample_n", 0) >= 2
+                and abs(sla.get("lat_avg", 0) - expected_avg) < 0.001
+                and abs(batch.get("lat_avg", 0) - expected_avg) < 0.001)
+        print(f"Bug11/14: sla_avg={sla.get('lat_avg')} batch_avg={batch.get('lat_avg')} "
+              f"expected={expected_avg} -> {ok}")
         return ok
     finally:
         try:
