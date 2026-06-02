@@ -6903,18 +6903,12 @@ class WebServer:
             start = _qnum("start", int(time.time()) - 86400)
             end   = _qnum("end",   int(time.time()))
             dtype = request.args.get("type", "raw")
-            # Auto-downsample for over-long raw windows.  A 1Hz target
-            # with 7d raw retention can produce ~600k rows = ~70 MB of
-            # JSON for a single request; serialising that on the Flask
-            # worker thread blocks every other request and can OOM the
-            # process under concurrent load.  Anything wider than 24h
-            # is forced to the hourly aggregate (same threshold
-            # /api/waveform already uses for its 1m -> 1h switch).
-            # Callers that want truly fine-grained data over a long
-            # window must paginate by issuing multiple narrower
-            # requests.
+            # Auto-downsample when raw is unsuitable: span > 24h, window
+            # starts before pings_raw retention, or both (see
+            # should_use_hourly — same helper as /api/stats and export).
             _RAW_SPAN_CAP = 86400   # 24 h
-            if dtype == "raw" and (end - start) > _RAW_SPAN_CAP:
+            if dtype == "raw" and self._data_store.should_use_hourly(
+                    start, end, raw_span_limit=_RAW_SPAN_CAP):
                 dtype = "hourly"
             rows  = self._data_store.get_history(
                         tid, start, end, use_hourly=(dtype == "hourly"))
