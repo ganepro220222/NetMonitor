@@ -3333,8 +3333,17 @@ class DataStore:
                          (now - self._raw_retention_days * 86400,))
             conn.execute("DELETE FROM pings_hourly WHERE hour_ts<?",
                          (now - self._hourly_retention_days * 86400,))
-            conn.execute("DELETE FROM alert_events WHERE ts<?",
-                         (now - self._alert_retention_days * 86400,))
+            # Keep each target's latest event as a status anchor so an
+            # ongoing outage (no recovery row) is not forgotten once older
+            # transitions age out — SLA, waveform overlay, and incident
+            # restore all read boundary state from alert_events.
+            alert_cutoff = now - self._alert_retention_days * 86400
+            conn.execute(
+                "DELETE FROM alert_events WHERE ts<? "
+                "AND id NOT IN ("
+                "  SELECT MAX(id) FROM alert_events GROUP BY target_id"
+                ")",
+                (alert_cutoff,))
             conn.execute("DELETE FROM traceroute_logs WHERE ts<?",
                          (now - self._traceroute_retention_days * 86400,))
             conn.execute("DELETE FROM icmp_diagnostic_history WHERE created_ts<?",
