@@ -1238,7 +1238,10 @@ class HTTPMonitor(TargetMonitor):
                     if remain <= 0:
                         raise socket.timeout("total request timeout")
                     sock.settimeout(max(0.01, remain))
-                    chunk = sock.recv(4096)
+                    try:
+                        chunk = sock.recv(4096)
+                    except OSError:
+                        break
                     if not chunk:
                         break
                     if ttfb is None:
@@ -1354,7 +1357,14 @@ class HTTPMonitor(TargetMonitor):
                     r._redirect_to = r._body = r._content_type = None
                     return r
                 except OSError:
-                    if content_length is not None and not is_chunked:
+                    if is_chunked:
+                        r = PingResult(success=False, latency_ms=None,
+                                        failure_reason="chunked_premature_eof",
+                                        timings=timings,
+                                        cert_days_left=cert_days)
+                        r._redirect_to = r._body = r._content_type = None
+                        return r
+                    if content_length is not None:
                         body_framing_complete = False
                 body = body[:body_limit]
 
@@ -1368,6 +1378,16 @@ class HTTPMonitor(TargetMonitor):
             r._body_framing_complete = body_framing_complete
             return r
 
+        except OSError:
+            te = locals().get("transfer_encoding") or ""
+            reason = ("chunked_premature_eof" if "chunked" in te
+                      else "recv_closed")
+            r = PingResult(success=False, latency_ms=None,
+                            failure_reason=reason,
+                            timings=timings or None,
+                            cert_days_left=cert_days)
+            r._redirect_to = r._body = r._content_type = None
+            return r
         except Exception as e:
             r = PingResult(success=False, latency_ms=None,
                             failure_reason=f"unexpected:{type(e).__name__}",
@@ -1397,7 +1417,10 @@ class HTTPMonitor(TargetMonitor):
             if remain <= 0:
                 raise socket.timeout("body read total timeout")
             sock.settimeout(max(0.01, remain))
-            chunk = sock.recv(4096)
+            try:
+                chunk = sock.recv(4096)
+            except OSError:
+                return False
             if chunk:
                 buf += chunk
             return bool(chunk)
@@ -1466,6 +1489,8 @@ class HTTPMonitor(TargetMonitor):
                     accumulate = False
         except socket.timeout:
             return out[:body_limit], "body_recv_timeout"
+        except OSError:
+            return out[:body_limit], "chunked_premature_eof"
 
     @staticmethod
     def _keyword_match(body: bytes, content_type: str, keyword: str, mode: str) -> bool:
