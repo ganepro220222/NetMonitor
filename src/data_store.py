@@ -1061,6 +1061,48 @@ class DataStore:
             return []
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
+    @staticmethod
+    def _alert_event_from_row(row) -> dict:
+        return {"id": row[0], "target_id": row[1], "label": row[2], "ip": row[3],
+                "ts": row[4], "old_status": row[5], "new_status": row[6],
+                "category": row[7], "failure_reason": row[8] if len(row) > 8 else "",
+                "incident_id": row[9] if len(row) > 9 else None}
+
+    def _get_export_alert_events(self, conn, target_id: str,
+                                 start_ts: int, end_ts: int) -> list:
+        """Alert events for Excel timeline: boundary state + in-window stream.
+
+        Mirrors get_sla_stats() boundary lookup: the last red/orange-touching
+        event before start_ts seeds ongoing incidents that began before the
+        export window (Case C).  Window events are [start_ts, end_ts].
+        """
+        boundary = conn.execute(
+            "SELECT id, target_id, label, ip, ts, old_status, new_status, "
+            "category, failure_reason, incident_id FROM alert_events "
+            "WHERE target_id=? "
+            "AND (new_status IN ('red','orange') OR old_status IN ('red','orange')) "
+            "AND ts < ? "
+            "ORDER BY ts DESC, id DESC LIMIT 1",
+            (target_id, start_ts)).fetchone()
+        window_rows = conn.execute(
+            "SELECT id, target_id, label, ip, ts, old_status, new_status, "
+            "category, failure_reason, incident_id FROM alert_events "
+            "WHERE target_id=? AND ts >= ? AND ts <= ? "
+            "ORDER BY ts ASC, id ASC",
+            (target_id, start_ts, end_ts)).fetchall()
+        out = []
+        seen = set()
+        if boundary and boundary[6] in ("red", "orange"):
+            ev = self._alert_event_from_row(boundary)
+            out.append(ev)
+            seen.add(ev["id"])
+        for row in window_rows:
+            ev = self._alert_event_from_row(row)
+            if ev["id"] not in seen:
+                out.append(ev)
+                seen.add(ev["id"])
+        return out
+
     def export_excel(self, output_path: str, target_ids: list,
                      start_ts: int, end_ts: int,
                      targets_meta: Optional[dict] = None) -> str:
@@ -1211,24 +1253,23 @@ class DataStore:
 
 
         # ── 告警时间线 Sheet ─────────────────────────────────────────
-        # 扩展查询范围，向前 24h 拉取事件，以检测时间截断情况
-        extended_start = start_ts - 86400
-        # SQLite treats a negative LIMIT as "no limit" — use that instead
-        # of a fixed cap.  A multi-week / multi-node export can easily
-        # exceed a fixed cap (e.g. 5000 = ~3 events/node/day for 50 nodes
-        # over 30 days), and because get_alert_history orders ts DESC the
-        # OLDEST events would be the ones silently dropped -- leaving a
-        # report with the first half of its time range missing every
-        # outage record.  Exports are bounded by start_ts and run offline
-        # so an unbounded read is fine here.
-        all_events_raw = self.get_alert_history(start_ts=extended_start, limit=-1)
-
-        # 按 target_id 分组，过滤出 targets_ids 范围内的节点
+        # Per-target boundary + in-window events (not a fixed 24h lookback).
         from collections import defaultdict
         events_by_tid = defaultdict(list)
-        for ev in all_events_raw:
-            if not target_ids or ev['target_id'] in target_ids:
-                events_by_tid[ev['target_id']].append(ev)
+        conn_al = self._read_conn()
+        try:
+            tids = target_ids or []
+            if not tids:
+                rows = conn_al.execute(
+                    "SELECT DISTINCT target_id FROM alert_events "
+                    "WHERE ts >= ? AND ts <= ?",
+                    (start_ts, end_ts)).fetchall()
+                tids = [r[0] for r in rows]
+            for tid in tids:
+                events_by_tid[tid] = self._get_export_alert_events(
+                    conn_al, tid, start_ts, end_ts)
+        except Exception:
+            pass
 
         # ── 告警时间线 sheet (完整故障事件流) ───────────────────────────
         ws_al = wb.create_sheet("告警时间线")
@@ -1402,8 +1443,7 @@ class DataStore:
             meta   = targets_meta.get(tid, {})
             label  = meta.get("label", tid)
             ip     = meta.get("ip", "")
-            events = [e for e in events_by_tid.get(tid, [])
-                      if start_ts - 86400 <= e['ts'] <= end_ts + 86400]
+            events = events_by_tid.get(tid, [])
 
             incidents = _build_incidents(events)
 
@@ -1497,8 +1537,9 @@ class DataStore:
                     cat  = ev.get('category', '')
                     fr   = ev.get('failure_reason', '')
 
-                    # Skip if completely outside query window
-                    if ts < start_ts - 86400 or ts > end_ts + 86400:
+                    # Keep pre-window transitions that belong to this incident;
+                    # only drop rows far after the export window.
+                    if ts > end_ts + 86400:
                         continue
 
                     gap = _fmt_dur(ts - prev_ts) if prev_ts else "—"
