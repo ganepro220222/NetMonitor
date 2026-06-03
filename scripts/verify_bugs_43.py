@@ -10,13 +10,14 @@ WEB_SERVER = os.path.join(
 )
 
 
-def test_init_calls_reset_donut_stats_ui():
+def test_init_calls_reset_stats_ui():
     with open(WEB_SERVER, encoding="utf-8") as f:
         text = f.read()
     init_block = text.split("if(msg.type==='init')", 1)[1].split("if(msg.type==='update')", 1)[0]
-    ok = ("resetDonutStatsUi();" in init_block
-          and "function resetDonutStatsUi()" in text
-          and "function purgeDonutTarget(tid)" in text)
+    ok = ("resetStatsUi();" in init_block
+          and "function resetStatsUi()" in text
+          and "function purgeDonutTarget(tid)" in text
+          and "resetDonutStatsUi" not in text)
     print(f"Bug43 source init reset -> {ok}")
     return ok
 
@@ -78,7 +79,7 @@ def test_init_old_leaves_stale_donut():
 
 def main():
     results = [
-        ("source", test_init_calls_reset_donut_stats_ui()),
+        ("source", test_init_calls_reset_stats_ui()),
         ("fixed simulate", test_init_fixed_clears_stale_donut_after_offline_delete()),
         ("old control", test_init_old_leaves_stale_donut()),
     ]

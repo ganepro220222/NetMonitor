@@ -5160,14 +5160,26 @@ function purgeDonutTarget(tid){
   if(card)card.remove();
 }
 
-function resetDonutStatsUi(){
+function resetStatsUi(){
   Object.keys(donutCharts).forEach(tid=>{
     try{donutCharts[tid].destroy();}catch(e){}
     delete donutCharts[tid];
   });
+  Object.keys(barCharts).forEach(key=>{
+    try{barCharts[key].destroy();}catch(e){}
+    delete barCharts[key];
+  });
   Object.keys(stats).forEach(k=>delete stats[k]);
   const grid=document.getElementById('donut-grid');
   if(grid)grid.querySelectorAll('.stat-card').forEach(c=>c.remove());
+  ['bar-icmp-group','bar-tcp-group','bar-http-group','bar-dns-group'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el)el.style.display='none';
+  });
+  const r2=document.getElementById('bar-row2');
+  if(r2)r2.style.display='none';
+  const emptyEl=document.getElementById('bar-empty');
+  if(emptyEl)emptyEl.style.display='';
 }
 
 function buildDonutGrid(){
@@ -5409,7 +5421,7 @@ function connect(){
       // from any delete/clear events that happened while the browser was offline.
       Object.keys(targets).forEach(k=>delete targets[k]);
       Object.keys(portStatus).forEach(k=>delete portStatus[k]);
-      resetDonutStatsUi();
+      resetStatsUi();
       applyServerStats(msg.stats);
       msg.targets.forEach(t=>{targets[t.tid]=t;});
       if(msg.port_statuses) Object.assign(portStatus,msg.port_statuses);
@@ -5417,6 +5429,8 @@ function connect(){
       hist.length=0;
       if(msg.history) msg.history.forEach(ev=>hist.push({t:ev.time,label:ev.label,ip:ev.ip,oldSt:ev.old_status,newSt:ev.new_status}));
       renderCards();renderHist();checkAlerts();
+      const _statsTab=document.getElementById('tab-stats');
+      if(_statsTab&&_statsTab.style.display!=='none')buildStats();
       document.getElementById('upd').textContent='已连接';return;}
     if(msg.type==='update'){const t=msg.target,old=targets[t.tid];
       if(old&&old.status!==t.status&&soundEnabled&&t.status!=='paused'){
