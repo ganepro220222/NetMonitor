@@ -633,7 +633,7 @@ class DataStore:
         }
 
     def _raw_window_bucket(self, conn, target_id: str, hour_ts: int,
-                           win_start: int, win_end: int) -> Optional[dict]:
+                           win_start: float, win_end: float) -> Optional[dict]:
         """Aggregate pings_raw for [win_start, win_end] into one hourly-shaped bucket."""
         if win_start > win_end:
             return None
@@ -716,7 +716,7 @@ class DataStore:
         return int(time.time()) - self._raw_retention_days * 86400
 
     def _partial_boundary_bucket(self, conn, target_id: str, hour_ts: int,
-                                 win_start: int, win_end: int,
+                                 win_start: float, win_end: float,
                                  hourly_by_hour: dict) -> Optional[dict]:
         """
         Partial-hour bucket: precise pings_raw slice when available.
@@ -737,7 +737,7 @@ class DataStore:
             "WHERE target_id=? AND ts >= ? AND ts < ?",
             (target_id, hour_ts, hour_ts + 3600)).fetchall()
         slice_rows = [(lat, st) for ts, lat, st in rows
-                      if win_start <= ts <= win_end]
+                      if win_start <= ts <= win_end and ts < hour_ts + 3600]
         if slice_rows:
             bucket = self._compute_hourly_bucket(slice_rows)
             if bucket:
@@ -749,7 +749,7 @@ class DataStore:
         return hourly_by_hour.get(hour_ts)
 
     def _bounded_hourly_buckets(self, conn, target_id: str,
-                                start_ts: int, end_ts: int,
+                                start_ts, end_ts,
                                 hourly_by_hour: Optional[dict] = None) -> list:
         """
         Hourly buckets aligned to [start_ts, end_ts].
@@ -758,29 +758,29 @@ class DataStore:
         Partial hours at boundaries prefer pings_raw; if raw is gone,
         approximate with the stored pings_hourly bucket.
         """
-        start_ts = int(start_ts)
-        end_ts   = int(end_ts)
-        if end_ts < start_ts:
+        start_f = float(start_ts)
+        end_f   = float(end_ts)
+        if end_f < start_f:
             return []
         ch = self._current_hour_start()
-        h_first = (start_ts // 3600) * 3600
-        h_last  = (min(end_ts, ch - 1) // 3600) * 3600
+        h_first = (int(start_f) // 3600) * 3600
+        h_last  = (int(min(end_f, ch - 1)) // 3600) * 3600
         if hourly_by_hour is None:
             hourly_by_hour = (self._fetch_hourly_map(conn, target_id, h_first, h_last)
                               if h_first <= h_last else {})
         out = []
         missing_full = []
         h  = h_first
-        while h <= end_ts and h < ch:
-            if h + 3600 <= start_ts:
+        while h <= end_f and h < ch:
+            if h + 3600 <= start_f:
                 h += 3600
                 continue
-            win_start = max(start_ts, h)
-            win_end   = min(end_ts, h + 3600 - 1)
+            win_start = max(start_f, float(h))
+            win_end   = min(end_f, float(h + 3600))
             if win_start > win_end:
                 h += 3600
                 continue
-            if start_ts <= h and end_ts >= h + 3600:
+            if start_f <= h and end_f >= h + 3600:
                 b = hourly_by_hour.get(h)
                 if b:
                     out.append(b)
@@ -794,25 +794,25 @@ class DataStore:
             h += 3600
         if missing_full:
             for h, b in self._raw_buckets_for_hours(
-                    conn, target_id, missing_full, start_ts, end_ts).items():
+                    conn, target_id, missing_full, start_f, end_f).items():
                 out.append(b)
         out.sort(key=lambda b: b["hour_ts"])
-        live = self._current_hour_bucket(conn, target_id, start_ts, end_ts)
+        live = self._current_hour_bucket(conn, target_id, start_f, end_f)
         if live:
             out.append(live)
         return out
 
     def _bounded_hourly_buckets_for_targets(
             self, conn, target_ids: list,
-            start_ts: int, end_ts: int) -> dict:
+            start_ts, end_ts) -> dict:
         """Per-target bounded buckets; one batch pings_hourly SELECT."""
-        start_ts = int(start_ts)
-        end_ts   = int(end_ts)
-        if not target_ids or end_ts < start_ts:
+        start_f = float(start_ts)
+        end_f   = float(end_ts)
+        if not target_ids or end_f < start_f:
             return {tid: [] for tid in target_ids}
         ch = self._current_hour_start()
-        h_first = (start_ts // 3600) * 3600
-        h_last  = (min(end_ts, ch - 1) // 3600) * 3600
+        h_first = (int(start_f) // 3600) * 3600
+        h_last  = (int(min(end_f, ch - 1)) // 3600) * 3600
         batch = (self._fetch_hourly_map_batch(conn, target_ids, h_first, h_last)
                  if h_first <= h_last else {})
         per_tid = defaultdict(dict)
@@ -820,7 +820,7 @@ class DataStore:
             per_tid[tid][h] = bucket
         return {
             tid: self._bounded_hourly_buckets(
-                conn, tid, start_ts, end_ts,
+                conn, tid, start_f, end_f,
                 hourly_by_hour=per_tid.get(tid))
             for tid in target_ids
         }
@@ -847,15 +847,15 @@ class DataStore:
                 "lat_avg": lat_avg, "lat_max": lat_max, "lat_p95": lat_p95}
 
     def _current_hour_bucket(self, conn, target_id: str,
-                             start_ts: int, end_ts: int) -> Optional[dict]:
+                             start_ts: float, end_ts: float) -> Optional[dict]:
         """In-memory hourly bucket for the still-open current hour."""
-        now = int(time.time())
+        now = time.time()
         ch  = self._current_hour_start(now)
-        if end_ts < ch:
+        if float(end_ts) < ch:
             return None
         return self._raw_window_bucket(
             conn, target_id, ch,
-            max(int(start_ts), ch), min(int(end_ts), now))
+            max(float(start_ts), float(ch)), min(float(end_ts), now))
 
     def _merge_sla_latency(self, base: dict, extra: Optional[dict]) -> dict:
         """Combine pings_hourly SQL rollup with a current-hour raw bucket."""
@@ -2618,7 +2618,7 @@ class DataStore:
             # rather than dividing by a sample_n that includes only failures.
             merged = self._rollup_hourly_buckets(
                 self._bounded_hourly_buckets(
-                    conn, target_id, int(start_ts), int(end_ts)))
+                    conn, target_id, start_ts, end_ts))
 
             total   = merged["total"]   or 0
             success = merged["success"] or 0
@@ -2747,7 +2747,7 @@ class DataStore:
             # agree with the single-target rollup, otherwise the Web SLA view
             # and the Excel SLA sheet would disagree on the same data.
             buckets_by_tid = self._bounded_hourly_buckets_for_targets(
-                conn, target_ids, int(start_ts), int(end_ts))
+                conn, target_ids, start_ts, end_ts)
             lat_by_tid = {}
             for tid in target_ids:
                 merged = self._rollup_hourly_buckets(
