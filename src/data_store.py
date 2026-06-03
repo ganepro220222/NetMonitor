@@ -1169,7 +1169,12 @@ class DataStore:
                     if self.row_probe_success(
                         r["latency_ms"], r["status"],
                         r.get("failure_reason"), r.get("probe_success")))
-                lats    = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
+                lats = [
+                    r["latency_ms"] for r in rows
+                    if self.row_probe_success(
+                        r["latency_ms"], r["status"],
+                        r.get("failure_reason"), r.get("probe_success"))
+                    and r["latency_ms"] is not None]
                 maxlats = lats
                 avg_lat = round(sum(lats) / len(lats), 1) if lats else ""
 
