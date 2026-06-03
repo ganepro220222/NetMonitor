@@ -374,29 +374,25 @@ class DataStore:
 
     def get_last_known_statuses(self) -> dict:
         """
-        Return {target_id: last_new_status} — the most recent operational
-        status per target (green/orange/red/gray), ignoring paused/resumed.
+        Return {target_id: last_new_status} — the latest alert transition per
+        target, including ``paused`` (and any other stored new_status).
 
-        Used to seed _last_statuses on startup so that if the program crashed
-        while nodes were RED, the first green probe correctly writes a
-        red->green recovery event and closes the open outage in the SLA data.
+        Used to seed ``_last_statuses`` on startup so the first post-restart
+        probe compares against the real last persisted state:
 
-        Without this seeding, _last_statuses starts empty -> old_st is None
-        -> the recovery event is never written -> SLA Case B perpetually fires
-        from the last crash's open outage.
+          - crashed while RED -> first green writes red->green (closes outage)
+          - paused while RED -> first red writes paused->red (opens new outage)
 
-        Only considers real operational statuses (green/orange/red/gray);
-        ignores paused/resumed meta-events.
+        The previous filter that ignored ``paused`` caused a target paused in
+        RED to seed as ``red``; a restart where the node was still down then
+        skipped recording because old_st == new_st == ``red``.
         """
         conn = self._read_conn()
         try:
             rows = conn.execute(
                 "SELECT target_id, new_status FROM alert_events "
-                "WHERE new_status IN ('green','orange','red','gray') "
-                "AND id IN ("
-                "  SELECT MAX(id) FROM alert_events "
-                "  WHERE new_status IN ('green','orange','red','gray') "
-                "  GROUP BY target_id"
+                "WHERE id IN ("
+                "  SELECT MAX(id) FROM alert_events GROUP BY target_id"
                 ")"
             ).fetchall()
             return {tid: ns for tid, ns in rows}
