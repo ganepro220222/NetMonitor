@@ -5424,6 +5424,9 @@ function connect(){
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
     if(msg.type==='remove'){delete targets[msg.tid];delete stats[msg.tid];
       if(donutCharts[msg.tid]){donutCharts[msg.tid].destroy();delete donutCharts[msg.tid];}
+      const _donutEl=document.getElementById('donut-'+msg.tid);
+      const _statCard=_donutEl?_donutEl.closest('.stat-card'):null;
+      if(_statCard)_statCard.remove();
       renderCards();checkAlerts();}
     // port_status: background scheduler finished a tracert cycle for one target
     if(msg.type==='port_status'){
