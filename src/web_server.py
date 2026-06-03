@@ -5512,8 +5512,17 @@ function connect(){
       patchCard(t);   // in-place: avoids animation restart & click failures
       updateSummary();checkAlerts();
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
-    if(msg.type==='remove'){delete targets[msg.tid];purgeDonutTarget(msg.tid);
-      renderCards();checkAlerts();}
+    if(msg.type==='remove'){
+      delete targets[msg.tid];
+      purgeDonutTarget(msg.tid);
+      renderCards();checkAlerts();
+      const _statsTabRm=document.getElementById('tab-stats');
+      if(_statsTabRm&&_statsTabRm.style.display!=='none'){
+        buildBarCharts();
+        _refreshStatsCharts();
+        resetWaveformUi();
+        loadWaveform();
+      }}
     // port_status: background scheduler finished a tracert cycle for one target
     if(msg.type==='port_status'){
       const t=targets[msg.tid];
