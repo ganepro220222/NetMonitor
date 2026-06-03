@@ -16,14 +16,14 @@ def _hourly_agg_block() -> str:
             "def get_sla_stats(", 1)[0]
 
 
-def test_backfill_uses_earliest_raw_agg_floor():
+def test_backfill_uses_earliest_raw_agg_floor_for_gap_scan():
     block = _hourly_agg_block()
     ok = (
         "agg_floor = (first_raw[0] // 3600) * 3600" in block
-        and "if backfill_internal_gaps:" in block
-        and "h = agg_floor" in block
+        and "(tid, agg_floor, current_hour" in block
+        and "h = agg_floor" not in block
     )
-    print(f"Bug61 backfill agg_floor from MIN(ts) -> {ok}")
+    print(f"Bug61 backfill agg_floor for gap scan only -> {ok}")
     return ok
 
 
@@ -48,7 +48,7 @@ def test_routine_still_uses_recompute_floor():
 
 def main():
     results = [
-        ("agg_floor", test_backfill_uses_earliest_raw_agg_floor()),
+        ("agg_floor", test_backfill_uses_earliest_raw_agg_floor_for_gap_scan()),
         ("gap_floor", test_gap_scan_uses_agg_floor_not_recompute_only()),
         ("routine", test_routine_still_uses_recompute_floor()),
     ]

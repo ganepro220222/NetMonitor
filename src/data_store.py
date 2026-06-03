@@ -2371,9 +2371,11 @@ class DataStore:
             pings_raw AFTER an hour bucket was first written are still
             folded in;
           - routine ticks never start earlier than the raw retention floor;
-          - cleanup/backfill (``backfill_internal_gaps=True``) aggregates
-            from each target's earliest raw hour still in the DB so rows
-            about to be deleted by ``_cleanup()`` are folded first.
+          - cleanup/backfill (``backfill_internal_gaps=True``) inserts only
+            missing hourly buckets from the earliest raw hour still in the
+            DB (Bug61) and re-touches the recent window for late flushes;
+            it does not REPLACE existing old buckets with retention-edge
+            partial raw (Bug62).
 
         TRADE-OFF (intentional): a raw row that flushes more than
         RECENT_RECOMPUTE_HOURS after its hour completed is NOT re-absorbed
@@ -2459,24 +2461,16 @@ class DataStore:
 
                 hours_to_agg = set()
                 if backfill_internal_gaps:
-                    # Pre-cleanup: fold every complete hour that still has
-                    # raw in the DB, including rows older than recompute_floor.
-                    h = agg_floor
-                    while h < current_hour:
-                        hours_to_agg.add(h)
-                        h += 3600
-                else:
-                    hour_start = max(agg_floor,
+                    # Recent window: REPLACE to absorb true late flushes.
+                    hour_start = max(recompute_floor,
                                      min(hour_start, recent_floor))
                     h = hour_start
                     while h < current_hour:
                         hours_to_agg.add(h)
                         h += 3600
-
-                if backfill_internal_gaps:
-                    # Internal gaps: raw exists but pings_hourly row missing
-                    # (including hours before HWM).  DISTINCT+EXCEPT over all
-                    # raw still in DB for this target — cleanup path only.
+                    # Rescue only MISSING buckets (raw present, hourly absent).
+                    # Do not sweep agg_floor..current_hour — that would REPLACE
+                    # complete old buckets with retention-edge partial raw.
                     gap_rows = conn.execute(
                         "SELECT hour_ts FROM ("
                         "  SELECT DISTINCT (ts / 3600) * 3600 AS hour_ts "
@@ -2490,6 +2484,13 @@ class DataStore:
                     ).fetchall()
                     for (gap_h,) in gap_rows:
                         hours_to_agg.add(int(gap_h))
+                else:
+                    hour_start = max(agg_floor,
+                                     min(hour_start, recent_floor))
+                    h = hour_start
+                    while h < current_hour:
+                        hours_to_agg.add(h)
+                        h += 3600
 
                 for hour_ts in sorted(hours_to_agg):
                     if hour_ts >= current_hour:
@@ -2502,16 +2503,31 @@ class DataStore:
                     ).fetchall()
                     bucket = self._compute_hourly_bucket(rows)
                     if bucket:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO pings_hourly "
-                            "(target_id,hour_ts,sample_n,success_n,"
-                            " lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
-                            "VALUES(?,?,?,?,?,?,?,?,?)",
-                            (tid, hour_ts,
-                             bucket["sample_n"], bucket["success_n"],
-                             bucket["lat_avg"], bucket["lat_max"],
-                             bucket["lat_min"], bucket["lat_p95"],
-                             bucket["loss_rate"]))
+                        # Old rescue buckets: insert-only.  Recent window:
+                        # REPLACE for late-flush absorption.
+                        if (backfill_internal_gaps
+                                and hour_ts < recent_floor):
+                            conn.execute(
+                                "INSERT OR IGNORE INTO pings_hourly "
+                                "(target_id,hour_ts,sample_n,success_n,"
+                                " lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
+                                "VALUES(?,?,?,?,?,?,?,?,?)",
+                                (tid, hour_ts,
+                                 bucket["sample_n"], bucket["success_n"],
+                                 bucket["lat_avg"], bucket["lat_max"],
+                                 bucket["lat_min"], bucket["lat_p95"],
+                                 bucket["loss_rate"]))
+                        else:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO pings_hourly "
+                                "(target_id,hour_ts,sample_n,success_n,"
+                                " lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
+                                "VALUES(?,?,?,?,?,?,?,?,?)",
+                                (tid, hour_ts,
+                                 bucket["sample_n"], bucket["success_n"],
+                                 bucket["lat_avg"], bucket["lat_max"],
+                                 bucket["lat_min"], bucket["lat_p95"],
+                                 bucket["loss_rate"]))
 
     def get_sla_stats(self, target_id: str,
                       start_ts: float, end_ts: float) -> dict:

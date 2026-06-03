@@ -278,6 +278,29 @@ def test_hourly_agg_gap_backfill_mode_runs_gap_scan():
     return ok
 
 
+def test_backfill_does_not_replace_complete_hourly_with_edge_raw():
+    ds, conn = _new_store_conn(raw_retention_days=7)
+    now = int(time.time())
+    old_hour = ((now - 2 * 86400) // 3600) * 3600
+    conn.execute(
+        "INSERT INTO pings_hourly(target_id,hour_ts,sample_n,success_n,"
+        "lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
+        "VALUES('T',?,60,60,1.0,2.0,1.0,2.0,0)",
+        (old_hour,))
+    conn.execute(
+        "INSERT INTO pings_raw(target_id,ts,latency_ms,status) VALUES(?,?,?,?)",
+        ("T", old_hour + 1800, 999.0, "green"))
+    conn.commit()
+    ds._hourly_agg(conn, backfill_internal_gaps=True)
+    row = conn.execute(
+        "SELECT sample_n, lat_avg FROM pings_hourly "
+        "WHERE target_id='T' AND hour_ts=?",
+        (old_hour,)).fetchone()
+    ok = row == (60, 1.0)
+    print(f"Bug62 complete hourly preserved: {row} (expect 60, 1.0) -> {ok}")
+    return ok
+
+
 def test_cleanup_backfill_rescues_raw_older_than_retention_floor():
     """Raw older than recompute_floor must reach pings_hourly before cleanup."""
     ds, conn = _new_store_conn(raw_retention_days=1)
@@ -339,6 +362,7 @@ def main():
         ("hourly_internal_gaps",      test_hourly_agg_fills_internal_gaps_before_hwm()),
         ("hourly_recent_targets",     test_hourly_agg_routine_uses_recent_window_target_discovery()),
         ("hourly_backfill_targets",   test_hourly_agg_backfill_uses_full_target_discovery()),
+        ("no_edge_overwrite",         test_backfill_does_not_replace_complete_hourly_with_edge_raw()),
         ("cleanup_rescue",            test_cleanup_backfill_rescues_raw_older_than_retention_floor()),
         ("hourly_no_routine_gap",     test_hourly_agg_routine_skips_gap_scan_when_caught_up()),
         ("hourly_gap_mode",           test_hourly_agg_gap_backfill_mode_runs_gap_scan()),
