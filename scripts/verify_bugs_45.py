@@ -18,13 +18,39 @@ EMPTY_RANGE = {
 
 def test_api_stats_empty_rows_placeholder():
     with open(WEB_SERVER, encoding="utf-8") as f:
-        block = f.read().split('def api_stats():', 1)[1].split(
-            '@app.route("/api/waveform/export")', 1)[0]
-    ok = ('if not rows:' in block
-          and '"total": 0, "success": 0' in block
-          and 'if not rows:\n                    continue' not in block)
-    print(f"Bug45 api_stats empty placeholder -> {ok}")
+        text = f.read()
+    api_block = text.split('def api_stats():', 1)[1].split(
+        '@app.route("/api/waveform/export")', 1)[0]
+    ok = (
+        "get_dashboard_stats_batch" in api_block
+        and "get_history(" not in api_block
+    )
+    print(f"Bug45 api_stats uses batch path -> {ok}")
     return ok
+
+
+def test_dashboard_stats_batch_empty_behavior():
+    import tempfile
+    import time
+    from src.data_store import DataStore
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        ds = DataStore(path)
+        ds._schema_ready.wait(timeout=5)
+        start = int(time.time()) - 3600
+        end = int(time.time())
+        batch = ds.get_dashboard_stats_batch(["T"], start, end)
+        ds.shutdown()
+        ok = batch.get("T") == EMPTY_RANGE
+        print(f"Bug45 empty batch stats -> {batch.get('T')} ok={ok}")
+        return ok
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def test_frontend_use_range_total_gate():
@@ -92,6 +118,7 @@ def test_empty_api_payload_shape():
 def main():
     results = [
         ("api_stats", test_api_stats_empty_rows_placeholder()),
+        ("batch_empty", test_dashboard_stats_batch_empty_behavior()),
         ("frontend", test_frontend_use_range_total_gate()),
         ("simulate", test_simulate_empty_range_vs_cumulative_fallback()),
         ("payload", test_empty_api_payload_shape()),

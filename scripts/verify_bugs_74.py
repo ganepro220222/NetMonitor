@@ -76,7 +76,8 @@ def test_raw_window_bucket_sql_aggregate():
     ok = (
         "SELECT COUNT(*)" in block
         and "latency_ms, status FROM pings_raw" not in block
-        and "RAW_P95_FETCH_LIMIT" in text
+        and "ORDER BY latency_ms ASC LIMIT 1 OFFSET" in block
+        and "lat_p95 = lat_max" not in block
     )
     print(f"Bug74 _raw_window_bucket SQL aggregate -> {ok}")
     return ok

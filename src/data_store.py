@@ -130,8 +130,6 @@ def fmt_ts_ms(ts) -> str:
 
 class DataStore:
     SCHEMA_VERSION = 5
-    # Max raw rows per target for which we fetch all latencies to compute p95.
-    RAW_P95_FETCH_LIMIT = 20000
     FLUSH_INTERVAL       = 60       # 秒，批量写入间隔
     HOURLY_AGG_INTERVAL  = 3600     # 秒，每小时聚合一次
     VACUUM_INTERVAL      = 86400 * 7  # 秒，每周渐进式 VACUUM
@@ -662,19 +660,22 @@ class DataStore:
         if not row or not row[0]:
             return None
         sample_n, success_n, lat_avg, lat_max, lat_min = row
+        lat_n = conn.execute(
+            "SELECT COUNT(latency_ms) FROM pings_raw "
+            "WHERE target_id=? AND ts >= ? AND ts <= ? "
+            "AND latency_ms IS NOT NULL",
+            (target_id, win_start, win_end)).fetchone()[0]
         lat_p95 = None
-        if sample_n <= self.RAW_P95_FETCH_LIMIT:
-            lats = sorted(
-                r[0] for r in conn.execute(
-                    "SELECT latency_ms FROM pings_raw "
-                    "WHERE target_id=? AND ts >= ? AND ts <= ? "
-                    "AND latency_ms IS NOT NULL",
-                    (target_id, win_start, win_end)).fetchall())
-            if lats:
-                lat_p95 = lats[min(len(lats) - 1,
-                                   max(0, math.ceil(len(lats) * 0.95) - 1))]
-        elif lat_max is not None:
-            lat_p95 = lat_max
+        if lat_n:
+            offset = min(lat_n - 1, max(0, math.ceil(lat_n * 0.95) - 1))
+            p95_row = conn.execute(
+                "SELECT latency_ms FROM pings_raw "
+                "WHERE target_id=? AND ts >= ? AND ts <= ? "
+                "AND latency_ms IS NOT NULL "
+                "ORDER BY latency_ms ASC LIMIT 1 OFFSET ?",
+                (target_id, win_start, win_end, offset)).fetchone()
+            if p95_row:
+                lat_p95 = p95_row[0]
         loss_rate = 1 - success_n / sample_n if sample_n else 0.0
         return {
             "hour_ts":   hour_ts,
