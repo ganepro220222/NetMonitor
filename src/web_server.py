@@ -1414,7 +1414,18 @@ let currentDiagTid=null;
 let _diagReqId=0;   // Incremented on each new loadDiag/refreshDiag call.
                      // The fetch callback checks this before rendering to prevent
                      // a stale traceroute response from overwriting a newer request.
-let pinnedTargets=JSON.parse(localStorage.getItem('pinnedTargets')||'null');
+function loadPinnedTargets(){
+  try{
+    const raw=localStorage.getItem('pinnedTargets');
+    if(!raw)return null;
+    const parsed=JSON.parse(raw);
+    return Array.isArray(parsed)?parsed:null;
+  }catch(e){
+    localStorage.removeItem('pinnedTargets');
+    return null;
+  }
+}
+let pinnedTargets=loadPinnedTargets();
 function isVisible(tid){return pinnedTargets===null||pinnedTargets.includes(tid);}
 
 // ── Alert Audio ────────────────────────────────────────────────────────
