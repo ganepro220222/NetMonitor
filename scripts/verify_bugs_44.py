@@ -1,5 +1,6 @@
 """Regression checks for bug 44 (init resets bar charts on stats tab)."""
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,14 +23,24 @@ def test_reset_stats_ui_clears_bar_charts():
     return ok
 
 
-def test_init_rebuilds_stats_when_tab_visible():
+def test_init_refreshes_stats_tab_when_visible():
     with open(WEB_SERVER, encoding="utf-8") as f:
-        text = f.read()
-    init_block = text.split("if(msg.type==='init')", 1)[1].split("if(msg.type==='update')", 1)[0]
-    ok = ("resetStatsUi();" in init_block
-          and "tab-stats" in init_block
-          and "buildStats()" in init_block)
-    print(f"Bug44 init rebuilds stats tab -> {ok}")
+        init_block = f.read().split("if(msg.type==='init')", 1)[1].split(
+            "if(msg.type==='update')", 1)[0]
+    ok = (
+        "resetStatsUi();" in init_block
+        and "tab-stats" in init_block
+        and "_refreshStatsCharts();" in init_block
+        and "resetWaveformUi();" in init_block
+        and "loadWaveform();" in init_block
+        and "if(_statsTab&&_statsTab.style.display!=='none')buildStats()" not in init_block
+        and re.search(
+            r"if\(_statsTab&&_statsTab\.style\.display!=='none'\)\{"
+            r"\s*_refreshStatsCharts\(\);\s*resetWaveformUi\(\);\s*loadWaveform\(\);",
+            init_block,
+        ) is not None
+    )
+    print(f"Bug44 init refreshes stats tab -> {ok}")
     return ok
 
 
@@ -104,7 +115,7 @@ def test_init_old_keeps_stale_bar():
 def main():
     results = [
         ("resetStatsUi", test_reset_stats_ui_clears_bar_charts()),
-        ("init buildStats", test_init_rebuilds_stats_when_tab_visible()),
+        ("init refresh", test_init_refreshes_stats_tab_when_visible()),
         ("fixed simulate", test_init_fixed_clears_stale_bar_labels()),
         ("old control", test_init_old_keeps_stale_bar()),
     ]
