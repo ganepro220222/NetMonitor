@@ -37,6 +37,21 @@ def _palette() -> dict:
     return _DARK_PALETTE if ctk.get_appearance_mode() == "Dark" else _LIGHT_PALETTE
 
 
+def _waveform_export_timestamp(ts) -> str:
+    """Human-readable export time with millisecond precision (50ms sampling)."""
+    if not ts:
+        return ""
+    from src.data_store import fmt_ts_ms
+    return fmt_ts_ms(ts)
+
+
+def _waveform_export_unix_ts(ts):
+    """Unix seconds for CSV/Excel export; keep sub-second precision."""
+    if not ts:
+        return ""
+    return round(float(ts), 3)
+
+
 class WaveformDetailWindow(ctk.CTkToplevel):
     """Standalone waveform chart window for a single monitored target."""
 
@@ -784,13 +799,13 @@ class WaveformDetailWindow(ctk.CTkToplevel):
         """Dump _pts_cache + alert overlay metadata to a CSV file.
 
         Schema:
-          timestamp_iso, unix_ts, rtt_ms, ok, bucket_state, alert_band
+          timestamp (ms precision), unix_ts, rtt_ms, ok, bucket_state, alert_band
         alert_band column is 'red' / 'orange' / '' depending on whether
         that sample falls in an outage interval.
         """
         path = self._ask_save_path(".csv", [("CSV", "*.csv"), ("所有", "*.*")])
         if not path: return
-        import csv, datetime
+        import csv
         try:
             pts = self._pts_cache or []
             red = self._red_ivals or []
@@ -811,9 +826,8 @@ class WaveformDetailWindow(ctk.CTkToplevel):
                 for p in pts:
                     ts = p.get("ts")
                     w.writerow([
-                        datetime.datetime.fromtimestamp(ts).isoformat(
-                            sep=" ", timespec="seconds") if ts else "",
-                        int(ts) if ts else "",
+                        _waveform_export_timestamp(ts),
+                        _waveform_export_unix_ts(ts),
                         p.get("rtt_ms", "") if p.get("rtt_ms") is not None else "",
                         "1" if p.get("ok") else "0",
                         p.get("bucket_state", ""),
@@ -956,9 +970,8 @@ class WaveformDetailWindow(ctk.CTkToplevel):
             for p in pts:
                 ts = p.get("ts")
                 ws.append([
-                    datetime.datetime.fromtimestamp(ts).strftime(
-                        "%Y-%m-%d %H:%M:%S") if ts else "",
-                    int(ts) if ts else "",
+                    _waveform_export_timestamp(ts),
+                    _waveform_export_unix_ts(ts),
                     p.get("rtt_ms") if p.get("rtt_ms") is not None else None,
                     1 if p.get("ok") else 0,
                     p.get("bucket_state", ""),
