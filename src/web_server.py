@@ -5160,7 +5160,7 @@ async function _refreshStatsCharts(){
     });
 
     const span=end-start;
-    const gran=span<=86400?'秒级原始':'小时级聚合';
+    const gran='聚合统计';
     if(info) info.textContent=`${_fmt(start)} — ${_fmt(end)}（${gran}数据）`;
   }catch(e){
     if(reqId!==_statsReqId) return;
@@ -6789,80 +6789,18 @@ class WebServer:
             """
             GET /api/stats?start=<unix_ts>&end=<unix_ts>
             Returns per-target aggregated stats for a time range.
-            Auto-selects pings_raw or pings_hourly via should_use_hourly().
-            Used by the frontend charts for time-range-aware rendering.
+
+            Uses get_dashboard_stats_batch() (hourly buckets + bounded
+            raw slices) — never materializes every pings_raw row per
+            target, which at 0.05s × 30 nodes × 24h would be ~52M rows.
             """
             if not self._data_store:
                 return json.dumps({}), 200, {"Content-Type":"application/json"}
             start = _qnum("start", int(time.time()) - 86400)
             end   = _qnum("end",   int(time.time()))
-            use_hourly = self._data_store.should_use_hourly(
-                start, end, raw_span_limit=86400)
-            result = {}
-            # Only query active targets — deleted nodes stay in DB (soft-delete)
-            # but must never appear in API responses.
             with self._lock:
                 tids = list(self._targets.keys())
-            import math as _math
-            for tid in tids:
-                rows = self._data_store.get_history(
-                    tid, start, end, use_hourly=use_hourly)
-                if not rows:
-                    result[tid] = {
-                        "total": 0, "success": 0,
-                        "lat_avg": None, "lat_max": None, "lat_p95": None,
-                    }
-                    continue
-                if use_hourly:
-                    total   = sum(r["sample_n"] for r in rows)
-                    success = sum(r["success_n"] for r in rows)
-                    # Weight per-hour averages by success_n -- the same
-                    # weighting get_sla_stats does in SQL.  The previous
-                    # unweighted `sum(lats)/len(lats)` treated one
-                    # 1-sample hour the same as a 3600-sample hour, so
-                    # a single bad outlier sample could shift the
-                    # dashboard's reported average by orders of
-                    # magnitude on long ranges.
-                    lat_pairs = [(r["lat_avg"], r["success_n"]) for r in rows
-                                  if r["lat_avg"] is not None and r["success_n"]]
-                    p95_pairs = [(r["lat_p95"], r["success_n"]) for r in rows
-                                  if r["lat_p95"] is not None and r["success_n"]]
-                    maxlats   = [r["lat_max"] for r in rows
-                                  if r["lat_max"] is not None]
-                    w_n  = sum(n for _v, n in lat_pairs)
-                    lat_avg = (sum(v * n for v, n in lat_pairs) / w_n
-                                if w_n else None)
-                    w_n_p95 = sum(n for _v, n in p95_pairs)
-                    lat_p95 = (sum(v * n for v, n in p95_pairs) / w_n_p95
-                                if w_n_p95 else None)
-                    lat_max = max(maxlats) if maxlats else None
-                else:
-                    total   = len(rows)
-                    success = sum(1 for r in rows
-                                  if r["status"] in ("green","orange"))
-                    lats    = [r["latency_ms"] for r in rows
-                                if r["latency_ms"] is not None]
-                    # Nearest-rank P95 with ceiling -- matches the fix
-                    # already applied to data_store._hourly_agg.  The
-                    # previous `int(...) - 1` floor returned the MIN
-                    # value for n=2 and was off-by-one for many other
-                    # small sample counts (e.g. n=19 picked the 18th
-                    # value instead of the 19th).
-                    if lats:
-                        idx = min(len(lats) - 1,
-                                  max(0, _math.ceil(len(lats) * 0.95) - 1))
-                        lat_p95 = sorted(lats)[idx]
-                    else:
-                        lat_p95 = None
-                    lat_avg = sum(lats) / len(lats) if lats else None
-                    lat_max = max(lats) if lats else None
-                result[tid] = {
-                    "total":   total,
-                    "success": success,
-                    "lat_avg": round(lat_avg, 1) if lat_avg is not None else None,
-                    "lat_max": round(lat_max, 1) if lat_max is not None else None,
-                    "lat_p95": round(lat_p95, 1) if lat_p95 is not None else None,
-                }
+            result = self._data_store.get_dashboard_stats_batch(tids, start, end)
             return json.dumps(result), 200, {"Content-Type":"application/json"}
 
         @app.route("/api/waveform/export")

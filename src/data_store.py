@@ -130,6 +130,8 @@ def fmt_ts_ms(ts) -> str:
 
 class DataStore:
     SCHEMA_VERSION = 5
+    # Max raw rows per target for which we fetch all latencies to compute p95.
+    RAW_P95_FETCH_LIMIT = 20000
     FLUSH_INTERVAL       = 60       # 秒，批量写入间隔
     HOURLY_AGG_INTERVAL  = 3600     # 秒，每小时聚合一次
     VACUUM_INTERVAL      = 86400 * 7  # 秒，每周渐进式 VACUUM
@@ -642,18 +644,48 @@ class DataStore:
 
     def _raw_window_bucket(self, conn, target_id: str, hour_ts: int,
                            win_start: float, win_end: float) -> Optional[dict]:
-        """Aggregate pings_raw for [win_start, win_end] into one hourly-shaped bucket."""
+        """Aggregate pings_raw for [win_start, win_end] into one hourly-shaped bucket.
+
+        Uses SQL COUNT/AVG/MAX so 0.05s sampling in a one-hour live window
+        does not materialize millions of rows in Python.
+        """
         if win_start > win_end:
             return None
-        rows = conn.execute(
-            "SELECT latency_ms, status FROM pings_raw "
+        row = conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN status IN ('green','orange') THEN 1 ELSE 0 END), "
+            "AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
+            "MAX(latency_ms), MIN(latency_ms) "
+            "FROM pings_raw "
             "WHERE target_id=? AND ts >= ? AND ts <= ?",
-            (target_id, win_start, win_end)).fetchall()
-        bucket = self._compute_hourly_bucket(rows)
-        if not bucket:
+            (target_id, win_start, win_end)).fetchone()
+        if not row or not row[0]:
             return None
-        bucket["hour_ts"] = hour_ts
-        return bucket
+        sample_n, success_n, lat_avg, lat_max, lat_min = row
+        lat_p95 = None
+        if sample_n <= self.RAW_P95_FETCH_LIMIT:
+            lats = sorted(
+                r[0] for r in conn.execute(
+                    "SELECT latency_ms FROM pings_raw "
+                    "WHERE target_id=? AND ts >= ? AND ts <= ? "
+                    "AND latency_ms IS NOT NULL",
+                    (target_id, win_start, win_end)).fetchall())
+            if lats:
+                lat_p95 = lats[min(len(lats) - 1,
+                                   max(0, math.ceil(len(lats) * 0.95) - 1))]
+        elif lat_max is not None:
+            lat_p95 = lat_max
+        loss_rate = 1 - success_n / sample_n if sample_n else 0.0
+        return {
+            "hour_ts":   hour_ts,
+            "sample_n":  sample_n,
+            "success_n": success_n,
+            "lat_avg":   lat_avg,
+            "lat_max":   lat_max,
+            "lat_min":   lat_min,
+            "lat_p95":   lat_p95,
+            "loss_rate": loss_rate,
+        }
 
     def _hourly_row_to_bucket(self, row) -> dict:
         return {"hour_ts":  row[0], "sample_n": row[1],
@@ -2597,6 +2629,55 @@ class DataStore:
                 outage_count += 1
 
         return outage_secs, outage_count
+
+    def get_dashboard_stats_batch(self, target_ids: list,
+                                start_ts, end_ts) -> dict:
+        """
+        Per-target latency stats for Web /api/stats (total/success/avg/max/p95).
+
+        Uses _bounded_hourly_buckets_for_targets + _rollup_hourly_buckets
+        instead of fetching every pings_raw row per target into Python.
+        """
+        if not target_ids:
+            return {}
+        start_ts = int(start_ts)
+        end_ts   = int(end_ts)
+        CHUNK = 500
+        if len(target_ids) > CHUNK:
+            out = {}
+            for i in range(0, len(target_ids), CHUNK):
+                out.update(self.get_dashboard_stats_batch(
+                    target_ids[i:i + CHUNK], start_ts, end_ts))
+            return out
+        empty = {
+            "total": 0, "success": 0,
+            "lat_avg": None, "lat_max": None, "lat_p95": None,
+        }
+        try:
+            conn = self._read_conn()
+            buckets_by_tid = self._bounded_hourly_buckets_for_targets(
+                conn, target_ids, start_ts, end_ts)
+            result = {}
+            for tid in target_ids:
+                merged = self._rollup_hourly_buckets(
+                    buckets_by_tid.get(tid, []))
+                if not merged.get("total"):
+                    result[tid] = dict(empty)
+                    continue
+                result[tid] = {
+                    "total":   merged["total"],
+                    "success": merged["success"],
+                    "lat_avg": (round(merged["lat_avg"], 1)
+                                if merged["lat_avg"] is not None else None),
+                    "lat_max": (round(merged["lat_max"], 1)
+                                if merged["lat_max"] is not None else None),
+                    "lat_p95": (round(merged["lat_p95"], 1)
+                                if merged["lat_p95"] is not None else None),
+                }
+            return result
+        except Exception as e:
+            print(f"[dashboard-stats-batch] {e}")
+            return {tid: dict(empty) for tid in target_ids}
 
     def get_sla_stats(self, target_id: str,
                       start_ts: float, end_ts: float) -> dict:
