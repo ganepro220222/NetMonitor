@@ -1761,7 +1761,7 @@ class DataStore:
                             if self._flush(conn, ping_buf, alert_buf):
                                 ping_buf.clear(); alert_buf.clear()
                                 last_flush = now
-                        self._hourly_agg(conn)
+                        self._hourly_agg(conn)  # routine: no retention-wide gap scan
                         last_hourly = now
 
                     if now - last_cleanup >= 86400:
@@ -1785,7 +1785,7 @@ class DataStore:
                             if self._flush(conn, ping_buf, alert_buf):
                                 ping_buf.clear(); alert_buf.clear()
                                 last_flush = now
-                        self._hourly_agg(conn)
+                        self._hourly_agg(conn, backfill_internal_gaps=True)
                         last_hourly = now
                         self._cleanup(conn)
                         last_cleanup = now
@@ -2354,7 +2354,7 @@ class DataStore:
                 "VALUES(?,?,?,?,?,?)",
                 (tid, total, success, lat_avg, lat_n, int(time.time())))
 
-    def _hourly_agg(self, conn):
+    def _hourly_agg(self, conn, *, backfill_internal_gaps: bool = False):
         """Aggregate every hourly bucket we haven't already written.
 
         Previously hard-coded to "the immediately-prior full hour", which
@@ -2375,17 +2375,16 @@ class DataStore:
         TRADE-OFF (intentional): a raw row that flushes more than
         RECENT_RECOMPUTE_HOURS after its hour completed is NOT re-absorbed
         on the routine tick -- UNLESS that hour's bucket was missing
-        entirely.  Missing buckets are found via a targeted SQL anti-join
-        (raw hour buckets EXCEPT existing pings_hourly rows) and rebuilt
-        even when they lie before the per-target high-water mark.  The
-        previous code only walked forward from MAX(hour_ts), so an internal
-        gap (newer hourly row present, older buckets missing) was never
-        filled.  Such >3h-late flushes into an *existing* bucket are still
-        not re-absorbed on the routine tick.
+        entirely.  Internal gaps (raw present, hourly row missing, including
+        hours before HWM) are rebuilt only when ``backfill_internal_gaps``
+        is True -- daily cleanup / startup pre-cleanup -- via a DISTINCT+
+        EXCEPT scan over raw retention.  Routine hourly ticks skip that
+        scan so a caught-up 30-target DB does not re-walk ~7 days of raw
+        rows every hour just to prove there are no gaps.
 
-        Cost-idempotent: on a caught-up DB each tick processes at most
-        RECENT_RECOMPUTE_HOURS buckets per target for the recent window,
-        plus any genuinely missing hourly buckets that still have raw rows.
+        Cost-idempotent: on a caught-up DB each routine tick processes at
+        most RECENT_RECOMPUTE_HOURS buckets per target.  Gap backfill is
+        amortized to once per cleanup cycle (and the startup cleanup).
         """
         now          = int(time.time())
         current_hour = (now // 3600) * 3600   # exclude the in-progress hour
@@ -2453,22 +2452,23 @@ class DataStore:
                     hours_to_agg.add(h)
                     h += 3600
 
-                # Internal gaps: raw exists but pings_hourly row missing
-                # (including hours before HWM).  One DISTINCT+EXCEPT per
-                # target — not a full retention rescan of every hour.
-                gap_rows = conn.execute(
-                    "SELECT hour_ts FROM ("
-                    "  SELECT DISTINCT (ts / 3600) * 3600 AS hour_ts "
-                    "  FROM pings_raw "
-                    "  WHERE target_id=? AND ts>=? AND ts<?"
-                    ") EXCEPT "
-                    "SELECT hour_ts FROM pings_hourly "
-                    "WHERE target_id=? AND hour_ts>=? AND hour_ts<?",
-                    (tid, recompute_floor, current_hour,
-                     tid, recompute_floor, current_hour),
-                ).fetchall()
-                for (gap_h,) in gap_rows:
-                    hours_to_agg.add(int(gap_h))
+                if backfill_internal_gaps:
+                    # Internal gaps: raw exists but pings_hourly row missing
+                    # (including hours before HWM).  DISTINCT+EXCEPT over raw
+                    # retention — expensive, so not on the hourly tick.
+                    gap_rows = conn.execute(
+                        "SELECT hour_ts FROM ("
+                        "  SELECT DISTINCT (ts / 3600) * 3600 AS hour_ts "
+                        "  FROM pings_raw "
+                        "  WHERE target_id=? AND ts>=? AND ts<?"
+                        ") EXCEPT "
+                        "SELECT hour_ts FROM pings_hourly "
+                        "WHERE target_id=? AND hour_ts>=? AND hour_ts<?",
+                        (tid, recompute_floor, current_hour,
+                         tid, recompute_floor, current_hour),
+                    ).fetchall()
+                    for (gap_h,) in gap_rows:
+                        hours_to_agg.add(int(gap_h))
 
                 for hour_ts in sorted(hours_to_agg):
                     if hour_ts >= current_hour:

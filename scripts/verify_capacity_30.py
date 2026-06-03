@@ -114,6 +114,20 @@ def _count_raw_scans(conn, fn):
     return c[0]
 
 
+def _count_gap_scans(conn, fn):
+    c = [0]
+
+    def tr(sql):
+        u = " ".join(sql.upper().split())
+        if ("DISTINCT" in u and "(TS / 3600) * 3600" in u
+                and "EXCEPT" in u and "PINGS_RAW" in u):
+            c[0] += 1
+    conn.set_trace_callback(tr)
+    fn()
+    conn.set_trace_callback(None)
+    return c[0]
+
+
 def test_hourly_agg_incremental_when_caught_up():
     ds, conn = _new_store_conn()
     C = (int(time.time()) // 3600) * 3600
@@ -139,7 +153,7 @@ def test_hourly_agg_fills_missing_hours():
         "lat_avg,lat_max,lat_min,lat_p95,loss_rate) VALUES('T',?,5,5,10,14,10,14,0)",
         (C - 6 * 3600,))
     conn.commit()
-    ds._hourly_agg(conn)
+    ds._hourly_agg(conn, backfill_internal_gaps=True)
     got = conn.execute(
         "SELECT COUNT(*) FROM pings_hourly WHERE target_id='T'").fetchone()[0]
     ok = got == 6                                   # C-6h..C-1h all present
@@ -178,7 +192,7 @@ def test_hourly_agg_fills_internal_gaps_before_hwm():
         "lat_avg,lat_max,lat_min,lat_p95,loss_rate) VALUES('T',?,5,5,10,14,10,14,0)",
         (C - 1 * 3600,))
     conn.commit()
-    ds._hourly_agg(conn)
+    ds._hourly_agg(conn, backfill_internal_gaps=True)
     hours_ago = {
         (C - row[0]) // 3600
         for row in conn.execute(
@@ -188,6 +202,33 @@ def test_hourly_agg_fills_internal_gaps_before_hwm():
     ok = hours_ago == {1, 2, 3, 4, 5, 6}
     print(f"hourly_agg internal-gap backfill hours_ago={sorted(hours_ago)} "
           f"(expect 1..6) -> {ok}")
+    return ok
+
+
+def test_hourly_agg_routine_skips_gap_scan_when_caught_up():
+    ds, conn = _new_store_conn()
+    C = (int(time.time()) // 3600) * 3600
+    for h in (1, 2, 3):
+        _ins_raw(conn, "T", C - h * 3600)
+    ds._hourly_agg(conn)
+    gap_scans = _count_gap_scans(conn, lambda: ds._hourly_agg(conn))
+    bucket_scans = _count_raw_scans(conn, lambda: ds._hourly_agg(conn))
+    ok = gap_scans == 0 and bucket_scans <= 3
+    print(f"hourly_agg routine gap_scans={gap_scans} bucket_scans={bucket_scans} "
+          f"(expect 0 gap, <=3 bucket) -> {ok}")
+    return ok
+
+
+def test_hourly_agg_gap_backfill_mode_runs_gap_scan():
+    ds, conn = _new_store_conn()
+    C = (int(time.time()) // 3600) * 3600
+    for h in (1, 2, 3):
+        _ins_raw(conn, "T", C - h * 3600)
+    ds._hourly_agg(conn)
+    gap_scans = _count_gap_scans(
+        conn, lambda: ds._hourly_agg(conn, backfill_internal_gaps=True))
+    ok = gap_scans >= 1
+    print(f"hourly_agg gap-backfill mode gap_scans={gap_scans} (expect>=1) -> {ok}")
     return ok
 
 
@@ -220,6 +261,8 @@ def main():
         ("hourly_incremental",        test_hourly_agg_incremental_when_caught_up()),
         ("hourly_fills_missing",      test_hourly_agg_fills_missing_hours()),
         ("hourly_internal_gaps",      test_hourly_agg_fills_internal_gaps_before_hwm()),
+        ("hourly_no_routine_gap",     test_hourly_agg_routine_skips_gap_scan_when_caught_up()),
+        ("hourly_gap_mode",           test_hourly_agg_gap_backfill_mode_runs_gap_scan()),
         ("hourly_recent_late",        test_hourly_agg_absorbs_recent_late_flush()),
         ("hourly_old_late_tradeoff",  test_hourly_agg_old_late_flush_tradeoff()),
     ]
