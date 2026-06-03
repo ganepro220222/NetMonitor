@@ -212,14 +212,14 @@ class _TracerouteScheduler:
         last_full = time.time()   # defer first full scan
         while True:
             time.sleep(5)
-            self._drain_urgent()
+            already_traced = self._drain_urgent()
 
             with self._targets_lock:
                 snap = dict(self._targets)
 
             now = time.time()
             if snap and now - last_full >= self.interval:
-                traced_this_pass = set()
+                traced_this_pass = set(already_traced)
                 for tid, info in snap.items():
                     # Priority: red-alert tracerts jump ahead of the
                     # next periodic target (not ahead of one already
