@@ -16,20 +16,29 @@ def _init_sse_block(text: str) -> str:
         "if(msg.type==='update')", 1)[0]
 
 
+def _stats_tab_visible_branch(init_block: str) -> str:
+    """Extract body of if(_statsTab && visible) inside SSE init."""
+    m = re.search(
+        r"if\(_statsTab&&_statsTab\.style\.display!=='none'\)\{"
+        r"(.*?)\n\s*\}",
+        init_block,
+        re.DOTALL,
+    )
+    return m.group(1) if m else ""
+
+
 def test_init_visible_uses_refresh_not_build_stats():
     with open(WEB_SERVER, encoding="utf-8") as f:
         block = _init_sse_block(f.read())
+    visible_branch = _stats_tab_visible_branch(block)
     ok = (
-        "_refreshStatsCharts()" in block
-        and re.search(
-            r"if\(_statsTab&&_statsTab\.style\.display!=='none'\)"
-            r"_refreshStatsCharts\(\)",
-            block,
-        )
+        "_refreshStatsCharts();" in visible_branch
+        and "buildStats()" not in visible_branch
         and re.search(
             r"if\(_statsTab&&_statsTab\.style\.display!=='none'\)buildStats\(\)",
             block,
         ) is None
+        and "buildStats()" not in block
     )
     print(f"Bug49 init visible -> _refreshStatsCharts -> {ok}")
     return ok
