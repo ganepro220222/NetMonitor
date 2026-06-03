@@ -5151,6 +5151,25 @@ function initStatsTab(){
 }
 
 function buildStats(){buildDonutGrid();buildBarCharts();}
+
+function purgeDonutTarget(tid){
+  if(donutCharts[tid]){donutCharts[tid].destroy();delete donutCharts[tid];}
+  delete stats[tid];
+  const donut=document.getElementById('donut-'+tid);
+  const card=donut?donut.closest('.stat-card'):null;
+  if(card)card.remove();
+}
+
+function resetDonutStatsUi(){
+  Object.keys(donutCharts).forEach(tid=>{
+    try{donutCharts[tid].destroy();}catch(e){}
+    delete donutCharts[tid];
+  });
+  Object.keys(stats).forEach(k=>delete stats[k]);
+  const grid=document.getElementById('donut-grid');
+  if(grid)grid.querySelectorAll('.stat-card').forEach(c=>c.remove());
+}
+
 function buildDonutGrid(){
   const grid=document.getElementById('donut-grid');
   if(!grid)return;
@@ -5390,6 +5409,7 @@ function connect(){
       // from any delete/clear events that happened while the browser was offline.
       Object.keys(targets).forEach(k=>delete targets[k]);
       Object.keys(portStatus).forEach(k=>delete portStatus[k]);
+      resetDonutStatsUi();
       applyServerStats(msg.stats);
       msg.targets.forEach(t=>{targets[t.tid]=t;});
       if(msg.port_statuses) Object.assign(portStatus,msg.port_statuses);
@@ -5422,11 +5442,7 @@ function connect(){
       patchCard(t);   // in-place: avoids animation restart & click failures
       updateSummary();checkAlerts();
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
-    if(msg.type==='remove'){delete targets[msg.tid];delete stats[msg.tid];
-      if(donutCharts[msg.tid]){donutCharts[msg.tid].destroy();delete donutCharts[msg.tid];}
-      const _donutEl=document.getElementById('donut-'+msg.tid);
-      const _statCard=_donutEl?_donutEl.closest('.stat-card'):null;
-      if(_statCard)_statCard.remove();
+    if(msg.type==='remove'){delete targets[msg.tid];purgeDonutTarget(msg.tid);
       renderCards();checkAlerts();}
     // port_status: background scheduler finished a tracert cycle for one target
     if(msg.type==='port_status'){

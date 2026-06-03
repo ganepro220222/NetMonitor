@@ -14,10 +14,10 @@ WEB_SERVER = os.path.join(
 def test_remove_branch_removes_stat_card_dom():
     with open(WEB_SERVER, encoding="utf-8") as f:
         text = f.read()
-    ok = ("msg.type==='remove'" in text
-          and "closest('.stat-card')" in text
-          and "_statCard.remove()" in text)
-    print(f"Bug42 source remove+stat-card cleanup -> {ok}")
+    ok = ("purgeDonutTarget(msg.tid)" in text
+          and "function purgeDonutTarget(tid)" in text
+          and "closest('.stat-card')" in text)
+    print(f"Bug42 source remove uses purgeDonutTarget -> {ok}")
     return ok
 
 
