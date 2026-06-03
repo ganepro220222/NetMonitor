@@ -776,9 +776,8 @@ class MainWindow(ctk.CTk):
         # and write a spurious red→green alert_event to the DB — which is
         # harmless for SLA (the event is ignored because fault_start is None)
         # but creates misleading raw data in alert_events.
-        # Setting "paused" here means the first post-resume probe correctly
-        # generates "paused→green" (not "red→green"), which the SLA query
-        # ignores cleanly without any special-case logic.
+        # Setting "paused" here pairs with _on_target_resume seeding "gray"
+        # so the first post-resume probe generates "gray→…" (not "red→…").
         _lst = self.__dict__.get("_last_statuses", {})
         _lst[target_id] = "paused"
 
@@ -826,7 +825,10 @@ class MainWindow(ctk.CTk):
                 old_status="paused",
                 new_status="gray",
                 category="resumed")
-
+        # Keep in-memory baseline aligned with the DB event above so the
+        # first real probe records gray→green/orange/red, not paused→….
+        _lst = self.__dict__.get("_last_statuses", {})
+        _lst[target_id] = "gray"
 
     def _refresh_summary(self):
         self.lbl_total.configure(text=f"共 {len(self._cards)} 个  ")
