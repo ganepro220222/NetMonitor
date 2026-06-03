@@ -16,16 +16,6 @@ def _update_sse_block(text: str) -> str:
         "if(msg.type==='remove')", 1)[0]
 
 
-def _meta_refresh_branch(update_block: str) -> str:
-    m = re.search(
-        r"if\(metaChanged\)\{.*?if\(_statsTabUp&&_statsTabUp\.style\.display!=='none'\)\{"
-        r"(.*?)\n\s*\}\s*\}",
-        update_block,
-        re.DOTALL,
-    )
-    return m.group(1) if m else ""
-
-
 def test_update_detects_meta_changed():
     with open(WEB_SERVER, encoding="utf-8") as f:
         block = _update_sse_block(f.read())
@@ -42,7 +32,9 @@ def test_update_detects_meta_changed():
 def test_meta_changed_refreshes_stats_tab():
     with open(WEB_SERVER, encoding="utf-8") as f:
         block = _update_sse_block(f.read())
-    branch = _meta_refresh_branch(block)
+    idx = block.find("if(metaChanged){")
+    end = block.find("}else if(statusChanged){", idx)
+    branch = block[idx:end] if idx >= 0 and end > idx else ""
     ok = (
         "buildBarCharts();" in branch
         and "_refreshStatsCharts();" in branch

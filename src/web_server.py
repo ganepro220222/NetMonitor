@@ -5515,18 +5515,22 @@ function connect(){
       // fresh snapshot.  Server already clears its tracer cache on
       // IP edit; this is the matching client-side eviction.
       if(old&&old.ip!==t.ip)delete portStatus[t.tid];
+      const statusChanged=old&&old.status!==t.status;
       const metaChanged=old&&(
         old.label!==t.label||old.ip!==t.ip||old.ping_type!==t.ping_type);
       targets[t.tid]=t;accumStat(t);
       patchCard(t);   // in-place: avoids animation restart & click failures
       updateSummary();checkAlerts();
-      if(metaChanged){
-        const _statsTabUp=document.getElementById('tab-stats');
-        if(_statsTabUp&&_statsTabUp.style.display!=='none'){
+      const _statsTabUp=document.getElementById('tab-stats');
+      if(_statsTabUp&&_statsTabUp.style.display!=='none'){
+        if(metaChanged){
           buildBarCharts();
           _refreshStatsCharts();
           resetWaveformUi();
           loadWaveform();
+        }else if(statusChanged){
+          buildDonutGrid();
+          buildBarCharts();
         }}
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
     if(msg.type==='remove'){
