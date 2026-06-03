@@ -120,6 +120,14 @@ def excel_safe_text(s):
     return ("'" + cleaned) if cleaned[0] in ("=", "+", "-", "@", "\t", "\r") else cleaned
 
 
+def fmt_ts_ms(ts) -> str:
+    """Format Unix timestamp (float seconds) for Excel with millisecond precision."""
+    if ts is None:
+        return "—"
+    dt = datetime.fromtimestamp(float(ts))
+    return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+
+
 class DataStore:
     SCHEMA_VERSION = 5
     FLUSH_INTERVAL       = 60       # 秒，批量写入间隔
@@ -957,7 +965,7 @@ class DataStore:
         """
         导出 Excel 报表。
         窗口起点早于 pings_raw 保留期，或跨度 > 24 小时 → 小时级聚合；
-        否则 → 秒级原始数据。每个节点一个 Sheet，首页汇总。
+        否则 → 亚秒级原始数据（时间列显示到毫秒）。每个节点一个 Sheet，首页汇总。
         """
         try:
             import openpyxl
@@ -1081,7 +1089,7 @@ class DataStore:
                     cell.fill = HDR_FILL; cell.font = HDR_FONT
 
                 for r in rows:
-                    dt   = datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+                    dt   = fmt_ts_ms(r["ts"])
                     loss = round((r["loss_rate"] or 0) * 100, 1)
                     # `if r["latency_ms"] else ""` would silently drop a
                     # legitimate 0.0 ms reading (sub-millisecond LAN /
@@ -1154,8 +1162,7 @@ class DataStore:
         SEVERITY = {'green': 0, 'gray': 1, 'paused': 1, 'orange': 2, 'red': 3}
 
         def _fmt_ts(ts):
-            if ts is None: return "—"
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            return fmt_ts_ms(ts)
 
         def _fmt_dur(seconds):
             if seconds is None: return "—"
