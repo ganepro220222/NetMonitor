@@ -144,6 +144,10 @@ class TargetState:
     # protection; None disables the check (e.g. when the engine
     # wasn't wired to a DataStore for synthetic tests).
     probe_data_store_generation: Optional[int] = None
+    # Whether THIS probe succeeded (PingResult.success).  Distinct from
+    # status, which is the debounced alert state and may stay green for
+    # 1-2 failures below consecutive_loss_orange.
+    probe_success: bool = True
 
 
 # ======================================================================
@@ -798,6 +802,7 @@ class TargetMonitor:
             timings          = self._last_timings,
             cert_days_left   = self._last_cert_days_left,
             keyword_ok       = self._last_keyword_ok,
+            probe_success    = latest.success,
         )
 
 

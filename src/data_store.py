@@ -30,6 +30,13 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
+# SQLite: 1 = probe succeeded, 0 = failed (NULL probe_success = legacy row).
+_PROBE_OK_SQL = (
+    "CASE WHEN probe_success IS NOT NULL THEN probe_success "
+    "WHEN failure_reason IS NOT NULL THEN 0 "
+    "WHEN latency_ms IS NULL THEN 0 ELSE 1 END"
+)
+
 
 _XLSX_ILLEGAL_RE = None
 
@@ -216,9 +223,23 @@ class DataStore:
 
     # ── 公开写入 API ────────────────────────────────────────────────
 
+    @staticmethod
+    def row_probe_success(latency_ms, status: str,
+                          failure_reason=None,
+                          probe_success=None) -> bool:
+        """True when this raw row represents a successful probe."""
+        if probe_success is not None:
+            return bool(probe_success)
+        if failure_reason:
+            return False
+        if status == "red":
+            return False
+        return latency_ms is not None
+
     def record_ping(self, *, target_id: str, label: str, ip: str,
                     ping_type: str, ts: float, status: str,
                     latency_ms: Optional[float], loss_rate: float,
+                    probe_success: bool = True,
                     status_code: Optional[int] = None,
                     failure_reason: Optional[str] = None,
                     captured_generation: Optional[int] = None) -> bool:
@@ -255,6 +276,7 @@ class DataStore:
             "target_id": target_id, "label": label, "ip": ip,
             "ping_type": ping_type, "ts": float(ts), "status": status,
             "latency_ms": latency_ms, "loss_rate": loss_rate,
+            "probe_success": 1 if probe_success else 0,
             "status_code": status_code, "failure_reason": failure_reason,
             "captured_generation": captured_generation,
         }))
@@ -517,28 +539,26 @@ class DataStore:
 
             elif span <= 7200:                        # ≤ 2 hours → raw
                 rows = conn.execute(
-                    "SELECT ts, latency_ms, status FROM pings_raw "
+                    "SELECT ts, latency_ms, status, failure_reason, "
+                    "probe_success FROM pings_raw "
                     "WHERE target_id=? AND ts BETWEEN ? AND ? "
                     "ORDER BY ts ASC, id ASC",
                     (target_id, start_ts, end_ts)).fetchall()
                 # max_ms/min_ms == rtt_ms here: each raw row IS a single sample,
                 # so the per-point min and max collapse to the sample's latency.
-                points = [{"ts": r[0],
-                           "rtt_ms": r[1],
-                           "max_ms": r[1],
-                           "min_ms": r[1],
-                           # orange = high latency but still connected → ok=True
-                           # red    = probe failed / packet lost         → ok=False
-                           # Matches SLA calculation which counts orange as success.
-                           "ok": r[2] != "red" and r[1] is not None,
-                           "sample_n": 1,
-                           "success_n": (1 if (r[2] != "red" and r[1] is not None)
-                                         else 0),
-                           # V4: four-state bucket for richer visual semantics
-                           "bucket_state": (
-                               "ok"       if (r[2] != "red" and r[1] is not None)
-                               else "all_fail")}
-                          for r in rows]
+                points = []
+                for r in rows:
+                    ok = self.row_probe_success(r[1], r[2], r[3], r[4])
+                    points.append({
+                        "ts": r[0],
+                        "rtt_ms": r[1],
+                        "max_ms": r[1],
+                        "min_ms": r[1],
+                        "ok": ok,
+                        "sample_n": 1,
+                        "success_n": 1 if ok else 0,
+                        "bucket_state": "ok" if ok else "all_fail",
+                    })
                 resolution = "raw"
 
             elif span <= 172800:                    # ≤ 48 hours → 1-minute buckets
@@ -549,15 +569,15 @@ class DataStore:
                 # (e.g. a 3000ms 30-second burst inside an otherwise-quiet
                 # minute averages to ~25ms).
                 rows = conn.execute(
-                    "SELECT CAST(ts / 60 AS INTEGER) * 60 AS minute, "
-                    "AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
-                    "COUNT(*), "
-                    "SUM(CASE WHEN latency_ms IS NOT NULL THEN 1 ELSE 0 END), "
-                    "MAX(latency_ms), "
-                    "MIN(latency_ms) "
-                    "FROM pings_raw "
-                    "WHERE target_id=? AND ts BETWEEN ? AND ? "
-                    "GROUP BY minute ORDER BY minute",
+                    f"SELECT CAST(ts / 60 AS INTEGER) * 60 AS minute, "
+                    f"AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
+                    f"COUNT(*), "
+                    f"SUM(CASE WHEN {_PROBE_OK_SQL} = 1 THEN 1 ELSE 0 END), "
+                    f"MAX(latency_ms), "
+                    f"MIN(latency_ms) "
+                    f"FROM pings_raw "
+                    f"WHERE target_id=? AND ts BETWEEN ? AND ? "
+                    f"GROUP BY minute ORDER BY minute",
                     (target_id, start_ts, end_ts)).fetchall()
                 points = [{"ts": r[0],
                            "rtt_ms": round(r[1], 2) if r[1] is not None else None,
@@ -617,11 +637,24 @@ class DataStore:
 
     @staticmethod
     def _compute_hourly_bucket(lat_status_rows) -> Optional[dict]:
-        """Aggregate (latency_ms, status) rows into one hourly bucket."""
+        """Aggregate pings_raw rows into one hourly bucket.
+
+        Each row is (latency_ms, status) or
+        (latency_ms, status, failure_reason, probe_success).
+        """
         if not lat_status_rows:
             return None
         sample_n  = len(lat_status_rows)
-        success_n = sum(1 for _, s in lat_status_rows if s in ("green", "orange"))
+        success_n = 0
+        for row in lat_status_rows:
+            if len(row) >= 4:
+                lat, st, fr, ps = row[0], row[1], row[2], row[3]
+            elif len(row) == 3:
+                lat, st, fr, ps = row[0], row[1], row[2], None
+            else:
+                lat, st, fr, ps = row[0], row[1], None, None
+            if DataStore.row_probe_success(lat, st, fr, ps):
+                success_n += 1
         lats      = sorted(r[0] for r in lat_status_rows if r[0] is not None)
         lat_avg   = sum(lats) / len(lats) if lats else None
         lat_max   = lats[-1] if lats else None
@@ -650,12 +683,12 @@ class DataStore:
         if win_start > win_end:
             return None
         row = conn.execute(
-            "SELECT COUNT(*), "
-            "SUM(CASE WHEN status IN ('green','orange') THEN 1 ELSE 0 END), "
-            "AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
-            "MAX(latency_ms), MIN(latency_ms) "
-            "FROM pings_raw "
-            "WHERE target_id=? AND ts >= ? AND ts <= ?",
+            f"SELECT COUNT(*), "
+            f"SUM(CASE WHEN {_PROBE_OK_SQL} = 1 THEN 1 ELSE 0 END), "
+            f"AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
+            f"MAX(latency_ms), MIN(latency_ms) "
+            f"FROM pings_raw "
+            f"WHERE target_id=? AND ts >= ? AND ts <= ?",
             (target_id, win_start, win_end)).fetchone()
         if not row or not row[0]:
             return None
@@ -760,12 +793,13 @@ class DataStore:
         qlo = max(float(range_lo), min(hours))
         qhi = min(float(range_hi), max(hours) + 3600)
         rows = conn.execute(
-            "SELECT ts, latency_ms, status FROM pings_raw "
+            "SELECT ts, latency_ms, status, failure_reason, probe_success "
+            "FROM pings_raw "
             "WHERE target_id=? AND ts >= ? AND ts < ?",
             (target_id, qlo, qhi)).fetchall()
         by_hour = defaultdict(list)
-        for ts, lat, st in rows:
-            by_hour[int(ts // 3600) * 3600].append((lat, st))
+        for ts, lat, st, fr, ps in rows:
+            by_hour[int(ts // 3600) * 3600].append((lat, st, fr, ps))
         out = {}
         for h in hours:
             bucket = self._compute_hourly_bucket(by_hour.get(h, []))
@@ -796,10 +830,11 @@ class DataStore:
         if int(win_start) < raw_cutoff:
             return hourly_by_hour.get(hour_ts)
         rows = conn.execute(
-            "SELECT ts, latency_ms, status FROM pings_raw "
+            "SELECT ts, latency_ms, status, failure_reason, probe_success "
+            "FROM pings_raw "
             "WHERE target_id=? AND ts >= ? AND ts < ?",
             (target_id, hour_ts, hour_ts + 3600)).fetchall()
-        slice_rows = [(lat, st) for ts, lat, st in rows
+        slice_rows = [(lat, st, fr, ps) for ts, lat, st, fr, ps in rows
                       if win_start <= ts <= win_end and ts < hour_ts + 3600]
         if slice_rows:
             bucket = self._compute_hourly_bucket(slice_rows)
@@ -966,13 +1001,13 @@ class DataStore:
             else:
                 rows = conn.execute(
                     "SELECT ts, status, latency_ms, loss_rate, "
-                    "status_code, failure_reason FROM pings_raw "
+                    "status_code, failure_reason, probe_success FROM pings_raw "
                     "WHERE target_id=? AND ts BETWEEN ? AND ? "
                     "ORDER BY ts ASC, id ASC",
                     (target_id, start_ts, end_ts)).fetchall()
                 return [{"ts": r[0], "status": r[1], "latency_ms": r[2],
                          "loss_rate": r[3], "status_code": r[4],
-                         "failure_reason": r[5]}
+                         "failure_reason": r[5], "probe_success": r[6]}
                         for r in rows]
         except Exception:
             return []
@@ -1073,7 +1108,11 @@ class DataStore:
                     avg_lat = ""
             else:
                 total   = len(rows)
-                success = sum(1 for r in rows if r["status"] in ("green", "orange"))
+                success = sum(
+                    1 for r in rows
+                    if self.row_probe_success(
+                        r["latency_ms"], r["status"],
+                        r.get("failure_reason"), r.get("probe_success")))
                 lats    = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
                 maxlats = lats
                 avg_lat = round(sum(lats) / len(lats), 1) if lats else ""
@@ -1886,6 +1925,7 @@ class DataStore:
                     status         TEXT    NOT NULL,
                     latency_ms     REAL,
                     loss_rate      REAL,
+                    probe_success  INTEGER,
                     status_code    INTEGER,
                     failure_reason TEXT,
                     ping_type      TEXT
@@ -2021,6 +2061,10 @@ class DataStore:
                 PRAGMA user_version = 7;
             """)
             conn.commit()
+
+        # Fresh CREATE sets user_version in SQL but leaves the Python
+        # `ver` variable stale (still 0); re-read so v7→v10 migrations run.
+        ver = conn.execute("PRAGMA user_version").fetchone()[0]
 
         # ── Incremental migrations ──────────────────────────────────────
         # v1 → v2: add incident_id and failure_reason to alert_events
@@ -2187,6 +2231,17 @@ class DataStore:
         if ver == 8:
             conn.execute("PRAGMA user_version = 9")
             conn.commit()
+            ver = 9
+
+        # v9 → v10: per-probe success flag (distinct from alert status).
+        if ver == 9:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(pings_raw)").fetchall()}
+            if "probe_success" not in cols:
+                conn.execute(
+                    "ALTER TABLE pings_raw ADD COLUMN probe_success INTEGER")
+            conn.execute("PRAGMA user_version = 10")
+            conn.commit()
 
         # Restore in-memory active-incident state from DB
         self._restore_active_incidents(conn)
@@ -2318,9 +2373,9 @@ class DataStore:
                     conn.executemany(
                         "INSERT INTO pings_raw "
                         "(target_id,ts,status,latency_ms,loss_rate,"
-                        " status_code,failure_reason,ping_type) "
+                        " probe_success,status_code,failure_reason,ping_type) "
                         "VALUES(:target_id,:ts,:status,:latency_ms,:loss_rate,"
-                        ":status_code,:failure_reason,:ping_type)",
+                        ":probe_success,:status_code,:failure_reason,:ping_type)",
                         ping_buf)
                     self._update_cum_stats(conn, ping_buf)
                     # 更新 targets_meta 快照（只保留每个 tid 的最新值）
@@ -2426,7 +2481,9 @@ class DataStore:
 
             for p in pings:
                 total += 1
-                if p["status"] in ("green", "orange"):
+                if self.row_probe_success(
+                        p.get("latency_ms"), p.get("status", "green"),
+                        p.get("failure_reason"), p.get("probe_success")):
                     success += 1
                 if p["latency_ms"] is not None:
                     lat_n   += 1
@@ -2582,7 +2639,8 @@ class DataStore:
                         continue
                     hour_end = hour_ts + 3600
                     rows = conn.execute(
-                        "SELECT latency_ms, status FROM pings_raw "
+                        "SELECT latency_ms, status, failure_reason, "
+                        "probe_success FROM pings_raw "
                         "WHERE target_id=? AND ts >= ? AND ts < ?",
                         (tid, hour_ts, hour_end)
                     ).fetchall()

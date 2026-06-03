@@ -1039,6 +1039,7 @@ class MainWindow(ctk.CTk):
                     target_id=tid, label=label, ip=ip,
                     ping_type=ptype, ts=_t.time(), status=state.status,
                     latency_ms=state.latency_ms, loss_rate=state.loss_rate,
+                    probe_success=state.probe_success,
                     status_code=state.status_code,
                     failure_reason=state.failure_reason,
                     # Forward the probe-start DataStore generation snapshot
@@ -1121,7 +1122,8 @@ class MainWindow(ctk.CTk):
                 cert_days_left=state.cert_days_left,
                 tcp_probe_ports=self._target_probe_ports.get(tid, ""),
                 dns_domain=self._target_dns_domain.get(tid, ""),
-                keyword_ok=state.keyword_ok)
+                keyword_ok=state.keyword_ok,
+                probe_success=state.probe_success)
 
         old = self._current_statuses.get(tid, "gray")
         if old != state.status:

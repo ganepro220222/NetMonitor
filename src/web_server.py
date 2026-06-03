@@ -4651,7 +4651,7 @@ function accumStat(t){
   if(!stats[t.tid])stats[t.tid]={total:0,success:0,latency_avg:0,latency_n:0,
                                   latencies:[],label:t.label,ip:t.ip};
   const s=stats[t.tid];s.total++;s.label=t.label;s.ip=t.ip;
-  if(t.status==='green'||t.status==='orange')s.success++;
+  if(t.probe_success!=null?t.probe_success:(!t.failure_reason&&t.latency_ms!=null))s.success++;
   if(t.latency_ms!=null){
     s.latency_n+=1;
     // CMA: keeps average near the true value without summing large numbers
@@ -6023,6 +6023,7 @@ class WebServer:
                       cert_days_left=None, tcp_probe_ports="",
                       dns_domain="",
                       keyword_ok=None,
+                      probe_success: bool = True,
                       is_probe_result: bool = True):
         """Push a status snapshot into the Web-side _targets dict.
 
@@ -6058,7 +6059,8 @@ class WebServer:
                 # frontend branch was unreachable.  Tri-state:
                 # None = node not configured for keyword check,
                 # True/False = match result.
-                "keyword_ok":       keyword_ok}
+                "keyword_ok":       keyword_ok,
+                "probe_success":    probe_success}
         # Single atomic lock section — paused check, write, history, and
         # building all_t all happen under one lock so there is no window
         # between the paused check and the _targets write.
@@ -6114,7 +6116,7 @@ class WebServer:
                                          "latency_avg": 0.0, "latency_n": 0}
                 s = self._stats[tid]
                 s["total"] += 1
-                if status in ("green", "orange"):
+                if probe_success:
                     s["success"] += 1
                 if latency_ms is not None:
                     s["latency_n"] += 1
