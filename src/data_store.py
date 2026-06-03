@@ -692,11 +692,13 @@ class DataStore:
         """One pings_raw SELECT, bucket rows into full-hour shapes."""
         if not hours:
             return {}
-        qlo = max(int(range_lo), min(hours))
-        qhi = min(int(range_hi), max(hours) + 3599)
+        # Half-open hour [h, h+3600): float ts can land in the last
+        # sub-second (e.g. h+3599.50); +3599 / <= would drop those rows.
+        qlo = max(float(range_lo), min(hours))
+        qhi = min(float(range_hi), max(hours) + 3600)
         rows = conn.execute(
             "SELECT ts, latency_ms, status FROM pings_raw "
-            "WHERE target_id=? AND ts >= ? AND ts <= ?",
+            "WHERE target_id=? AND ts >= ? AND ts < ?",
             (target_id, qlo, qhi)).fetchall()
         by_hour = defaultdict(list)
         for ts, lat, st in rows:
