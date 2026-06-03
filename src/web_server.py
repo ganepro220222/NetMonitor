@@ -4928,6 +4928,20 @@ function _populateWaveformTids(){
   if(!sel.value && sel.options.length > 1) sel.selectedIndex = 1;
 }
 
+function resetWaveformUi(){
+  _waveReqId++;
+  if(_waveChart){_waveChart.destroy();_waveChart=null;}
+  const sum=document.getElementById('waveform-summary');
+  if(sum)sum.innerHTML='';
+  const res=document.getElementById('waveform-resolution');
+  if(res)res.textContent='';
+  const empty=document.getElementById('waveform-empty');
+  if(empty){empty.textContent='请选择节点后点击刷新';empty.style.display='flex';}
+  const load=document.getElementById('waveform-loading');
+  if(load)load.style.display='none';
+  _populateWaveformTids();
+}
+
 function loadWaveform(){
   const sel = document.getElementById('waveform-tid');
   if(!sel) return;
@@ -4936,6 +4950,11 @@ function loadWaveform(){
   const emptyEl = document.getElementById('waveform-empty');
   const loadEl  = document.getElementById('waveform-loading');
   if(!tid){
+    if(_waveChart){_waveChart.destroy();_waveChart=null;}
+    const sumEl=document.getElementById('waveform-summary');
+    if(sumEl)sumEl.innerHTML='';
+    const resEl=document.getElementById('waveform-resolution');
+    if(resEl)resEl.textContent='';
     if(emptyEl){ emptyEl.textContent='请选择节点后点击刷新'; emptyEl.style.display='flex'; }
     if(loadEl) loadEl.style.display='none';
     return;
@@ -5462,9 +5481,12 @@ function connect(){
       if(msg.history) msg.history.forEach(ev=>hist.push({t:ev.time,label:ev.label,ip:ev.ip,oldSt:ev.old_status,newSt:ev.new_status}));
       renderCards();renderHist();checkAlerts();
       const _statsTab=document.getElementById('tab-stats');
-      // Stats tab shows time-range charts: re-fetch /api/stats for current window.
-      // applyServerStats() is cumulative only — buildStats() would mismatch time-info.
-      if(_statsTab&&_statsTab.style.display!=='none')_refreshStatsCharts();
+      // Stats tab: range stats + waveform must both match post-init targets.
+      if(_statsTab&&_statsTab.style.display!=='none'){
+        _refreshStatsCharts();
+        resetWaveformUi();
+        loadWaveform();
+      }
       document.getElementById('upd').textContent='已连接';return;}
     if(msg.type==='update'){const t=msg.target,old=targets[t.tid];
       if(old&&old.status!==t.status&&soundEnabled&&t.status!=='paused'){
