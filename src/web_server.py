@@ -4688,6 +4688,7 @@ function applyServerStats(serverStats){
 // ── 时间范围状态（全局，供所有统计功能共享）──────────────────────────────
 let _statsStart = Math.floor(Date.now()/1000) - 3600;   // 默认近1小时
 let _statsEnd   = Math.floor(Date.now()/1000);
+let _statsReqId = 0;   // incremented on each _refreshStatsCharts; stale responses discard themselves
 
 function _fmt(ts){
   const d=new Date(ts*1000);
@@ -5099,14 +5100,18 @@ function _renderWaveform(data, alerts){
 
 // 核心：向后端请求该时间段的聚合统计，重渲所有图表
 async function _refreshStatsCharts(){
+  const reqId=++_statsReqId;
+  const start=_statsStart;
+  const end=_statsEnd;
   const info=document.getElementById('time-info');
-  if(info) info.textContent=`查询中... ${_fmt(_statsStart)} — ${_fmt(_statsEnd)}`;
+  if(info) info.textContent=`查询中... ${_fmt(start)} — ${_fmt(end)}`;
 
   try{
-    const resp=await fetch(
-      `/api/stats?start=${_statsStart}&end=${_statsEnd}`);
+    const resp=await fetch(`/api/stats?start=${start}&end=${end}`);
+    if(reqId!==_statsReqId) return;
     if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
     const rangeStats=await resp.json();
+    if(reqId!==_statsReqId) return;
 
     // 写入 _range_* 供图表读取；渲染后删除，不覆盖累计 stats。
     Object.keys(rangeStats).forEach(tid=>{
@@ -5135,11 +5140,11 @@ async function _refreshStatsCharts(){
       delete stats[tid]._range_lat_p95;
     });
 
-    const span=_statsEnd-_statsStart;
+    const span=end-start;
     const gran=span<=86400?'秒级原始':'小时级聚合';
-    if(info) info.textContent=
-      `${_fmt(_statsStart)} — ${_fmt(_statsEnd)}（${gran}数据）`;
+    if(info) info.textContent=`${_fmt(start)} — ${_fmt(end)}（${gran}数据）`;
   }catch(e){
+    if(reqId!==_statsReqId) return;
     if(info) info.textContent=`查询失败: ${e.message}`;
   }
 }
