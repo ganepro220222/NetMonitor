@@ -2383,8 +2383,10 @@ class DataStore:
         rows every hour just to prove there are no gaps.
 
         Cost-idempotent: on a caught-up DB each routine tick processes at
-        most RECENT_RECOMPUTE_HOURS buckets per target.  Gap backfill is
-        amortized to once per cleanup cycle (and the startup cleanup).
+        most RECENT_RECOMPUTE_HOURS buckets per target, and discovers
+        targets only from raw rows in that recent window (not the full raw
+        retention span).  Gap backfill and full target discovery run on the
+        cleanup path (``backfill_internal_gaps=True``).
         """
         now          = int(time.time())
         current_hour = (now // 3600) * 3600   # exclude the in-progress hour
@@ -2401,14 +2403,19 @@ class DataStore:
         RECENT_RECOMPUTE_HOURS = 3
         recent_floor = current_hour - RECENT_RECOMPUTE_HOURS * 3600
 
-        # Targets are sourced from pings_raw (not targets_meta) so that
-        # a target removed in the last few days still gets its trailing
-        # raw rows aggregated before cleanup deletes them.  DISTINCT on
-        # the leading column of idx_raw_target_ts is a loose-index-scan
-        # in SQLite -- fast even on tens of millions of rows.
-        target_ids = [r[0] for r in conn.execute(
-            "SELECT DISTINCT target_id FROM pings_raw"
-        ).fetchall()]
+        # Targets from pings_raw (not targets_meta) so removed targets still
+        # get trailing raw aggregated before cleanup.  Routine hourly only
+        # scans the recent recompute window; cleanup/backfill scans all raw.
+        if backfill_internal_gaps:
+            target_ids = [r[0] for r in conn.execute(
+                "SELECT DISTINCT target_id FROM pings_raw"
+            ).fetchall()]
+        else:
+            target_ids = [r[0] for r in conn.execute(
+                "SELECT DISTINCT target_id FROM pings_raw "
+                "WHERE ts>=? AND ts<?",
+                (recent_floor, current_hour),
+            ).fetchall()]
 
         with conn:
             for tid in target_ids:

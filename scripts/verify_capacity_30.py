@@ -114,6 +114,24 @@ def _count_raw_scans(conn, fn):
     return c[0]
 
 
+def _count_target_discovery_scans(conn, fn):
+    windowed = [0]
+    full = [0]
+
+    def tr(sql):
+        u = " ".join(sql.upper().split())
+        if u.startswith("SELECT DISTINCT TARGET_ID FROM PINGS_RAW"):
+            if " WHERE " in u:
+                windowed[0] += 1
+            else:
+                full[0] += 1
+
+    conn.set_trace_callback(tr)
+    fn()
+    conn.set_trace_callback(None)
+    return windowed[0], full[0]
+
+
 def _count_gap_scans(conn, fn):
     c = [0]
 
@@ -205,6 +223,34 @@ def test_hourly_agg_fills_internal_gaps_before_hwm():
     return ok
 
 
+def test_hourly_agg_routine_uses_recent_window_target_discovery():
+    ds, conn = _new_store_conn()
+    C = (int(time.time()) // 3600) * 3600
+    for h in (1, 2, 3):
+        _ins_raw(conn, "T", C - h * 3600)
+    ds._hourly_agg(conn)
+    windowed, full = _count_target_discovery_scans(
+        conn, lambda: ds._hourly_agg(conn))
+    ok = windowed >= 1 and full == 0
+    print(f"hourly_agg routine target discovery windowed={windowed} full={full} "
+          f"(expect windowed>=1, full=0) -> {ok}")
+    return ok
+
+
+def test_hourly_agg_backfill_uses_full_target_discovery():
+    ds, conn = _new_store_conn()
+    C = (int(time.time()) // 3600) * 3600
+    for h in (1, 2, 3):
+        _ins_raw(conn, "T", C - h * 3600)
+    ds._hourly_agg(conn)
+    windowed, full = _count_target_discovery_scans(
+        conn, lambda: ds._hourly_agg(conn, backfill_internal_gaps=True))
+    ok = full >= 1
+    print(f"hourly_agg backfill target discovery windowed={windowed} full={full} "
+          f"(expect full>=1) -> {ok}")
+    return ok
+
+
 def test_hourly_agg_routine_skips_gap_scan_when_caught_up():
     ds, conn = _new_store_conn()
     C = (int(time.time()) // 3600) * 3600
@@ -261,6 +307,8 @@ def main():
         ("hourly_incremental",        test_hourly_agg_incremental_when_caught_up()),
         ("hourly_fills_missing",      test_hourly_agg_fills_missing_hours()),
         ("hourly_internal_gaps",      test_hourly_agg_fills_internal_gaps_before_hwm()),
+        ("hourly_recent_targets",     test_hourly_agg_routine_uses_recent_window_target_discovery()),
+        ("hourly_backfill_targets",   test_hourly_agg_backfill_uses_full_target_discovery()),
         ("hourly_no_routine_gap",     test_hourly_agg_routine_skips_gap_scan_when_caught_up()),
         ("hourly_gap_mode",           test_hourly_agg_gap_backfill_mode_runs_gap_scan()),
         ("hourly_recent_late",        test_hourly_agg_absorbs_recent_late_flush()),
