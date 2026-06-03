@@ -987,39 +987,37 @@ class HTTPMonitor(TargetMonitor):
                                       failure_reason=f"status_{single.status_code}",
                                       timings=timings, cert_days_left=cert_days)
 
-                # Content-Length framing: truncated body must not pass
-                # absent-keyword checks; contains may succeed if the
-                # keyword is already in the bytes we received.
-                cl = getattr(single, "_content_length", None)
+                # Incomplete body (Content-Length or chunked): absent-keyword
+                # checks must fail; contains may succeed if the keyword is
+                # already in the bytes we received.
                 framing_ok = getattr(single, "_body_framing_complete", True)
-                if (m == "GET" and single._body is not None
-                        and cl is not None and not framing_ok):
-                    required = min(cl, body_limit)
-                    if len(single._body) < required:
-                        if keyword:
-                            if kw_mode == "contains":
-                                kw_ok = HTTPMonitor._keyword_match(
-                                    single._body,
-                                    single._content_type or "",
-                                    keyword, kw_mode)
-                                if not kw_ok:
-                                    return PingResult(
-                                        success=False, latency_ms=total_ms,
-                                        status_code=single.status_code,
-                                        failure_reason="body_incomplete",
-                                        timings=timings,
-                                        cert_days_left=cert_days,
-                                        keyword_ok=False)
-                            else:
+                body_fail = getattr(single, "_body_failure_reason", None)
+                if m == "GET" and single._body is not None and not framing_ok:
+                    fail_reason = body_fail or "body_incomplete"
+                    if keyword:
+                        if kw_mode == "contains":
+                            kw_ok = HTTPMonitor._keyword_match(
+                                single._body,
+                                single._content_type or "",
+                                keyword, kw_mode)
+                            if not kw_ok:
                                 return PingResult(
                                     success=False, latency_ms=total_ms,
                                     status_code=single.status_code,
-                                    failure_reason="body_incomplete",
+                                    failure_reason=fail_reason,
                                     timings=timings,
                                     cert_days_left=cert_days,
                                     keyword_ok=False)
-                        # No keyword: status-code-only probes may treat a
-                        # partial body as available once headers + code OK.
+                        else:
+                            return PingResult(
+                                success=False, latency_ms=total_ms,
+                                status_code=single.status_code,
+                                failure_reason=fail_reason,
+                                timings=timings,
+                                cert_days_left=cert_days,
+                                keyword_ok=False)
+                    # No keyword: status-code-only probes may treat a
+                    # partial body as available once headers + code OK.
 
                 # Keyword check (only when GET returned a body)
                 kw_ok = None
@@ -1367,6 +1365,7 @@ class HTTPMonitor(TargetMonitor):
             # ── Read body (GET only, up to body_limit bytes) ─────────
             body = None
             body_framing_complete = True
+            body_failure_reason = None
             is_chunked = "chunked" in (transfer_encoding or "")
             # RFC 9112: 204/304 end at the header block — no body to wait for
             # even when the connection stays open (keep-alive).
@@ -1380,12 +1379,8 @@ class HTTPMonitor(TargetMonitor):
                         body, chunk_err = HTTPMonitor._read_chunked_body(
                             sock, body, body_limit, deadline)
                         if chunk_err:
-                            r = PingResult(success=False, latency_ms=None,
-                                            failure_reason=chunk_err,
-                                            timings=timings,
-                                            cert_days_left=cert_days)
-                            r._redirect_to = r._body = r._content_type = None
-                            return r
+                            body_framing_complete = False
+                            body_failure_reason = chunk_err
                     elif content_length is not None:
                         body_stop = min(content_length, body_limit)
                         while len(body) < body_stop:
@@ -1419,13 +1414,9 @@ class HTTPMonitor(TargetMonitor):
                     return r
                 except OSError:
                     if is_chunked:
-                        r = PingResult(success=False, latency_ms=None,
-                                        failure_reason="chunked_premature_eof",
-                                        timings=timings,
-                                        cert_days_left=cert_days)
-                        r._redirect_to = r._body = r._content_type = None
-                        return r
-                    if content_length is not None:
+                        body_framing_complete = False
+                        body_failure_reason = "chunked_premature_eof"
+                    elif content_length is not None:
                         body_framing_complete = False
                 body = body[:body_limit]
 
@@ -1437,6 +1428,7 @@ class HTTPMonitor(TargetMonitor):
             r._content_type = content_type
             r._content_length = content_length
             r._body_framing_complete = body_framing_complete
+            r._body_failure_reason = body_failure_reason
             return r
 
         except OSError:
