@@ -273,6 +273,9 @@ class TargetMonitor:
         # would otherwise resurrect the very badge the cache
         # invalidation just removed).
         self._settings_version  = 0
+        # Wired by PingEngine.add_target / set_data_store for probe-start
+        # DataStore generation snapshots (wipe / identity boundaries).
+        self._data_store = None
         self._thread = threading.Thread(target=self._run_loop,
                                          name=f"ping-{ip}", daemon=True)
 
@@ -477,6 +480,17 @@ class TargetMonitor:
                 # into the freshly-cleared cache by _compute_state.
                 # Mirror the ip-version pattern.
                 probe_settings_version = self._settings_version
+                # DataStore generation at probe START (not after _do_ping
+                # returns).  A wipe during a blocking probe bumps gen;
+                # reading here lets record_ping reject the stale row.
+                probe_data_store_generation = None
+                try:
+                    _ds = getattr(self, "_data_store", None)
+                    if _ds is not None:
+                        probe_data_store_generation = \
+                            _ds.current_target_generation(self.target_id)
+                except Exception:
+                    pass
                 result = self._do_ping()
                 # _do_ping may block for the full HTTP timeout (10s+).
                 # During that window the caller can have stopped this
@@ -544,17 +558,7 @@ class TargetMonitor:
                 # the new monitor's versions start at (0,0) just like
                 # this OLD monitor's, but its token is different.
                 state.probe_monitor_token    = self._instance_token
-                # DataStore generation snapshot for the record_ping
-                # writer-thread guard.  None when the engine isn't
-                # wired to a DataStore (synthetic / test setups).
-                try:
-                    _ds = getattr(self, "_data_store", None)
-                    if _ds is not None:
-                        state.probe_data_store_generation = \
-                            _ds.current_target_generation(self.target_id)
-                except Exception:
-                    # Never crash the probe thread over the snapshot.
-                    pass
+                state.probe_data_store_generation = probe_data_store_generation
                 self.on_state_change(state)
             except Exception as e:
                 # Unexpected error (OS stack issue, callback exception, etc.)
@@ -1865,6 +1869,9 @@ class PingEngine:
         with None (synthetic tests can leave the engine detached).
         """
         self._data_store = data_store
+        with self._monitors_lock:
+            for m in self._monitors.values():
+                m._data_store = data_store
 
     def add_target(self, target_id, ip, ping_type="icmp", custom_settings=None,
                    initial_status: str = "gray", start_paused: bool = False):
@@ -1897,6 +1904,7 @@ class PingEngine:
             # clobbered when the user changes the global defaults.  See
             # update_global_settings() below for the consumption side.
             monitor._override_keys = set(custom_settings.keys()) if custom_settings else set()
+            monitor._data_store = self._data_store
             if start_paused:
                 # MUST set _pause_event before .start() so the thread
                 # sees the pause flag on its very first iteration --
