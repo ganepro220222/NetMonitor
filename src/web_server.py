@@ -5284,7 +5284,11 @@ function buildDonutGrid(){
     // Update existing labels (server stats may have advanced since last build)
     const upEl=document.getElementById('uptime-'+tid);
     const avEl=document.getElementById('avg-'+tid);
-    if(upEl)upEl.textContent=`${uptimePct}%`;
+    if(upEl){
+      upEl.textContent=`${uptimePct}%`;
+      upEl.style.color=sc;
+      upEl.style.fontSize='16px';
+    }
     if(avEl)avEl.textContent=`${avg} ms`;
     const canvas=document.getElementById(cid);if(!canvas)return;
     if(donutCharts[tid]){
