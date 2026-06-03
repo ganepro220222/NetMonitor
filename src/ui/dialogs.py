@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.config_manager import MIN_PING_INTERVAL_S, is_valid_ping_interval
+from src.host_validation import is_valid_host as _is_valid_host
 
 """
 dialogs.py
@@ -38,21 +39,6 @@ PING_TYPES        = ["ICMP Ping", "TCP 端口", "HTTP/HTTPS", "DNS 监控"]
 PING_TYPE_VALUES  = {"ICMP Ping": "icmp", "TCP 端口": "tcp",
                      "HTTP/HTTPS": "http", "DNS 监控": "dns"}
 PING_TYPE_LABELS  = {v: k for k, v in PING_TYPE_VALUES.items()}
-
-
-def _is_valid_host(host: str) -> bool:
-    # IPv4
-    ipv4 = r"^(\d{1,3}\.){3}\d{1,3}$"
-    if re.match(ipv4, host):
-        return all(0 <= int(p) <= 255 for p in host.split("."))
-    # IPv6 literal (contains ":" — basic sanity check, not full RFC 4291)
-    if ":" in host:
-        # Allow hex digits, colons, and optional zone ID after %
-        return bool(re.match(r"^[0-9a-fA-F:]+(%\w+)?$", host))
-    # Domain name — allow FQDN (example.com) and single-label internal
-    # hostnames (localhost, nas-server, esxi-01) used in LAN environments.
-    domain = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9\-]{1,})*$"
-    return bool(re.match(domain, host))
 
 
 def _is_positive_int(s: str) -> bool:
@@ -431,7 +417,7 @@ class AddTargetDialog(_BaseDialog):
         if not ip:
             self._error("请填写 IP 地址或域名"); return
         ptype = PING_TYPE_VALUES.get(self._type_var.get(), "icmp")
-        if ptype != "http" and not _is_valid_host(ip):
+        if not _is_valid_host(ip):
             self._error("IP 地址或域名格式不正确"); return
         type_result = self._collect_type_result()
         if type_result is None:
@@ -584,8 +570,9 @@ class EditTargetDialog(_BaseDialog):
             self._error("请填写 IP 地址或域名")
             return
         ptype = PING_TYPE_VALUES.get(self._type_var.get(), "icmp")
-        if ptype != "http" and not _is_valid_host(ip):
-            self._error("IP 地址或域名格式不正确"); return
+        if not _is_valid_host(ip):
+            self._error("IP 地址或域名格式不正确")
+            return
         type_result = self._collect_type_result()
         if type_result is None:
             return
