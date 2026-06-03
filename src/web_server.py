@@ -5630,7 +5630,7 @@ function renderSLATable(){
   rows.sort((a,b)=>{const av=vals(a)[_slaSortCol],bv=vals(b)[_slaSortCol];
     if(av==null)return 1;if(bv==null)return -1;
     return _slaSortAsc?(av>bv?1:-1):(av<bv?1:-1);});
-  const ms=v=>v==null||v===0?"--":`${v} ms`;
+  const ms=v=>v==null?"--":`${v} ms`;
   const pct=v=>{
     if(v==null)return'<span style="color:var(--dim)">--</span>';
     const c=v>=99.9?"var(--green)":v>=99?"var(--orange)":"var(--red)";
