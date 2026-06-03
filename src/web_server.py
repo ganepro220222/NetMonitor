@@ -4722,7 +4722,7 @@ function applyTimeRange(){
   loadWaveform();
 }
 
-function exportWaveform(){
+async function exportWaveform(){
   const sel   = document.getElementById('waveform-tid');
   const tid   = sel ? sel.value : '';
   if(!tid){ alert('请先选择节点'); return; }
@@ -4732,12 +4732,31 @@ function exportWaveform(){
   const url   = `/api/waveform/export?tid=${encodeURIComponent(tid)}`
               + `&label=${encodeURIComponent(label)}`
               + `&start=${start}&end=${end}`;
-  // Check for empty-data 404 before triggering download
-  fetch(url, {method:'HEAD'}).then(r=>{
-    if(r.status===404){ alert('该时间范围内无可导出数据'); return; }
+  try{
+    const resp=await fetch(url);
+    if(resp.status===404){
+      let msg='该时间范围内无可导出数据';
+      try{const j=await resp.json();if(j.error)msg=j.error;}catch(e){}
+      alert(msg);return;
+    }
+    if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
+    const blob=await resp.blob();
     const a=document.createElement('a');
-    a.href=url; a.download=''; a.click();
-  }).catch(()=>{ const a=document.createElement('a'); a.href=url; a.download=''; a.click(); });
+    a.href=URL.createObjectURL(blob);
+    const cd=resp.headers.get('Content-Disposition')||'';
+    const m=cd.match(/filename\*=UTF-8''([^;]+)/i);
+    if(m){a.download=decodeURIComponent(m[1]);}
+    else{
+      const fmt=ts=>{const d=new Date(ts*1000);const p=n=>String(n).padStart(2,'0');
+        return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}`;};
+      a.download=`波形_${label}_${fmt(start)}_${fmt(end)}.xlsx`;
+    }
+    document.body.appendChild(a);a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  }catch(e){
+    alert(`导出失败：${e.message}`);
+  }
 }
 
 // ── Waveform chart ─────────────────────────────────────────────────────
