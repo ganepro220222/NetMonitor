@@ -23,17 +23,17 @@ def test_status_changed_detection():
     return ok
 
 
-def test_status_changed_light_refresh():
+def test_status_changed_refreshes_range_stats():
     with open(WEB_SERVER, encoding="utf-8") as f:
         block = _update_sse_block(f.read())
     idx = block.find("}else if(statusChanged){")
-    snippet = block[idx:idx + 120] if idx >= 0 else ""
+    snippet = block[idx:idx + 80] if idx >= 0 else ""
     ok = (
-        "buildDonutGrid();" in snippet
-        and "buildBarCharts();" in snippet
-        and "_refreshStatsCharts" not in snippet
+        "_refreshStatsCharts();" in snippet
+        and "buildDonutGrid();" not in snippet
+        and "buildBarCharts();" not in snippet
     )
-    print(f"Bug54 statusChanged light refresh -> {ok}")
+    print(f"Bug54 statusChanged range refresh -> {ok}")
     return ok
 
 
@@ -52,13 +52,13 @@ def test_meta_changed_still_full_refresh():
     return ok
 
 
-def test_meta_changed_not_in_status_branch():
+def test_status_branch_uses_api_refresh():
     with open(WEB_SERVER, encoding="utf-8") as f:
         block = _update_sse_block(f.read())
     idx = block.find("}else if(statusChanged){")
-    snippet = block[idx:idx + 120] if idx >= 0 else ""
-    ok = "_refreshStatsCharts" not in snippet
-    print(f"Bug54 status branch avoids API refresh -> {ok}")
+    snippet = block[idx:idx + 80] if idx >= 0 else ""
+    ok = "_refreshStatsCharts();" in snippet
+    print(f"Bug54 status branch uses _refreshStatsCharts -> {ok}")
     return ok
 
 
@@ -79,9 +79,9 @@ def test_simulate_stale_color_until_rebuild():
 def main():
     results = [
         ("detect", test_status_changed_detection()),
-        ("light", test_status_changed_light_refresh()),
+        ("range_refresh", test_status_changed_refreshes_range_stats()),
         ("meta_full", test_meta_changed_still_full_refresh()),
-        ("no_api", test_meta_changed_not_in_status_branch()),
+        ("api_refresh", test_status_branch_uses_api_refresh()),
         ("simulate", test_simulate_stale_color_until_rebuild()),
     ]
     failed = [name for name, ok in results if not ok]

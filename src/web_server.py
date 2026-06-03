@@ -5533,8 +5533,7 @@ function connect(){
           resetWaveformUi();
           loadWaveform();
         }else if(statusChanged){
-          buildDonutGrid();
-          buildBarCharts();
+          _refreshStatsCharts();
         }}
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
     if(msg.type==='remove'){
