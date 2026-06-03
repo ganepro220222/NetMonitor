@@ -2375,18 +2375,17 @@ class DataStore:
         TRADE-OFF (intentional): a raw row that flushes more than
         RECENT_RECOMPUTE_HOURS after its hour completed is NOT re-absorbed
         on the routine tick -- UNLESS that hour's bucket was missing
-        entirely, in which case the high-water-mark catch-up above still
-        rebuilds it.  This is the whole point of the fix: the previous
-        code clamped the start to the raw-retention floor on EVERY tick
-        (`min(hour_start, recompute_floor)`), so a fully caught-up DB
-        re-aggregated raw_retention_days * 24 hours per target every hour
-        (168 buckets/target at the 7-day default -- confirmed by repro).
-        Such >3h-late flushes are vanishingly rare under the single-writer
-        real-time-flush model, so trading their routine re-absorption for
-        not rescanning the whole window is a clear win.
+        entirely.  Missing buckets are found via a targeted SQL anti-join
+        (raw hour buckets EXCEPT existing pings_hourly rows) and rebuilt
+        even when they lie before the per-target high-water mark.  The
+        previous code only walked forward from MAX(hour_ts), so an internal
+        gap (newer hourly row present, older buckets missing) was never
+        filled.  Such >3h-late flushes into an *existing* bucket are still
+        not re-absorbed on the routine tick.
 
         Cost-idempotent: on a caught-up DB each tick processes at most
-        RECENT_RECOMPUTE_HOURS buckets per target, not the full window.
+        RECENT_RECOMPUTE_HOURS buckets per target for the recent window,
+        plus any genuinely missing hourly buckets that still have raw rows.
         """
         now          = int(time.time())
         current_hour = (now // 3600) * 3600   # exclude the in-progress hour
@@ -2448,12 +2447,37 @@ class DataStore:
                 # DB was fully caught up.
                 hour_start = max(recompute_floor, min(hour_start, recent_floor))
 
-                while hour_start < current_hour:
-                    hour_end = hour_start + 3600
+                hours_to_agg = set()
+                h = hour_start
+                while h < current_hour:
+                    hours_to_agg.add(h)
+                    h += 3600
+
+                # Internal gaps: raw exists but pings_hourly row missing
+                # (including hours before HWM).  One DISTINCT+EXCEPT per
+                # target — not a full retention rescan of every hour.
+                gap_rows = conn.execute(
+                    "SELECT hour_ts FROM ("
+                    "  SELECT DISTINCT (ts / 3600) * 3600 AS hour_ts "
+                    "  FROM pings_raw "
+                    "  WHERE target_id=? AND ts>=? AND ts<?"
+                    ") EXCEPT "
+                    "SELECT hour_ts FROM pings_hourly "
+                    "WHERE target_id=? AND hour_ts>=? AND hour_ts<?",
+                    (tid, recompute_floor, current_hour,
+                     tid, recompute_floor, current_hour),
+                ).fetchall()
+                for (gap_h,) in gap_rows:
+                    hours_to_agg.add(int(gap_h))
+
+                for hour_ts in sorted(hours_to_agg):
+                    if hour_ts >= current_hour:
+                        continue
+                    hour_end = hour_ts + 3600
                     rows = conn.execute(
                         "SELECT latency_ms, status FROM pings_raw "
                         "WHERE target_id=? AND ts >= ? AND ts < ?",
-                        (tid, hour_start, hour_end)
+                        (tid, hour_ts, hour_end)
                     ).fetchall()
                     bucket = self._compute_hourly_bucket(rows)
                     if bucket:
@@ -2462,12 +2486,11 @@ class DataStore:
                             "(target_id,hour_ts,sample_n,success_n,"
                             " lat_avg,lat_max,lat_min,lat_p95,loss_rate) "
                             "VALUES(?,?,?,?,?,?,?,?,?)",
-                            (tid, hour_start,
+                            (tid, hour_ts,
                              bucket["sample_n"], bucket["success_n"],
                              bucket["lat_avg"], bucket["lat_max"],
                              bucket["lat_min"], bucket["lat_p95"],
                              bucket["loss_rate"]))
-                    hour_start = hour_end
 
     def get_sla_stats(self, target_id: str,
                       start_ts: float, end_ts: float) -> dict:

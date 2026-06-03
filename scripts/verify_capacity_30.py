@@ -167,6 +167,30 @@ def test_hourly_agg_absorbs_recent_late_flush():
     return ok
 
 
+def test_hourly_agg_fills_internal_gaps_before_hwm():
+    """HWM at C-1h but C-6h..C-4h missing — must backfill, not only recent 3h."""
+    ds, conn = _new_store_conn()
+    C = (int(time.time()) // 3600) * 3600
+    for h in range(1, 7):
+        _ins_raw(conn, "T", C - h * 3600)
+    conn.execute(
+        "INSERT INTO pings_hourly(target_id,hour_ts,sample_n,success_n,"
+        "lat_avg,lat_max,lat_min,lat_p95,loss_rate) VALUES('T',?,5,5,10,14,10,14,0)",
+        (C - 1 * 3600,))
+    conn.commit()
+    ds._hourly_agg(conn)
+    hours_ago = {
+        (C - row[0]) // 3600
+        for row in conn.execute(
+            "SELECT hour_ts FROM pings_hourly WHERE target_id='T'"
+        ).fetchall()
+    }
+    ok = hours_ago == {1, 2, 3, 4, 5, 6}
+    print(f"hourly_agg internal-gap backfill hours_ago={sorted(hours_ago)} "
+          f"(expect 1..6) -> {ok}")
+    return ok
+
+
 def test_hourly_agg_old_late_flush_tradeoff():
     # Documents the INTENTIONAL trade-off: a late flush older than the
     # recent recompute window (3h) into an already-aggregated hour is NOT
@@ -195,6 +219,7 @@ def main():
         ("main_window_uses_capacity", test_main_window_uses_capacity_module()),
         ("hourly_incremental",        test_hourly_agg_incremental_when_caught_up()),
         ("hourly_fills_missing",      test_hourly_agg_fills_missing_hours()),
+        ("hourly_internal_gaps",      test_hourly_agg_fills_internal_gaps_before_hwm()),
         ("hourly_recent_late",        test_hourly_agg_absorbs_recent_late_flush()),
         ("hourly_old_late_tradeoff",  test_hourly_agg_old_late_flush_tradeoff()),
     ]
