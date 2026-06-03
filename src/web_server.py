@@ -113,6 +113,7 @@ class _TracerouteScheduler:
         self._prev_route_changed: dict[str, bool] = {}  # Rule B: require 2 consecutive changes
         self._targets: dict[str, str] = {}
         self._targets_lock = threading.Lock()
+        # Red-alert / manual request_now targets (high priority).
         self._pending: set = set()
         self._pending_lock = threading.Lock()
         # Per-tid monotonic generation counter.  Bumped whenever the
@@ -177,47 +178,58 @@ class _TracerouteScheduler:
             self._targets = normalized
 
     def request_now(self, tid: str):
+        """Queue an urgent traceroute (red alert / manual). Deduped by tid."""
         with self._pending_lock:
             self._pending.add(tid)
+
+    def _drain_urgent(self) -> set:
+        """Run all urgent traceroutes before the next routine full-scan hop.
+
+        Uses live _targets (not a full-scan snapshot) so a node that turns
+        red mid-scan is still reachable.  Cannot interrupt a traceroute
+        already inside _run_one() (subprocess may block up to ~120s).
+
+        Returns the set of target ids traced in this drain (for deduping
+        against the periodic full-scan pass that follows).
+        """
+        with self._pending_lock:
+            urgent = list(self._pending)
+            self._pending.clear()
+        if not urgent:
+            return set()
+        with self._targets_lock:
+            targets = dict(self._targets)
+        ran = set()
+        for tid in urgent:
+            info = targets.get(tid)
+            if info:
+                self._run_one(tid, info)
+                ran.add(tid)
+                time.sleep(1)
+        return ran
 
     def _loop(self):
         last_full = time.time()   # defer first full scan
         while True:
             time.sleep(5)
+            self._drain_urgent()
 
-            with self._pending_lock:
-                pending = list(self._pending)
-                self._pending.clear()
             with self._targets_lock:
                 snap = dict(self._targets)
 
-            for tid in pending:
-                info = snap.get(tid)
-                if info:
-                    self._run_one(tid, info)
-                    time.sleep(1)
-
             now = time.time()
             if snap and now - last_full >= self.interval:
+                traced_this_pass = set()
                 for tid, info in snap.items():
+                    # Priority: red-alert tracerts jump ahead of the
+                    # next periodic target (not ahead of one already
+                    # running inside _run_one).
+                    traced_this_pass |= self._drain_urgent()
+                    if tid in traced_this_pass:
+                        continue
                     self._run_one(tid, info)
+                    traced_this_pass.add(tid)
                     time.sleep(2)
-                    # Allow red-alert tracert to preempt mid full-scan.
-                    with self._pending_lock:
-                        urgent = list(self._pending)
-                        self._pending.clear()
-                    for p_tid in urgent:
-                        # Look up against the LIVE _targets (not the
-                        # full-scan snapshot taken minutes ago): a node
-                        # added during this scan that immediately fires a
-                        # red alert is not in `snap`, so snap.get() would
-                        # return None and silently drop its first urgent
-                        # tracert -- the very tracert operators need most.
-                        with self._targets_lock:
-                            p_info = self._targets.get(p_tid)
-                        if p_info:
-                            self._run_one(p_tid, p_info)
-                            time.sleep(1)
                 last_full = time.time()
 
     def _run_one(self, tid: str, target_info):
