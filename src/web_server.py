@@ -5274,6 +5274,13 @@ function buildDonutGrid(){
           连通率 <strong style="color:${sc};font-size:16px" id="uptime-${tid}">${uptimePct}%</strong>
           &nbsp; 均延时 <strong style="color:var(--blue2)" id="avg-${tid}">${avg} ms</strong></div>`;
       grid.appendChild(div);}
+    else{
+      const card=document.getElementById(cid)?.closest('.stat-card');
+      const titleEl=card?.querySelector('.stat-title');
+      if(titleEl){
+        titleEl.innerHTML=`<span style="color:${sc}">●</span> ${esc(t&&t.label?t.label:s.label)}
+        <span style="color:var(--dim);font-weight:400;font-size:11px">${esc(t&&t.ip?t.ip:s.ip)}</span>`;
+      }}
     // Update existing labels (server stats may have advanced since last build)
     const upEl=document.getElementById('uptime-'+tid);
     const avEl=document.getElementById('avg-'+tid);
@@ -5508,9 +5515,19 @@ function connect(){
       // fresh snapshot.  Server already clears its tracer cache on
       // IP edit; this is the matching client-side eviction.
       if(old&&old.ip!==t.ip)delete portStatus[t.tid];
+      const metaChanged=old&&(
+        old.label!==t.label||old.ip!==t.ip||old.ping_type!==t.ping_type);
       targets[t.tid]=t;accumStat(t);
       patchCard(t);   // in-place: avoids animation restart & click failures
       updateSummary();checkAlerts();
+      if(metaChanged){
+        const _statsTabUp=document.getElementById('tab-stats');
+        if(_statsTabUp&&_statsTabUp.style.display!=='none'){
+          buildBarCharts();
+          _refreshStatsCharts();
+          resetWaveformUi();
+          loadWaveform();
+        }}
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
     if(msg.type==='remove'){
       delete targets[msg.tid];
