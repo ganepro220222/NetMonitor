@@ -924,24 +924,28 @@ class DataStore:
         try:
             if target_id:
                 rows = conn.execute(
-                    "SELECT target_id, label, ip, ts, old_status, "
+                    "SELECT id, target_id, label, ip, ts, old_status, "
                     "new_status, category, incident_id FROM alert_events "
-                    "WHERE target_id=? AND ts>=? ORDER BY ts DESC LIMIT ?",
+                    "WHERE target_id=? AND ts>=? "
+                    "ORDER BY ts DESC, id DESC LIMIT ?",
                     (target_id, start_ts, limit)).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT target_id, label, ip, ts, old_status, "
+                    "SELECT id, target_id, label, ip, ts, old_status, "
                     "new_status, category, incident_id FROM alert_events "
-                    "WHERE ts>=? ORDER BY ts DESC LIMIT ?",
+                    "WHERE ts>=? ORDER BY ts DESC, id DESC LIMIT ?",
                     (start_ts, limit)).fetchall()
+            # id + ORDER BY ts DESC, id DESC: export_excel re-sorts by
+            # (ts, id) ascending; stable tie-break avoids same-second
+            # events appearing in reverse insertion order.
             # incident_id is included so export_excel can do the Level-2
             # exact JOIN into traceroute_logs.  May be NULL on historical
             # rows that pre-date the v1→v2 backfill — get_incident_traceroute
             # then falls back to its time-window match.
-            return [{"target_id": r[0], "label": r[1], "ip": r[2],
-                     "ts": r[3], "old_status": r[4],
-                     "new_status": r[5], "category": r[6],
-                     "incident_id": r[7]}
+            return [{"id": r[0], "target_id": r[1], "label": r[2], "ip": r[3],
+                     "ts": r[4], "old_status": r[5],
+                     "new_status": r[6], "category": r[7],
+                     "incident_id": r[8]}
                     for r in rows]
         except Exception:
             return []
@@ -1228,7 +1232,7 @@ class DataStore:
             current_events = None
             start_truncated = False
 
-            for ev in sorted(events, key=lambda e: e['ts']):
+            for ev in sorted(events, key=lambda e: (e['ts'], e.get('id', 0))):
                 ns  = ev.get('new_status', '')
                 os_ = ev.get('old_status', '')
                 cat = ev.get('category', '')
