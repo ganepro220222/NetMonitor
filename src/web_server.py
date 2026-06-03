@@ -5712,8 +5712,24 @@ class _SSEBroadcaster:
     def push(self, data: str):
         with self._lock:
             for q in list(self._queues):
-                try: q.put_nowait(data)
-                except queue.Full: pass
+                try:
+                    q.put_nowait(data)
+                except queue.Full:
+                    # Monitoring UI: the newest state matters more than
+                    # replaying the oldest stale update.  A FIFO queue that
+                    # saturated with old green/latency updates would
+                    # otherwise silently drop a fresh red-alert update
+                    # (queue.Full -> pass), stranding a slow client on a
+                    # stale status until reconnect.  Evict the oldest queued
+                    # message and retry so the latest update always gets in.
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(data)
+                    except queue.Full:
+                        pass
 
 
 def _is_ip_literal(s: str) -> bool:
