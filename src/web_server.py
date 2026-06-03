@@ -5078,9 +5078,7 @@ async function _refreshStatsCharts(){
     if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
     const rangeStats=await resp.json();
 
-    // 用时间段数据替换全局 stats（用于图表渲染），渲染完恢复
-    const savedStats={...stats};
-    // 把返回的 {tid:{total,success,lat_avg,...}} 合并成图表需要的格式
+    // 写入 _range_* 供图表读取；渲染后删除，不覆盖累计 stats。
     Object.keys(rangeStats).forEach(tid=>{
       // Skip tids not in current active targets (Strategy B: keep DB data,
       // never render deleted nodes on frontend).
@@ -5197,20 +5195,18 @@ function buildDonutGrid(){
     // Deleted nodes may leave stale entries in stats via cum_stats seed.
     if(!targets[tid]||!targets[tid].label)return;
     const s=stats[tid];
-    // Use time-range data (_range_*) when available (set by _refreshStatsCharts
-    // before calling this function).  Fall back to cumulative server totals.
-    // Previously this function always used s.total/s.success regardless,
-    // so the donut charts showed all-time uptime even when the user selected
-    // "last 1 hour" — the donut and the bar chart were inconsistent.
-    const totalProbes   = s._range_total   != null ? s._range_total   : s.total;
-    const successProbes = s._range_success != null ? s._range_success : s.success;
+    // _range_* set by _refreshStatsCharts for the selected window; cumulative
+    // totals used only when no range query has run (e.g. init buildStats).
+    const useRange      = s._range_total != null;
+    const totalProbes   = useRange ? s._range_total   : s.total;
+    const successProbes = useRange ? (s._range_success ?? 0) : s.success;
     const failProbes    = Math.max(0, totalProbes - successProbes);
-    const uptime        = totalProbes ? (successProbes / totalProbes * 100) : 100;
+    const uptime        = totalProbes ? (successProbes / totalProbes * 100)
+                        : (useRange ? 0 : 100);
     const uptimePct     = Math.round(uptime*100)/100;
     const lossPct       = Math.round((100-uptime)*100)/100;
-    // Avg latency: prefer range value, then server CMA, then bounded local array
-    const avg = s._range_lat_avg != null
-      ? (+s._range_lat_avg).toFixed(1)
+    const avg = useRange
+      ? (s._range_lat_avg != null ? (+s._range_lat_avg).toFixed(1) : '--')
       : s.latency_n>0 ? (s.latency_avg||0).toFixed(1)
       : s.latencies.length ? (s.latencies.reduce((a,b)=>a+b,0)/s.latencies.length).toFixed(1)
       : '--';
@@ -5319,7 +5315,8 @@ function buildBarCharts(){
     const labels=tids.map(tid=>targets[tid]?.label||tid);
     const avgs=tids.map(tid=>{
       const s=stats[tid];if(!s)return 0;
-      if(s._range_lat_avg!=null)return+s._range_lat_avg.toFixed(1);
+      if(s._range_total!=null)
+        return s._range_lat_avg!=null?+s._range_lat_avg.toFixed(1):0;
       if(s.latency_n>0)return+((s.latency_avg||0).toFixed(1));
       return s.latencies?.length?+(s.latencies.reduce((a,b)=>a+b,0)/s.latencies.length).toFixed(1):0;
     });
@@ -6719,6 +6716,10 @@ class WebServer:
                 rows = self._data_store.get_history(
                     tid, start, end, use_hourly=use_hourly)
                 if not rows:
+                    result[tid] = {
+                        "total": 0, "success": 0,
+                        "lat_avg": None, "lat_max": None, "lat_p95": None,
+                    }
                     continue
                 if use_hourly:
                     total   = sum(r["sample_n"] for r in rows)
