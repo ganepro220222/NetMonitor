@@ -1743,6 +1743,7 @@ function updateSummary(){
   document.getElementById('s-red').textContent=`告警 ${cnt.red}`;}
 
 let titleTimer=null;
+let titleAlertText='';
 
 // ── 浏览器通知（远程告警推送）───────────────────────────────────────
 // 其他局域网设备打开页面后，系统告警会通过浏览器系统通知弹窗 + 网页音效推送。
@@ -1782,11 +1783,14 @@ function checkAlerts(){
   if(reds.length){const names=reds.map(t=>t.label).join('、');
     document.getElementById('alert-banner').classList.remove('hidden');
     document.getElementById('alert-text').textContent=names+' 连接中断！';
-    if(!titleTimer){let f=false;titleTimer=setInterval(()=>{document.title=f?`🔴 告警 ${names}`:'网络连通性监测';f=!f;},1000);}
+    titleAlertText=`🔴 告警 ${names}`;
+    if(!titleTimer){let f=false;titleTimer=setInterval(()=>{document.title=f?titleAlertText:'网络连通性监测';f=!f;},1000);}
   }else{document.getElementById('alert-banner').classList.add('hidden');
+    titleAlertText='';
     if(titleTimer){clearInterval(titleTimer);titleTimer=null;document.title='网络连通性监测';}}
 }
 function dismissAlert(){document.getElementById('alert-banner').classList.add('hidden');
+  titleAlertText='';
   if(titleTimer){clearInterval(titleTimer);titleTimer=null;document.title='网络连通性监测';}}
 
 function addHist(label,ip,oldSt,newSt,timeStr){
