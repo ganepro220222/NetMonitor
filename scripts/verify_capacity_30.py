@@ -37,13 +37,20 @@ def test_capacity_constants():
 
 def test_capacity_is_ui_free():
     # The whole point of capacity.py is to be importable without a GUI
-    # stack.  Verify it imports cleanly AND declares no tk import.
+    # stack.  Verify it imports cleanly AND its source declares no tk
+    # import.
+    #
+    # We deliberately do NOT assert `"customtkinter" not in sys.modules`:
+    # that is process-global state, so a unified test runner that imported
+    # ctk earlier (e.g. via main_window) would trip this even though
+    # capacity.py is innocent.  The source-text check is order-independent
+    # and covers the only realistic risk, since capacity.py imports no
+    # project modules and so cannot pull tk in transitively.
     import src.capacity  # noqa: F401  (must not raise)
     with open(os.path.join(ROOT, "src", "capacity.py"), encoding="utf-8") as f:
         src_text = f.read()
     ok = ("import customtkinter" not in src_text
-          and "import tkinter" not in src_text
-          and "customtkinter" not in sys.modules)
+          and "import tkinter" not in src_text)
     print(f"capacity.py UI-free (no tk import) -> {ok}")
     return ok
 
