@@ -3111,9 +3111,19 @@ class DnsDiagWindow(ctk.CTkToplevel):
                 content_h = (bbox[3] - bbox[1]) if bbox else 0
                 # +2 px slack absorbs sub-pixel rounding so a perfectly-
                 # fit frame doesn't oscillate between showing/hiding.
-                if content_h > visible_h + 2:
+                want_visible = content_h > visible_h + 2
+                # Idempotent toggle: only touch geometry on a REAL state
+                # change.  Unconditional grid()/grid_remove() re-lays-out
+                # the frame and fires a <Configure>, which re-runs this
+                # sync -- a self-sustaining show->hide->show oscillation
+                # (the flicker seen once a list overflows).  grid_info()
+                # reflects the real shown/removed state, so acting only on
+                # a change breaks the loop while the retry chain below
+                # still converges on the correct final state.
+                is_shown = bool(bar.grid_info())
+                if want_visible and not is_shown:
                     bar.grid()
-                else:
+                elif not want_visible and is_shown:
                     bar.grid_remove()
             # Always schedule another pass while we still have retry
             # budget — Tk's layout often settles only after multiple
@@ -3266,7 +3276,10 @@ class DnsDiagWindow(ctk.CTkToplevel):
         self.destroy()
 
     def _sync_history_list_scrollbar(self, listbox):
-        self._hide_scrollbar_now(listbox)
+        # Don't force-hide first.  The old grid_remove()-then-re-measure
+        # blinked the bar away on every <Configure> even when it should
+        # stay shown; the now-idempotent _autohide_scrollbar settles it to
+        # the correct state directly, without the flicker.
         self.after_idle(self._autohide_scrollbar, listbox)
 
     def _bind_history_scrollbar_sync(self, win, listbox):

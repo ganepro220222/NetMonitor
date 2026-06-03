@@ -590,9 +590,20 @@ class IcmpDiagWindow(ctk.CTkToplevel):
             visible_h = canvas.winfo_height()
             if visible_h > 1:
                 content_h = (bbox[3] - bbox[1]) if bbox else 0
-                if content_h > visible_h + 2:
+                want_visible = content_h > visible_h + 2   # +2: sub-pixel slack
+                # Idempotent toggle: only touch geometry on a REAL state
+                # change.  grid()/grid_remove() always re-lays-out the
+                # listbox and fires a <Configure>, which re-runs this sync;
+                # doing it unconditionally (even when the bar is already in
+                # the right state) is what made the scrollbar flicker once
+                # the list overflowed -- a self-sustaining show->hide->show
+                # loop.  grid_info() reflects the real shown/removed state,
+                # so acting only on a change breaks the loop while the retry
+                # chain below still converges on the correct final state.
+                is_shown = bool(bar.grid_info())
+                if want_visible and not is_shown:
                     bar.grid()
-                else:
+                elif not want_visible and is_shown:
                     bar.grid_remove()
             if _retries > 0:
                 delay_ms = (50, 120, 280)[3 - _retries]
@@ -603,7 +614,10 @@ class IcmpDiagWindow(ctk.CTkToplevel):
             pass
 
     def _sync_history_list_scrollbar(self, listbox, win):
-        self._hide_scrollbar_now(listbox)
+        # Don't force-hide first.  The old grid_remove()-then-re-measure
+        # blinked the bar away on every <Configure> even when it should
+        # stay shown; the now-idempotent _autohide_scrollbar settles it to
+        # the correct state directly, without the flicker.
         win.after_idle(lambda: self._autohide_scrollbar(listbox))
 
     def _bind_history_scrollbar_sync(self, win, listbox):
