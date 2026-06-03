@@ -5231,7 +5231,7 @@ function buildDonutGrid(){
     if(!targets[tid]||!targets[tid].label)return;
     const s=stats[tid];
     // _range_* set by _refreshStatsCharts for the selected window; cumulative
-    // totals used only when no range query has run (e.g. init buildStats).
+    // totals used only when no range query has run yet.
     const useRange      = s._range_total != null;
     const totalProbes   = useRange ? s._range_total   : s.total;
     const successProbes = useRange ? (s._range_success ?? 0) : s.success;
@@ -5462,7 +5462,9 @@ function connect(){
       if(msg.history) msg.history.forEach(ev=>hist.push({t:ev.time,label:ev.label,ip:ev.ip,oldSt:ev.old_status,newSt:ev.new_status}));
       renderCards();renderHist();checkAlerts();
       const _statsTab=document.getElementById('tab-stats');
-      if(_statsTab&&_statsTab.style.display!=='none')buildStats();
+      // Stats tab shows time-range charts: re-fetch /api/stats for current window.
+      // applyServerStats() is cumulative only — buildStats() would mismatch time-info.
+      if(_statsTab&&_statsTab.style.display!=='none')_refreshStatsCharts();
       document.getElementById('upd').textContent='已连接';return;}
     if(msg.type==='update'){const t=msg.target,old=targets[t.tid];
       if(old&&old.status!==t.status&&soundEnabled&&t.status!=='paused'){
