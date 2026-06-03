@@ -2370,7 +2370,10 @@ class DataStore:
             completed hours (INSERT OR REPLACE) so pings that flush into
             pings_raw AFTER an hour bucket was first written are still
             folded in;
-          - never start earlier than the raw retention floor.
+          - routine ticks never start earlier than the raw retention floor;
+          - cleanup/backfill (``backfill_internal_gaps=True``) aggregates
+            from each target's earliest raw hour still in the DB so rows
+            about to be deleted by ``_cleanup()`` are folded first.
 
         TRADE-OFF (intentional): a raw row that flushes more than
         RECENT_RECOMPUTE_HOURS after its hour completed is NOT re-absorbed
@@ -2390,8 +2393,8 @@ class DataStore:
         """
         now          = int(time.time())
         current_hour = (now // 3600) * 3600   # exclude the in-progress hour
-        # Hard floor: never re-aggregate earlier than raw retention (those
-        # raw rows are gone or being cleaned up).
+        # Routine floor: do not walk earlier than the retention window.
+        # Cleanup/backfill uses per-target earliest raw hour instead (Bug61).
         recompute_floor = current_hour - int(self._raw_retention_days * 86400)
         # Routine recompute window: always re-touch the last few completed
         # hours so a late flush (lock contention / recovery / backfill) that
@@ -2444,25 +2447,36 @@ class DataStore:
                         continue
                     hour_start = (first[0] // 3600) * 3600
 
-                # Catch up missing hours from the high-water mark, but
-                # clamp so we (a) re-touch only the recent recompute window
-                # to absorb late flushes, not the entire retention span,
-                # and (b) never start earlier than raw retention.  Replaces
-                # the old `min(hour_start, recompute_floor)`, which rescanned
-                # raw_retention_days * 24 hours on EVERY tick even when the
-                # DB was fully caught up.
-                hour_start = max(recompute_floor, min(hour_start, recent_floor))
+                first_raw = conn.execute(
+                    "SELECT MIN(ts) FROM pings_raw WHERE target_id=?",
+                    (tid,),
+                ).fetchone()
+                if (backfill_internal_gaps
+                        and first_raw and first_raw[0] is not None):
+                    agg_floor = (first_raw[0] // 3600) * 3600
+                else:
+                    agg_floor = recompute_floor
 
                 hours_to_agg = set()
-                h = hour_start
-                while h < current_hour:
-                    hours_to_agg.add(h)
-                    h += 3600
+                if backfill_internal_gaps:
+                    # Pre-cleanup: fold every complete hour that still has
+                    # raw in the DB, including rows older than recompute_floor.
+                    h = agg_floor
+                    while h < current_hour:
+                        hours_to_agg.add(h)
+                        h += 3600
+                else:
+                    hour_start = max(agg_floor,
+                                     min(hour_start, recent_floor))
+                    h = hour_start
+                    while h < current_hour:
+                        hours_to_agg.add(h)
+                        h += 3600
 
                 if backfill_internal_gaps:
                     # Internal gaps: raw exists but pings_hourly row missing
-                    # (including hours before HWM).  DISTINCT+EXCEPT over raw
-                    # retention — expensive, so not on the hourly tick.
+                    # (including hours before HWM).  DISTINCT+EXCEPT over all
+                    # raw still in DB for this target — cleanup path only.
                     gap_rows = conn.execute(
                         "SELECT hour_ts FROM ("
                         "  SELECT DISTINCT (ts / 3600) * 3600 AS hour_ts "
@@ -2471,8 +2485,8 @@ class DataStore:
                         ") EXCEPT "
                         "SELECT hour_ts FROM pings_hourly "
                         "WHERE target_id=? AND hour_ts>=? AND hour_ts<?",
-                        (tid, recompute_floor, current_hour,
-                         tid, recompute_floor, current_hour),
+                        (tid, agg_floor, current_hour,
+                         tid, agg_floor, current_hour),
                     ).fetchall()
                     for (gap_h,) in gap_rows:
                         hours_to_agg.add(int(gap_h))

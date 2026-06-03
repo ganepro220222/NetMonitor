@@ -278,6 +278,36 @@ def test_hourly_agg_gap_backfill_mode_runs_gap_scan():
     return ok
 
 
+def test_cleanup_backfill_rescues_raw_older_than_retention_floor():
+    """Raw older than recompute_floor must reach pings_hourly before cleanup."""
+    ds, conn = _new_store_conn(raw_retention_days=1)
+    now = int(time.time())
+    C = (now // 3600) * 3600
+    old_ts = now - 2 * 86400
+    old_hour = (old_ts // 3600) * 3600
+    conn.execute(
+        "INSERT INTO pings_raw(target_id,ts,latency_ms,status) VALUES(?,?,?,?)",
+        ("T", old_ts, 12.5, "green"))
+    conn.commit()
+    raw_before = conn.execute("SELECT COUNT(*) FROM pings_raw").fetchone()[0]
+    hourly_before = conn.execute(
+        "SELECT COUNT(*) FROM pings_hourly").fetchone()[0]
+    ds._hourly_agg(conn, backfill_internal_gaps=True)
+    hourly_after_agg = conn.execute(
+        "SELECT COUNT(*) FROM pings_hourly WHERE target_id='T' AND hour_ts=?",
+        (old_hour,)).fetchone()[0]
+    ds._cleanup(conn)
+    raw_after = conn.execute("SELECT COUNT(*) FROM pings_raw").fetchone()[0]
+    hourly_after = conn.execute(
+        "SELECT COUNT(*) FROM pings_hourly WHERE target_id='T' AND hour_ts=?",
+        (old_hour,)).fetchone()[0]
+    ok = (raw_before == 1 and hourly_before == 0 and hourly_after_agg == 1
+          and raw_after == 0 and hourly_after == 1)
+    print(f"Bug61 cleanup rescue: raw {raw_before}->{raw_after} "
+          f"hourly {hourly_before}->{hourly_after_agg}/{hourly_after} -> {ok}")
+    return ok
+
+
 def test_hourly_agg_old_late_flush_tradeoff():
     # Documents the INTENTIONAL trade-off: a late flush older than the
     # recent recompute window (3h) into an already-aggregated hour is NOT
@@ -309,6 +339,7 @@ def main():
         ("hourly_internal_gaps",      test_hourly_agg_fills_internal_gaps_before_hwm()),
         ("hourly_recent_targets",     test_hourly_agg_routine_uses_recent_window_target_discovery()),
         ("hourly_backfill_targets",   test_hourly_agg_backfill_uses_full_target_discovery()),
+        ("cleanup_rescue",            test_cleanup_backfill_rescues_raw_older_than_retention_floor()),
         ("hourly_no_routine_gap",     test_hourly_agg_routine_skips_gap_scan_when_caught_up()),
         ("hourly_gap_mode",           test_hourly_agg_gap_backfill_mode_runs_gap_scan()),
         ("hourly_recent_late",        test_hourly_agg_absorbs_recent_late_flush()),
