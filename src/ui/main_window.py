@@ -9,6 +9,9 @@ from src.alert_manager import AlertManager
 from src.logger import Logger
 from src.history_store import HistoryStore
 from src.web_server import WebServer, FLASK_AVAILABLE
+from src.capacity import (
+    MAX_TARGETS, WARN_TARGETS,
+    RECOMMENDED_LARGE_TARGET_INTERVAL_S, target_limit_state)
 from src.ui.ip_card import IPCard
 from src.ui.waveform_window import WaveformDetailWindow
 from src.ui.icmp_diag_window import IcmpDiagWindow
@@ -18,14 +21,11 @@ from src.ui.history_panel import HistoryPanel
 from src.ui.settings_dialog import SettingsDialog
 from src.ui.fonts import make as F
 
-# Maximum number of monitored targets.
-# The reasoning: each target spawns a background thread and one ping.exe
-# process per second. Beyond 20 parallel processes, Windows process-creation
-# overhead inflates measured RTT values (the ping itself is delayed by OS
-# scheduling), defeating the purpose of accurate monitoring. 20 targets also
-# keeps simultaneous chart-render cost under ~15% CPU on typical hardware.
-MAX_TARGETS      = 20
-WARN_TARGETS     = 15   # soft warning threshold
+# Capacity policy (MAX_TARGETS / WARN_TARGETS /
+# RECOMMENDED_LARGE_TARGET_INTERVAL_S / target_limit_state) lives in
+# src/capacity.py — a UI-free module so the limits and the add-flow
+# decision logic can be unit-tested without importing customtkinter.
+# Imported above; do NOT redefine the numbers here.
 
 _HEADER_H    = 56
 _TOOLBAR_H   = 94    # toolbar(38+8) + search(34+5) + divider(1+6) + extra
@@ -1366,13 +1366,15 @@ class MainWindow(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _on_add(self):
-        # Hard limit check (C11)
-        if len(self._cards) >= MAX_TARGETS:
+        # Hard limit check (C11) — capacity policy lives in src/capacity.py
+        if target_limit_state(len(self._cards)) == "blocked":
             messagebox.showwarning(
                 "已达到节点上限",
-                f"当前已添加 {MAX_TARGETS} 个监测节点，已达上限。\n\n"
-                f"保持在 {MAX_TARGETS} 个以内可确保监测精度和响应速度。\n"
-                f"如需监控更多目标，建议在设置中将 Ping 间隔调整为 2 秒。",
+                f"当前已添加 {MAX_TARGETS} 个监测节点，已达当前版本推荐上限。\n\n"
+                f"为保证监测精度、告警及时性和 UI 响应速度，"
+                f"当前桌面版建议最多监控 {MAX_TARGETS} 个节点。\n"
+                f"如果大部分是 ICMP 节点，建议在设置中将 Ping 间隔设置为 "
+                f"{RECOMMENDED_LARGE_TARGET_INTERVAL_S:g} 秒或以上。",
                 parent=self)
             return
 
@@ -1382,13 +1384,15 @@ class MainWindow(ctk.CTk):
         if dialog.result:
             r = dialog.result
 
-            # Soft warning (C11) — shown once when crossing 15
-            if len(self._cards) == WARN_TARGETS - 1:
+            # Soft warning (C11) — shown once when crossing WARN_TARGETS
+            if target_limit_state(len(self._cards)) == "warn":
                 messagebox.showinfo(
                     "节点数量提示",
                     f"已添加 {WARN_TARGETS} 个节点。\n\n"
-                    f"建议最多保持在 {MAX_TARGETS} 个以内，否则部分老旧电脑上\n"
-                    f"监测精度和 UI 响应速度可能有所下降。",
+                    f"当前版本推荐上限为 {MAX_TARGETS} 个节点。\n"
+                    f"如果其中 ICMP 节点较多，建议将 Ping 间隔调整为 "
+                    f"{RECOMMENDED_LARGE_TARGET_INTERVAL_S:g} 秒或以上，\n"
+                    f"以降低 ping 子进程创建带来的 RTT 偏移和 UI 响应压力。",
                     parent=self)
 
             # Build extra fields for type-specific config

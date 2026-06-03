@@ -2362,22 +2362,46 @@ class DataStore:
         skipped FOREVER -- once pings_raw cleanup ran (default 7 days
         later) and removed that hour's raw rows, the SLA report had a
         permanent hole in pings_hourly that no future agg could fill.
-        Now: per target, find the highest hour already aggregated and
-        catch up every full hour from there to (but not including) the
-        current still-in-progress hour.  The last two *completed* hours
-        are always recomputed (INSERT OR REPLACE) so pings that flush
-        into pings_raw after an hour bucket was first written are still
-        folded into pings_hourly.
+        Now, per target:
+          - catch up every MISSING full hour from the per-target
+            high-water mark up to (but not including) the current
+            still-in-progress hour;
+          - always recompute the most recent RECENT_RECOMPUTE_HOURS (3)
+            completed hours (INSERT OR REPLACE) so pings that flush into
+            pings_raw AFTER an hour bucket was first written are still
+            folded in;
+          - never start earlier than the raw retention floor.
 
-        Idempotent: re-running this on a fully caught-up DB is cheap
-        (one MAX(hour_ts) lookup per target, while loop runs 0 times).
+        TRADE-OFF (intentional): a raw row that flushes more than
+        RECENT_RECOMPUTE_HOURS after its hour completed is NOT re-absorbed
+        on the routine tick -- UNLESS that hour's bucket was missing
+        entirely, in which case the high-water-mark catch-up above still
+        rebuilds it.  This is the whole point of the fix: the previous
+        code clamped the start to the raw-retention floor on EVERY tick
+        (`min(hour_start, recompute_floor)`), so a fully caught-up DB
+        re-aggregated raw_retention_days * 24 hours per target every hour
+        (168 buckets/target at the 7-day default -- confirmed by repro).
+        Such >3h-late flushes are vanishingly rare under the single-writer
+        real-time-flush model, so trading their routine re-absorption for
+        not rescanning the whole window is a clear win.
+
+        Cost-idempotent: on a caught-up DB each tick processes at most
+        RECENT_RECOMPUTE_HOURS buckets per target, not the full window.
         """
         now          = int(time.time())
         current_hour = (now // 3600) * 3600   # exclude the in-progress hour
-        # Re-aggregate every complete hour still covered by raw retention so
-        # rows that land hours late (lock contention, recovery, backfill) are
-        # folded into pings_hourly, not only the most recent two hours.
+        # Hard floor: never re-aggregate earlier than raw retention (those
+        # raw rows are gone or being cleaned up).
         recompute_floor = current_hour - int(self._raw_retention_days * 86400)
+        # Routine recompute window: always re-touch the last few completed
+        # hours so a late flush (lock contention / recovery / backfill) that
+        # landed AFTER its hour was first aggregated still gets folded in.
+        # This is the ONLY span re-scanned on a caught-up DB -- we do NOT
+        # walk the whole retention window every tick (the old
+        # `min(hour_start, recompute_floor)` did exactly that).  See the
+        # method docstring for the late-flush trade-off this implies.
+        RECENT_RECOMPUTE_HOURS = 3
+        recent_floor = current_hour - RECENT_RECOMPUTE_HOURS * 3600
 
         # Targets are sourced from pings_raw (not targets_meta) so that
         # a target removed in the last few days still gets its trailing
@@ -2415,8 +2439,14 @@ class DataStore:
                         continue
                     hour_start = (first[0] // 3600) * 3600
 
-                # Re-aggregate recent complete hours to absorb late flushes.
-                hour_start = min(hour_start, recompute_floor)
+                # Catch up missing hours from the high-water mark, but
+                # clamp so we (a) re-touch only the recent recompute window
+                # to absorb late flushes, not the entire retention span,
+                # and (b) never start earlier than raw retention.  Replaces
+                # the old `min(hour_start, recompute_floor)`, which rescanned
+                # raw_retention_days * 24 hours on EVERY tick even when the
+                # DB was fully caught up.
+                hour_start = max(recompute_floor, min(hour_start, recent_floor))
 
                 while hour_start < current_hour:
                     hour_end = hour_start + 3600

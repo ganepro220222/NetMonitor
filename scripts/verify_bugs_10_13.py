@@ -98,13 +98,27 @@ def test_bug11_current_hour_stats():
 
 
 def test_bug13_late_old_hour():
+    # A raw row that lands in pings_raw AFTER its hour was first
+    # aggregated must be folded in on the next _hourly_agg pass.
+    #
+    # Originally probed at ch-4h.  The 30-node capacity work made
+    # _hourly_agg incremental (recompute only the recent
+    # RECENT_RECOMPUTE_HOURS=3 completed hours instead of rescanning the
+    # whole raw-retention span every tick, which had blocked the writer
+    # ~10-15s/hour at 30 targets).  A 4h-old late flush is now
+    # intentionally NOT re-absorbed on the routine tick (see
+    # verify_capacity_30.py's old-late-flush trade-off test).  That 4h
+    # case was never reachable anyway: FLUSH_INTERVAL=60s caps real late
+    # arrivals at ~1h (a probe straddling the hour boundary, flushed up
+    # to a minute later).  Probe at ch-2h so this still exercises the
+    # REAL late-flush guarantee the incremental aggregator upholds.
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     try:
         ds = DataStore(path, raw_retention_days=7)
         now = int(time.time())
         ch = (now // 3600) * 3600
-        old_hour = ch - 4 * 3600
+        old_hour = ch - 2 * 3600
         tid = "t1"
         conn = __import__("sqlite3").connect(path)
         conn.execute(
