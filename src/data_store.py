@@ -660,22 +660,8 @@ class DataStore:
         if not row or not row[0]:
             return None
         sample_n, success_n, lat_avg, lat_max, lat_min = row
-        lat_n = conn.execute(
-            "SELECT COUNT(latency_ms) FROM pings_raw "
-            "WHERE target_id=? AND ts >= ? AND ts <= ? "
-            "AND latency_ms IS NOT NULL",
-            (target_id, win_start, win_end)).fetchone()[0]
-        lat_p95 = None
-        if lat_n:
-            offset = min(lat_n - 1, max(0, math.ceil(lat_n * 0.95) - 1))
-            p95_row = conn.execute(
-                "SELECT latency_ms FROM pings_raw "
-                "WHERE target_id=? AND ts >= ? AND ts <= ? "
-                "AND latency_ms IS NOT NULL "
-                "ORDER BY latency_ms ASC LIMIT 1 OFFSET ?",
-                (target_id, win_start, win_end, offset)).fetchone()
-            if p95_row:
-                lat_p95 = p95_row[0]
+        lat_p95 = self._global_lat_p95_sql(
+            conn, target_id, win_start, win_end)
         loss_rate = 1 - success_n / sample_n if sample_n else 0.0
         return {
             "hour_ts":   hour_ts,
@@ -687,6 +673,42 @@ class DataStore:
             "lat_p95":   lat_p95,
             "loss_rate": loss_rate,
         }
+
+    def _raw_covers_window_start(self, start_ts) -> bool:
+        """True when every sample in [start_ts, now] should still be in pings_raw."""
+        return int(start_ts) >= self._raw_retention_cutoff()
+
+    def _global_lat_p95_sql(self, conn, target_id: str,
+                            win_start: float, win_end: float) -> Optional[float]:
+        """Nearest-rank P95 over all non-null latencies in a pings_raw window."""
+        if win_start > win_end:
+            return None
+        lat_n = conn.execute(
+            "SELECT COUNT(latency_ms) FROM pings_raw "
+            "WHERE target_id=? AND ts >= ? AND ts <= ? "
+            "AND latency_ms IS NOT NULL",
+            (target_id, win_start, win_end)).fetchone()[0]
+        if not lat_n:
+            return None
+        offset = min(lat_n - 1, max(0, math.ceil(lat_n * 0.95) - 1))
+        p95_row = conn.execute(
+            "SELECT latency_ms FROM pings_raw "
+            "WHERE target_id=? AND ts >= ? AND ts <= ? "
+            "AND latency_ms IS NOT NULL "
+            "ORDER BY latency_ms ASC LIMIT 1 OFFSET ?",
+            (target_id, win_start, win_end, offset)).fetchone()
+        return p95_row[0] if p95_row else None
+
+    def _rollup_latency_for_window(self, conn, target_id: str,
+                                  buckets: list, start_ts, end_ts) -> dict:
+        """Hourly-bucket rollup for totals/avg/max; global P95 from raw when possible."""
+        merged = self._rollup_hourly_buckets(buckets)
+        if self._raw_covers_window_start(start_ts):
+            merged["lat_p95"] = self._global_lat_p95_sql(
+                conn, target_id, float(start_ts), float(end_ts))
+        else:
+            merged["lat_p95"] = None
+        return merged
 
     def _hourly_row_to_bucket(self, row) -> dict:
         return {"hour_ts":  row[0], "sample_n": row[1],
@@ -876,16 +898,14 @@ class DataStore:
         success = sum(b["success_n"] for b in buckets)
         lat_pairs = [(b["lat_avg"], b["success_n"]) for b in buckets
                      if b["lat_avg"] is not None and b["success_n"]]
-        p95_pairs = [(b["lat_p95"], b["success_n"]) for b in buckets
-                     if b["lat_p95"] is not None and b["success_n"]]
         maxlats   = [b["lat_max"] for b in buckets if b["lat_max"] is not None]
         w_n  = sum(n for _v, n in lat_pairs)
         lat_avg = (sum(v * n for v, n in lat_pairs) / w_n if w_n else None)
-        w_np = sum(n for _v, n in p95_pairs)
-        lat_p95 = (sum(v * n for v, n in p95_pairs) / w_np if w_np else None)
         lat_max = max(maxlats) if maxlats else None
+        # lat_p95 is not statistically valid across buckets; callers use
+        # _rollup_latency_for_window() for global P95 when raw is available.
         return {"total": total, "success": success,
-                "lat_avg": lat_avg, "lat_max": lat_max, "lat_p95": lat_p95}
+                "lat_avg": lat_avg, "lat_max": lat_max, "lat_p95": None}
 
     def _current_hour_bucket(self, conn, target_id: str,
                              start_ts: float, end_ts: float) -> Optional[dict]:
@@ -2660,8 +2680,8 @@ class DataStore:
                 conn, target_ids, start_ts, end_ts)
             result = {}
             for tid in target_ids:
-                merged = self._rollup_hourly_buckets(
-                    buckets_by_tid.get(tid, []))
+                merged = self._rollup_latency_for_window(
+                    conn, tid, buckets_by_tid.get(tid, []), start_ts, end_ts)
                 if not merged.get("total"):
                     result[tid] = dict(empty)
                     continue
@@ -2714,9 +2734,10 @@ class DataStore:
             # also gives the right zero-guard: if no probes succeeded in the
             # range, the latency average is genuinely undefined (NULL),
             # rather than dividing by a sample_n that includes only failures.
-            merged = self._rollup_hourly_buckets(
-                self._bounded_hourly_buckets(
-                    conn, target_id, start_ts, end_ts))
+            buckets = self._bounded_hourly_buckets(
+                conn, target_id, start_ts, end_ts)
+            merged = self._rollup_latency_for_window(
+                conn, target_id, buckets, start_ts, end_ts)
 
             total   = merged["total"]   or 0
             success = merged["success"] or 0
@@ -2848,8 +2869,8 @@ class DataStore:
                 conn, target_ids, start_ts, end_ts)
             lat_by_tid = {}
             for tid in target_ids:
-                merged = self._rollup_hourly_buckets(
-                    buckets_by_tid.get(tid, []))
+                merged = self._rollup_latency_for_window(
+                    conn, tid, buckets_by_tid.get(tid, []), start_ts, end_ts)
                 if merged.get("total"):
                     lat_by_tid[tid] = {"target_id": tid, **merged}
 
