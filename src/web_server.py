@@ -6512,7 +6512,7 @@ class WebServer:
         # cross-module imports in this file already use the
         # `from .icmp_diag import …` / `from .dns_diag import …` form
         # so this just matches the existing convention.
-        from .data_store import excel_safe_text as _excel_safe_text
+        from .data_store import excel_safe_text as _excel_safe_text, fmt_ts_ms
 
         def _body_str(body, key, default=""):
             """Read a string field from a parsed JSON body, falling
@@ -6907,7 +6907,7 @@ class WebServer:
                 return json.dumps({"error": "该时间范围内无可导出数据"}), 404, \
                        {"Content-Type": "application/json"}
 
-            res_cn = {"raw":"秒级", "1m":"分钟级", "1h":"小时级"}.get(res, res)
+            res_cn = {"raw":"原始(毫秒)", "1m":"分钟级", "1h":"小时级"}.get(res, res)
 
             try:
                 import openpyxl, io, datetime as _dt
@@ -6919,24 +6919,26 @@ class WebServer:
                 # Header row
                 hdr_fill = PatternFill("solid", fgColor="1E40AF")
                 hdr_font = Font(bold=True, color="FFFFFF")
-                headers  = ["时间", "延时 (ms)", "状态", "bucket_state"]
+                headers  = ["时间", "Unix 时间戳", "延时 (ms)", "状态", "bucket_state"]
                 for col, h in enumerate(headers, 1):
                     c = ws.cell(1, col, h)
                     c.fill, c.font = hdr_fill, hdr_font
                     c.alignment = Alignment(horizontal="center")
-                ws.column_dimensions["A"].width = 20
+                ws.column_dimensions["A"].width = 22
                 ws.column_dimensions["B"].width = 14
-                ws.column_dimensions["C"].width = 12
-                ws.column_dimensions["D"].width = 16
+                ws.column_dimensions["C"].width = 14
+                ws.column_dimensions["D"].width = 12
+                ws.column_dimensions["E"].width = 16
 
                 # Data rows
                 state_cn = {"ok":"正常", "partial_fail":"部分丢包", "all_fail":"全部丢包"}
                 for p in pts:
-                    dt_str = _dt.datetime.fromtimestamp(p["ts"]).strftime("%Y-%m-%d %H:%M:%S")
-                    ws.append([dt_str,
-                                p["rtt_ms"] if p["rtt_ms"] is not None else "",
-                                state_cn.get(p.get("bucket_state","ok"), ""),
-                                p.get("bucket_state","")])
+                    ts = p["ts"]
+                    ws.append([fmt_ts_ms(ts),
+                               round(float(ts), 3) if ts is not None else "",
+                               p["rtt_ms"] if p["rtt_ms"] is not None else "",
+                               state_cn.get(p.get("bucket_state","ok"), ""),
+                               p.get("bucket_state","")])
 
                 # Summary sheet
                 ws2 = wb.create_sheet("摘要")
