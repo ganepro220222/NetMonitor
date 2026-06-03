@@ -4992,9 +4992,7 @@ function loadWaveform(){
 }
 
 function _renderWaveform(data, alerts){
-  // Chart.js missing -> skip the chart render entirely; the rest of
-  // the waveform panel (controls, summary line) still functions.
-  if(typeof Chart==='undefined')return;
+  // Chart.js missing -> skip chart only; granularity + summary still update.
   const resEl = document.getElementById('waveform-resolution');
   const resMap = {'raw':'秒级','1m':'分钟级','1h':'小时级'};
   if(resEl){
@@ -5024,6 +5022,23 @@ function _renderWaveform(data, alerts){
   // bucket_state: "ok" | "partial_fail" | "all_fail"
   // Gaps in ts sequence = "no_data" (not returned by API, shown as line breaks)
   const pts      = data.points || [];
+  const emptyEl  = document.getElementById('waveform-empty');
+  if(pts.length===0){
+    if(emptyEl){
+      emptyEl.textContent='该时间段暂无波形数据';
+      emptyEl.style.display='flex';
+    }
+    if(_waveChart){ _waveChart.destroy(); _waveChart=null; }
+    return;
+  }
+  if(emptyEl) emptyEl.style.display='none';
+  if(typeof Chart==='undefined'){
+    if(emptyEl){
+      emptyEl.textContent='图表库加载失败，但摘要数据已显示';
+      emptyEl.style.display='flex';
+    }
+    return;
+  }
   const isDark   = document.documentElement.getAttribute('data-theme')==='dark';
   const gridC    = isDark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
   const textC    = isDark ? '#9ca3af' : '#6b7280';
