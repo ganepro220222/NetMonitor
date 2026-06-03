@@ -4920,7 +4920,7 @@ function _populateWaveformTids(){
   Object.values(targets).forEach(t=>{
     const opt = document.createElement('option');
     opt.value = t.tid;
-    opt.textContent = `${esc(t.label||t.tid)} (${esc(t.ip||'')})`;
+    opt.textContent = `${t.label||t.tid} (${t.ip||''})`;
     if(t.tid === current) opt.selected = true;
     sel.appendChild(opt);
   });
