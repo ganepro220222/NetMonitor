@@ -137,7 +137,7 @@ def _count_gap_scans(conn, fn):
 
     def tr(sql):
         u = " ".join(sql.upper().split())
-        if ("DISTINCT" in u and "(TS / 3600) * 3600" in u
+        if ("DISTINCT" in u and "CAST(TS / 3600 AS INTEGER) * 3600" in u
                 and "EXCEPT" in u and "PINGS_RAW" in u):
             c[0] += 1
     conn.set_trace_callback(tr)

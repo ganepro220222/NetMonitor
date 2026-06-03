@@ -18,7 +18,7 @@ def test_hourly_agg_uses_gap_except_query_when_enabled():
         "backfill_internal_gaps" in block
         and "if backfill_internal_gaps:" in block
         and "EXCEPT" in block
-        and "SELECT DISTINCT (ts / 3600) * 3600 AS hour_ts" in block
+        and "CAST(ts / 3600 AS INTEGER) * 3600" in block
     )
     print(f"Bug58 gap EXCEPT when backfill_internal_gaps -> {ok}")
     return ok

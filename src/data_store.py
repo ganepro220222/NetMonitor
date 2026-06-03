@@ -245,7 +245,7 @@ class DataStore:
             return False
         self._queue.put(("ping", {
             "target_id": target_id, "label": label, "ip": ip,
-            "ping_type": ping_type, "ts": int(ts), "status": status,
+            "ping_type": ping_type, "ts": float(ts), "status": status,
             "latency_ms": latency_ms, "loss_rate": loss_rate,
             "status_code": status_code, "failure_reason": failure_reason,
             "captured_generation": captured_generation,
@@ -425,7 +425,7 @@ class DataStore:
         try:
             row = conn.execute(
                 "SELECT status FROM pings_raw WHERE target_id = ? "
-                "ORDER BY ts DESC LIMIT 1",
+                "ORDER BY ts DESC, id DESC LIMIT 1",
                 (target_id,)).fetchone()
             return row[0] if row is not None else None
         except Exception:
@@ -510,7 +510,8 @@ class DataStore:
             elif span <= 7200:                        # ≤ 2 hours → raw
                 rows = conn.execute(
                     "SELECT ts, latency_ms, status FROM pings_raw "
-                    "WHERE target_id=? AND ts BETWEEN ? AND ? ORDER BY ts",
+                    "WHERE target_id=? AND ts BETWEEN ? AND ? "
+                    "ORDER BY ts ASC, id ASC",
                     (target_id, start_ts, end_ts)).fetchall()
                 # max_ms/min_ms == rtt_ms here: each raw row IS a single sample,
                 # so the per-point min and max collapse to the sample's latency.
@@ -540,7 +541,7 @@ class DataStore:
                 # (e.g. a 3000ms 30-second burst inside an otherwise-quiet
                 # minute averages to ~25ms).
                 rows = conn.execute(
-                    "SELECT (ts / 60) * 60 AS minute, "
+                    "SELECT CAST(ts / 60 AS INTEGER) * 60 AS minute, "
                     "AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
                     "COUNT(*), "
                     "SUM(CASE WHEN latency_ms IS NOT NULL THEN 1 ELSE 0 END), "
@@ -699,7 +700,7 @@ class DataStore:
             (target_id, qlo, qhi)).fetchall()
         by_hour = defaultdict(list)
         for ts, lat, st in rows:
-            by_hour[(int(ts) // 3600) * 3600].append((lat, st))
+            by_hour[int(ts // 3600) * 3600].append((lat, st))
         out = {}
         for h in hours:
             bucket = self._compute_hourly_bucket(by_hour.get(h, []))
@@ -734,7 +735,7 @@ class DataStore:
             "WHERE target_id=? AND ts >= ? AND ts < ?",
             (target_id, hour_ts, hour_ts + 3600)).fetchall()
         slice_rows = [(lat, st) for ts, lat, st in rows
-                      if win_start <= int(ts) <= win_end]
+                      if win_start <= ts <= win_end]
         if slice_rows:
             bucket = self._compute_hourly_bucket(slice_rows)
             if bucket:
@@ -904,7 +905,7 @@ class DataStore:
                     "SELECT ts, status, latency_ms, loss_rate, "
                     "status_code, failure_reason FROM pings_raw "
                     "WHERE target_id=? AND ts BETWEEN ? AND ? "
-                    "ORDER BY ts",
+                    "ORDER BY ts ASC, id ASC",
                     (target_id, start_ts, end_ts)).fetchall()
                 return [{"ts": r[0], "status": r[1], "latency_ms": r[2],
                          "loss_rate": r[3], "status_code": r[4],
@@ -1815,7 +1816,7 @@ class DataStore:
                 CREATE TABLE IF NOT EXISTS pings_raw (
                     id             INTEGER PRIMARY KEY,
                     target_id      TEXT    NOT NULL,
-                    ts             INTEGER NOT NULL,
+                    ts             REAL    NOT NULL,
                     status         TEXT    NOT NULL,
                     latency_ms     REAL,
                     loss_rate      REAL,
@@ -2111,6 +2112,14 @@ class DataStore:
         # installs get REAL NOT NULL from CREATE TABLE above.
         if ver == 7:
             conn.execute("PRAGMA user_version = 8")
+            conn.commit()
+            ver = 8
+
+        # v8 → v9: pings_raw.ts stored as REAL (sub-second precision).
+        # Existing INTEGER columns accept REAL values in SQLite; new
+        # installs get REAL NOT NULL from CREATE TABLE above.
+        if ver == 8:
+            conn.execute("PRAGMA user_version = 9")
             conn.commit()
 
         # Restore in-memory active-incident state from DB
@@ -2477,7 +2486,8 @@ class DataStore:
                     # complete old buckets with retention-edge partial raw.
                     gap_rows = conn.execute(
                         "SELECT hour_ts FROM ("
-                        "  SELECT DISTINCT (ts / 3600) * 3600 AS hour_ts "
+                        "  SELECT DISTINCT CAST(ts / 3600 AS INTEGER) * 3600 "
+                        "         AS hour_ts "
                         "  FROM pings_raw "
                         "  WHERE target_id=? AND ts>=? AND ts<?"
                         ") EXCEPT "
