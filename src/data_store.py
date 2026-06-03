@@ -2525,6 +2525,43 @@ class DataStore:
                                  bucket["lat_min"], bucket["lat_p95"],
                                  bucket["loss_rate"]))
 
+    @staticmethod
+    def _compute_outage_stats(start_ts: int, end_ts: int,
+                              status_at_start: str, events,
+                              now: float) -> tuple:
+        """Return (outage_secs, outage_count) for one SLA window.
+
+        Only counts outages with positive overlap inside [start_ts, end_ts].
+        Zero-length boundary touches (recovery at window start, fault at
+        window end) do not increment outage_count.
+        """
+        outage_secs = 0.0
+        outage_count = 0
+        fault_start = start_ts if status_at_start == "red" else None
+
+        for ev in events:
+            ts = ev["ts"]
+            old_s = ev["old_status"]
+            new_s = ev["new_status"]
+            if new_s == "red" and fault_start is None:
+                fault_start = ts
+            elif (old_s == "red" and new_s != "red"
+                  and fault_start is not None):
+                dur = ts - fault_start
+                if dur > 0:
+                    outage_secs += dur
+                    outage_count += 1
+                fault_start = None
+
+        if fault_start is not None:
+            case_b_end = min(end_ts, now)
+            dur = max(0.0, case_b_end - fault_start)
+            if dur > 0:
+                outage_secs += dur
+                outage_count += 1
+
+        return outage_secs, outage_count
+
     def get_sla_stats(self, target_id: str,
                       start_ts: float, end_ts: float) -> dict:
         """
@@ -2612,40 +2649,9 @@ class DataStore:
                 ORDER BY ts ASC
             """, (target_id, start_ts, end_ts)).fetchall()
 
-            # Walk events within [start_ts, end_ts]
-            outage_secs  = 0.0
-            outage_count = 0
-            # Case A/C: outage was already active at window start
-            fault_start = start_ts if status_at_start == "red" else None
-            if status_at_start == "red":
-                outage_count = 1
-
-            for ev in events:
-                ts, old_s, new_s = ev["ts"], ev["old_status"], ev["new_status"]
-
-                if new_s == "red" and fault_start is None:
-                    # Fresh outage starts
-                    fault_start   = ts
-                    outage_count += 1
-                elif old_s == "red" and new_s != "red" and fault_start is not None:
-                    # Outage ends (recovery to green / orange / gray)
-                    outage_secs += ts - fault_start
-                    fault_start  = None
-
-            # Case B: outage is still ongoing at query time.
-            # Cap the end-of-outage at NOW (not at the query window's end_ts).
-            #
-            # Why: the SLA date picker uses end_ts = "today 23:59:59" (day granularity).
-            # If a node went red at 00:30 and the user queries at 00:35, the naive
-            # calculation gives outage_secs = 23:59:59 - 00:30 = 23.5 hours for a
-            # 5-minute outage.  By capping at the current time, we get 5 minutes —
-            # which is the actual elapsed downtime at query time.
-            #
-            # end_ts (the query window boundary) still matters for uptime% denominator
-            # and for past closed outages; it only affects the ONGOING outage endpoint.
-            if fault_start is not None:
-                case_b_end = min(end_ts, time.time())
-                outage_secs += max(0.0, case_b_end - fault_start)
+            now = time.time()
+            outage_secs, outage_count = self._compute_outage_stats(
+                int(start_ts), int(end_ts), status_at_start, events, now)
 
             # Connection is thread-local-cached — do not close here either.
             # Was previously closing mid-method then again in finally; both
@@ -2653,7 +2659,7 @@ class DataStore:
 
             # uptime% denominator: use the smaller of (query window, elapsed so far)
             # so that a 7-day query made on day 1 isn't comparing against a full week.
-            elapsed = min(end_ts, time.time()) - start_ts
+            elapsed = min(end_ts, now) - start_ts
             period_secs = max(elapsed, 1)
             uptime_pct  = round(
                 max(0.0, (period_secs - outage_secs) / period_secs) * 100, 3)
@@ -2793,26 +2799,8 @@ class DataStore:
                 events = events_by_tid.get(tid, [])
                 status_at_start = status_at_start_by_tid.get(tid, "green")
 
-                outage_secs  = 0.0
-                outage_count = 0
-                fault_start = start_ts if status_at_start == "red" else None
-                if status_at_start == "red":
-                    outage_count = 1
-
-                for ev in events:
-                    ts_ev = ev["ts"]
-                    old_s = ev["old_status"]
-                    new_s = ev["new_status"]
-                    if new_s == "red" and fault_start is None:
-                        fault_start   = ts_ev
-                        outage_count += 1
-                    elif old_s == "red" and new_s != "red" and fault_start is not None:
-                        outage_secs += ts_ev - fault_start
-                        fault_start  = None
-
-                if fault_start is not None:
-                    case_b_end = min(end_ts, now)
-                    outage_secs += max(0.0, case_b_end - fault_start)
+                outage_secs, outage_count = self._compute_outage_stats(
+                    int(start_ts), int(end_ts), status_at_start, events, now)
 
                 uptime_pct = round(
                     max(0.0, (period_secs - outage_secs) / period_secs) * 100, 3)
