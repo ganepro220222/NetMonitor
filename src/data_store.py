@@ -13,7 +13,7 @@ Tables
 ──────
 pings_raw     每次探测的原始记录（默认保留 7 天）
 pings_hourly  每小时聚合（avg/max/p95/丢包率，保留 90 天）
-alert_events  状态变化事件（保留 365 天）
+alert_events  状态变化事件（保留 365 天；ts 为浮点 Unix 秒，保留亚秒精度）
 targets_meta  节点快照（name/ip/type，永久）
 cum_stats     跨重启累计统计（total/success/lat_avg，永久）
 
@@ -274,7 +274,7 @@ class DataStore:
             return
         self._queue.put(("alert", {
             "target_id": target_id, "label": label, "ip": ip,
-            "ts": int(ts), "old_status": old_status,
+            "ts": float(ts), "old_status": old_status,
             "new_status": new_status, "category": category,
             "failure_reason": failure_reason or "",
             "captured_generation": captured_generation,
@@ -1846,7 +1846,7 @@ class DataStore:
                     target_id      TEXT    NOT NULL,
                     label          TEXT,
                     ip             TEXT,
-                    ts             INTEGER NOT NULL,
+                    ts             REAL    NOT NULL,
                     old_status     TEXT,
                     new_status     TEXT,
                     category       TEXT,
@@ -2103,6 +2103,14 @@ class DataStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_alert_ts_only ON alert_events(ts)")
             conn.execute("PRAGMA user_version = 7")
+            conn.commit()
+            ver = 7
+
+        # v7 → v8: alert_events.ts stored as REAL (sub-second precision).
+        # Existing INTEGER columns accept REAL values in SQLite; new
+        # installs get REAL NOT NULL from CREATE TABLE above.
+        if ver == 7:
+            conn.execute("PRAGMA user_version = 8")
             conn.commit()
 
         # Restore in-memory active-incident state from DB
@@ -2526,7 +2534,7 @@ class DataStore:
                                  bucket["loss_rate"]))
 
     @staticmethod
-    def _compute_outage_stats(start_ts: int, end_ts: int,
+    def _compute_outage_stats(start_ts: float, end_ts: float,
                               status_at_start: str, events,
                               now: float) -> tuple:
         """Return (outage_secs, outage_count) for one SLA window.
@@ -2637,7 +2645,7 @@ class DataStore:
                 WHERE target_id = ?
                   AND (new_status = 'red' OR old_status = 'red')
                   AND ts < ?
-                ORDER BY ts DESC LIMIT 1
+                ORDER BY ts DESC, id DESC LIMIT 1
             """, (target_id, start_ts)).fetchone()
             status_at_start = boundary["new_status"] if boundary else "green"
 
@@ -2646,12 +2654,12 @@ class DataStore:
                 WHERE target_id = ?
                   AND (new_status = 'red' OR old_status = 'red')
                   AND ts >= ? AND ts <= ?
-                ORDER BY ts ASC
+                ORDER BY ts ASC, id ASC
             """, (target_id, start_ts, end_ts)).fetchall()
 
             now = time.time()
             outage_secs, outage_count = self._compute_outage_stats(
-                int(start_ts), int(end_ts), status_at_start, events, now)
+                float(start_ts), float(end_ts), status_at_start, events, now)
 
             # Connection is thread-local-cached — do not close here either.
             # Was previously closing mid-method then again in finally; both
@@ -2769,7 +2777,7 @@ class DataStore:
                 WHERE target_id IN ({placeholders})
                   AND (new_status = 'red' OR old_status = 'red')
                   AND ts >= ? AND ts <= ?
-                ORDER BY target_id ASC, ts ASC
+                ORDER BY target_id ASC, ts ASC, id ASC
             """, (*target_ids, start_ts, end_ts)).fetchall()
             events_by_tid: dict = {}
             for r in ev_rows:
@@ -2800,7 +2808,7 @@ class DataStore:
                 status_at_start = status_at_start_by_tid.get(tid, "green")
 
                 outage_secs, outage_count = self._compute_outage_stats(
-                    int(start_ts), int(end_ts), status_at_start, events, now)
+                    float(start_ts), float(end_ts), status_at_start, events, now)
 
                 uptime_pct = round(
                     max(0.0, (period_secs - outage_secs) / period_secs) * 100, 3)
