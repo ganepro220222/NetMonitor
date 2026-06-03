@@ -141,15 +141,28 @@ def bind_scrollbar_visibility(scroll_frame):
     让 CTkScrollableFrame 的滚动条仅在内容溢出时显示。
     安全保障由 _patch_ctk_base_update_dimensions() 全局守卫提供。
     防抖：resize 期间大量 Configure 事件只触发一次 _check。
+    幂等：仅在显隐状态真正改变时才 grid/grid_remove，避免
+    “无条件 grid → Configure → 再 _check” 的周期性回路
+    （与 main_window / settings / history_panel 的做法对齐）。
     """
     def _check():
         try:
             canvas = scroll_frame._parent_canvas
             sbar   = scroll_frame._scrollbar
             y0, y1 = canvas.yview()
-            if y0 <= 0.001 and y1 >= 0.999:  # HiDPI float-rounding tolerance
+            want_hidden = (y0 <= 0.001 and y1 >= 0.999)  # HiDPI float tolerance
+            # Idempotent: only touch geometry on a REAL state change.  An
+            # unconditional grid()/grid_remove() on every _check re-lays-out
+            # the frame and fires a <Configure>, which re-runs _check via the
+            # bindings below -- a periodic grid/Configure loop whenever the
+            # content overflows.  It doesn't flicker visibly (nothing
+            # force-hides first, unlike the diag-history list), but it is the
+            # same wasted-relayout pattern the other windows already guard
+            # against.  grid_info() reflects the real shown/removed state.
+            is_shown = bool(sbar.grid_info())
+            if want_hidden and is_shown:
                 sbar.grid_remove()
-            else:
+            elif not want_hidden and not is_shown:
                 sbar.grid()
         except Exception:
             pass

@@ -131,6 +131,88 @@ def test_hides_once_when_fit_and_shown():
     return ok
 
 
+# ── fonts.bind_scrollbar_visibility (Add/Edit Target dialog) ─────────
+# Same idempotency goal, different mechanism: a yview() judgement behind a
+# 150ms-debounced <Configure> binding.  Drive the REAL function with a fake
+# scroll/canvas whose after() runs synchronously, then fire a <Configure>
+# storm: once settled it must perform NO further grid()/grid_remove().
+class _YviewBar:
+    def __init__(self, shown=False):
+        self._shown = shown
+        self.grid_calls = 0
+        self.grid_remove_calls = 0
+
+    def grid_info(self):
+        return {"row": 0} if self._shown else {}
+
+    def grid(self, **_k):
+        self.grid_calls += 1
+        self._shown = True
+
+    def grid_remove(self):
+        self.grid_remove_calls += 1
+        self._shown = False
+
+
+class _YviewCanvas:
+    def __init__(self, y0, y1):
+        self._y = (y0, y1)
+
+    def yview(self):
+        return self._y
+
+    def after(self, _ms, cb=None):
+        if callable(cb):
+            cb()                      # synchronous so _check runs in-test
+        return "after#"
+
+    def after_cancel(self, _id):
+        pass
+
+    def bind(self, _seq, _cb, add=None):
+        pass
+
+
+class _YviewScroll:
+    def __init__(self, y0, y1, shown=False):
+        self._parent_canvas = _YviewCanvas(y0, y1)
+        self._scrollbar = _YviewBar(shown)
+        self._on_cfg = None
+
+    def bind(self, _seq, cb, add=None):
+        self._on_cfg = cb             # capture _on_configure to re-fire it
+
+
+def test_bind_scrollbar_overflow_idempotent():
+    from src.ui.fonts import bind_scrollbar_visibility
+    scroll = _YviewScroll(0.0, 0.5, shown=False)   # overflow: y1 < 0.999
+    bind_scrollbar_visibility(scroll)              # initial hide + first show
+    base = scroll._scrollbar.grid_calls
+    for _ in range(5):                             # <Configure> storm
+        if scroll._on_cfg:
+            scroll._on_cfg()
+    extra = scroll._scrollbar.grid_calls - base
+    ok = extra == 0 and scroll._scrollbar.grid_calls == 1
+    print(f"bind_scrollbar overflow idempotent: grid={scroll._scrollbar.grid_calls} "
+          f"extra_after_storm={extra} -> {ok}")
+    return ok
+
+
+def test_bind_scrollbar_fit_idempotent():
+    from src.ui.fonts import bind_scrollbar_visibility
+    scroll = _YviewScroll(0.0, 1.0, shown=False)   # fits: y1 >= 0.999
+    bind_scrollbar_visibility(scroll)
+    for _ in range(5):
+        if scroll._on_cfg:
+            scroll._on_cfg()
+    # stays hidden; only the build-time grid_remove ran, storm added none
+    ok = (scroll._scrollbar.grid_calls == 0
+          and scroll._scrollbar.grid_remove_calls == 1)
+    print(f"bind_scrollbar fit idempotent: grid={scroll._scrollbar.grid_calls} "
+          f"remove={scroll._scrollbar.grid_remove_calls} -> {ok}")
+    return ok
+
+
 # ── Source-text parity: DnsDiagWindow must carry the same fix ─────────
 def _read(rel):
     with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
@@ -166,6 +248,8 @@ def main():
         test_stable_fit_is_noop(),
         test_shows_once_when_overflow_and_hidden(),
         test_hides_once_when_fit_and_shown(),
+        test_bind_scrollbar_overflow_idempotent(),
+        test_bind_scrollbar_fit_idempotent(),
         test_dns_mirrors_idempotent_fix(),
     ]
     print("ALL PASS" if all(results) else "SOME FAILED")
