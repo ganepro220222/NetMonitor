@@ -1544,11 +1544,12 @@ class HTTPMonitor(TargetMonitor):
             buf = buf[2:]
             return None
 
-        def _consume_chunk_data(chunk_size: int, accumulate: bool
-                                ) -> Optional[str]:
+        def _consume_chunk_data(chunk_size: int) -> Optional[str]:
             nonlocal buf, out
             remaining = chunk_size
             while remaining > 0:
+                if len(out) >= body_limit:
+                    return None
                 if buf:
                     n = min(len(buf), remaining, 4096)
                 else:
@@ -1562,33 +1563,38 @@ class HTTPMonitor(TargetMonitor):
                         return "chunked_premature_eof"
                     if not piece:
                         return "chunked_premature_eof"
-                    if accumulate and len(out) < body_limit:
+                    if len(out) < body_limit:
                         take = min(len(piece), body_limit - len(out))
                         out += piece[:take]
                     remaining -= len(piece)
+                    if len(out) >= body_limit:
+                        return None
                     continue
                 n = min(len(buf), remaining, 4096)
-                if accumulate and len(out) < body_limit:
+                if len(out) < body_limit:
                     take = min(n, body_limit - len(out))
                     out += buf[:take]
                 buf = buf[n:]
                 remaining -= n
+                if len(out) >= body_limit:
+                    return None
             return _consume_crlf()
 
         try:
-            accumulate = True
             while True:
+                if len(out) >= body_limit:
+                    return out[:body_limit], None
                 chunk_size, err = _read_chunk_header()
                 if err:
                     return out[:body_limit], err
                 if chunk_size == 0:
                     err = _read_trailer_section()
                     return out[:body_limit], err
-                err = _consume_chunk_data(chunk_size, accumulate)
+                err = _consume_chunk_data(chunk_size)
                 if err:
                     return out[:body_limit], err
-                if accumulate and len(out) >= body_limit:
-                    accumulate = False
+                if len(out) >= body_limit:
+                    return out[:body_limit], None
         except socket.timeout:
             return out[:body_limit], "body_recv_timeout"
         except OSError:
