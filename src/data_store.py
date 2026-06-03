@@ -2152,7 +2152,12 @@ class DataStore:
             iid = active.get(tid)
             if ns in ('orange', 'red'):
                 if not iid:
-                    iid = f"INC-{_dt.fromtimestamp(ts).strftime('%Y%m%d%H%M%S')}-{tid[:6].upper()}"
+                    # Match live _assign_incident_ids semantics: second-only
+                    # keys collapse independent same-second outages on one
+                    # target.  Use row id suffix so backfill is stable and
+                    # each new outage gets a distinct incident_id.
+                    ts_str = _dt.fromtimestamp(ts).strftime('%Y%m%d%H%M%S')
+                    iid = f"INC-{ts_str}-{tid[:6].upper()}-{rid:08X}"
                     active[tid] = iid
                 updates.append((iid, rid))
             elif ns == 'green':
