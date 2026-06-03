@@ -4651,8 +4651,9 @@ function accumStat(t){
   if(!stats[t.tid])stats[t.tid]={total:0,success:0,latency_avg:0,latency_n:0,
                                   latencies:[],label:t.label,ip:t.ip};
   const s=stats[t.tid];s.total++;s.label=t.label;s.ip=t.ip;
-  if(t.probe_success!=null?t.probe_success:(!t.failure_reason&&t.latency_ms!=null))s.success++;
-  if(t.latency_ms!=null){
+  const probeOk=t.probe_success!=null?t.probe_success:(!t.failure_reason&&t.latency_ms!=null);
+  if(probeOk)s.success++;
+  if(probeOk&&t.latency_ms!=null){
     s.latency_n+=1;
     // CMA: keeps average near the true value without summing large numbers
     if(!s.latency_avg)s.latency_avg=0;
@@ -6118,7 +6119,7 @@ class WebServer:
                 s["total"] += 1
                 if probe_success:
                     s["success"] += 1
-                if latency_ms is not None:
+                if probe_success and latency_ms is not None:
                     s["latency_n"] += 1
                     s["latency_avg"] += (latency_ms - s["latency_avg"]) / s["latency_n"]
             if old_status not in (None, "paused") and old_status != status:

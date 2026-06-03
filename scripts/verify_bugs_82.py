@@ -52,11 +52,19 @@ def test_hourly_bucket_failed_green_row():
 
 
 def test_http_fail_with_rtt_not_counted_success():
-    row = (150.0, "green", "http_status_mismatch", 0)
-    bucket = DataStore._compute_hourly_bucket([row])
-    ok = bucket and bucket["success_n"] == 0
-    print(f"Bug82 HTTP fail with RTT: success_n={bucket and bucket['success_n']} "
-          f"-> {ok}")
+    rows = [(10.0, "green", None, 1)] * 9 + [(150.0, "green", "status_500", 0)]
+    bucket = DataStore._compute_hourly_bucket(rows)
+    ok = (
+        bucket
+        and bucket["sample_n"] == 10
+        and bucket["success_n"] == 9
+        and bucket["lat_avg"] == 10.0
+        and bucket["lat_max"] == 10.0
+        and bucket["lat_p95"] == 10.0
+        and abs(bucket["loss_rate"] - 0.1) < 0.001
+    )
+    print(f"Bug82/83 HTTP fail RTT lat stats: avg={bucket and bucket.get('lat_avg')} "
+          f"max={bucket and bucket.get('lat_max')} -> {ok}")
     return ok
 
 

@@ -19,8 +19,17 @@ DATA_STORE = os.path.join(ROOT, "src", "data_store.py")
 
 def _legacy_python_stats(rows):
     total = len(rows)
-    success = sum(1 for r in rows if r["status"] in ("green", "orange"))
-    lats = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
+    success = sum(
+        1 for r in rows
+        if DataStore.row_probe_success(
+            r["latency_ms"], r["status"],
+            r.get("failure_reason"), r.get("probe_success")))
+    lats = [
+        r["latency_ms"] for r in rows
+        if DataStore.row_probe_success(
+            r["latency_ms"], r["status"],
+            r.get("failure_reason"), r.get("probe_success"))
+        and r["latency_ms"] is not None]
     if lats:
         idx = min(len(lats) - 1, max(0, math.ceil(len(lats) * 0.95) - 1))
         lat_p95 = sorted(lats)[idx]
@@ -97,7 +106,8 @@ def test_dashboard_stats_matches_small_raw():
                 loss_rate=0.0)
         ds.record_ping(
             target_id="T2", label="n", ip="1.2.3.5", ping_type="icmp",
-            ts=base + 1.0, status="red", latency_ms=None, loss_rate=1.0)
+            ts=base + 1.0, status="red", latency_ms=None, loss_rate=1.0,
+            probe_success=False)
         ds.flush()
         start = int(base)
         end = int(base) + 60

@@ -36,6 +36,8 @@ _PROBE_OK_SQL = (
     "WHEN failure_reason IS NOT NULL THEN 0 "
     "WHEN latency_ms IS NULL THEN 0 ELSE 1 END"
 )
+# Successful probes with a latency sample (for avg/max/min/p95 only).
+_PROBE_LAT_OK_SQL = f"({_PROBE_OK_SQL}) = 1 AND latency_ms IS NOT NULL"
 
 
 _XLSX_ILLEGAL_RE = None
@@ -549,11 +551,12 @@ class DataStore:
                 points = []
                 for r in rows:
                     ok = self.row_probe_success(r[1], r[2], r[3], r[4])
+                    lat = r[1] if ok else None
                     points.append({
                         "ts": r[0],
-                        "rtt_ms": r[1],
-                        "max_ms": r[1],
-                        "min_ms": r[1],
+                        "rtt_ms": lat,
+                        "max_ms": lat,
+                        "min_ms": lat,
                         "ok": ok,
                         "sample_n": 1,
                         "success_n": 1 if ok else 0,
@@ -570,11 +573,11 @@ class DataStore:
                 # minute averages to ~25ms).
                 rows = conn.execute(
                     f"SELECT CAST(ts / 60 AS INTEGER) * 60 AS minute, "
-                    f"AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
+                    f"AVG(CASE WHEN {_PROBE_LAT_OK_SQL} THEN latency_ms END), "
                     f"COUNT(*), "
                     f"SUM(CASE WHEN {_PROBE_OK_SQL} = 1 THEN 1 ELSE 0 END), "
-                    f"MAX(latency_ms), "
-                    f"MIN(latency_ms) "
+                    f"MAX(CASE WHEN {_PROBE_LAT_OK_SQL} THEN latency_ms END), "
+                    f"MIN(CASE WHEN {_PROBE_LAT_OK_SQL} THEN latency_ms END) "
                     f"FROM pings_raw "
                     f"WHERE target_id=? AND ts BETWEEN ? AND ? "
                     f"GROUP BY minute ORDER BY minute",
@@ -655,7 +658,17 @@ class DataStore:
                 lat, st, fr, ps = row[0], row[1], None, None
             if DataStore.row_probe_success(lat, st, fr, ps):
                 success_n += 1
-        lats      = sorted(r[0] for r in lat_status_rows if r[0] is not None)
+        lats = []
+        for row in lat_status_rows:
+            if len(row) >= 4:
+                lat, st, fr, ps = row[0], row[1], row[2], row[3]
+            elif len(row) == 3:
+                lat, st, fr, ps = row[0], row[1], row[2], None
+            else:
+                lat, st, fr, ps = row[0], row[1], None, None
+            if DataStore.row_probe_success(lat, st, fr, ps) and lat is not None:
+                lats.append(lat)
+        lats.sort()
         lat_avg   = sum(lats) / len(lats) if lats else None
         lat_max   = lats[-1] if lats else None
         lat_min   = lats[0]  if lats else None
@@ -685,8 +698,9 @@ class DataStore:
         row = conn.execute(
             f"SELECT COUNT(*), "
             f"SUM(CASE WHEN {_PROBE_OK_SQL} = 1 THEN 1 ELSE 0 END), "
-            f"AVG(CASE WHEN latency_ms IS NOT NULL THEN latency_ms END), "
-            f"MAX(latency_ms), MIN(latency_ms) "
+            f"AVG(CASE WHEN {_PROBE_LAT_OK_SQL} THEN latency_ms END), "
+            f"MAX(CASE WHEN {_PROBE_LAT_OK_SQL} THEN latency_ms END), "
+            f"MIN(CASE WHEN {_PROBE_LAT_OK_SQL} THEN latency_ms END) "
             f"FROM pings_raw "
             f"WHERE target_id=? AND ts >= ? AND ts <= ?",
             (target_id, win_start, win_end)).fetchone()
@@ -713,22 +727,22 @@ class DataStore:
 
     def _global_lat_p95_sql(self, conn, target_id: str,
                             win_start: float, win_end: float) -> Optional[float]:
-        """Nearest-rank P95 over all non-null latencies in a pings_raw window."""
+        """Nearest-rank P95 over successful probes with latency in a window."""
         if win_start > win_end:
             return None
         lat_n = conn.execute(
-            "SELECT COUNT(latency_ms) FROM pings_raw "
-            "WHERE target_id=? AND ts >= ? AND ts <= ? "
-            "AND latency_ms IS NOT NULL",
+            f"SELECT COUNT(latency_ms) FROM pings_raw "
+            f"WHERE target_id=? AND ts >= ? AND ts <= ? "
+            f"AND {_PROBE_LAT_OK_SQL}",
             (target_id, win_start, win_end)).fetchone()[0]
         if not lat_n:
             return None
         offset = min(lat_n - 1, max(0, math.ceil(lat_n * 0.95) - 1))
         p95_row = conn.execute(
-            "SELECT latency_ms FROM pings_raw "
-            "WHERE target_id=? AND ts >= ? AND ts <= ? "
-            "AND latency_ms IS NOT NULL "
-            "ORDER BY latency_ms ASC LIMIT 1 OFFSET ?",
+            f"SELECT latency_ms FROM pings_raw "
+            f"WHERE target_id=? AND ts >= ? AND ts <= ? "
+            f"AND {_PROBE_LAT_OK_SQL} "
+            f"ORDER BY latency_ms ASC LIMIT 1 OFFSET ?",
             (target_id, win_start, win_end, offset)).fetchone()
         return p95_row[0] if p95_row else None
 
