@@ -731,6 +731,15 @@ class DataStore:
         """
         return int(start_ts) >= self._raw_retention_cutoff()
 
+    def _raw_probe_count_in_window(self, conn, target_id: str,
+                                  win_start: float, win_end: float) -> int:
+        """All pings_raw rows for a target in [win_start, win_end]."""
+        row = conn.execute(
+            "SELECT COUNT(*) FROM pings_raw "
+            "WHERE target_id=? AND ts >= ? AND ts <= ?",
+            (target_id, win_start, win_end)).fetchone()
+        return int(row[0]) if row else 0
+
     def _global_lat_p95_sql(self, conn, target_id: str,
                             win_start: float, win_end: float) -> Optional[float]:
         """Nearest-rank P95 over successful probes with latency in a window."""
@@ -756,11 +765,18 @@ class DataStore:
                                   buckets: list, start_ts, end_ts) -> dict:
         """Hourly-bucket rollup for totals/avg/max; global P95 from raw when possible."""
         merged = self._rollup_hourly_buckets(buckets)
-        if self._raw_covers_window_start(start_ts):
+        merged["lat_p95"] = None
+        merged["p95_from_raw"] = False
+        total = merged.get("total") or 0
+        win_start = float(start_ts)
+        win_end = float(end_ts)
+        if (total > 0
+                and self._raw_covers_window_start(start_ts)
+                and self._raw_probe_count_in_window(
+                    conn, target_id, win_start, win_end) == total):
             merged["lat_p95"] = self._global_lat_p95_sql(
-                conn, target_id, float(start_ts), float(end_ts))
-        else:
-            merged["lat_p95"] = None
+                conn, target_id, win_start, win_end)
+            merged["p95_from_raw"] = True
         return merged
 
     def _hourly_row_to_bucket(self, row) -> dict:
@@ -2963,6 +2979,7 @@ class DataStore:
                 "lat_avg":        lat_avg,
                 "lat_max":        lat_max,
                 "lat_p95":        lat_p95,
+                "p95_from_raw":   bool(merged.get("p95_from_raw")),
                 "outage_count":   outage_count,
                 "outage_minutes": round(outage_secs / 60, 1),
                 "sample_n":       total,
@@ -2970,7 +2987,8 @@ class DataStore:
         except Exception as e:
             print(f"[SLA] {e}")
             return {"uptime_pct": None, "lat_avg": None, "lat_max": None,
-                    "lat_p95": None, "outage_count": 0,
+                    "lat_p95": None, "p95_from_raw": False,
+                    "outage_count": 0,
                     "outage_minutes": 0, "sample_n": 0}
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
@@ -3104,6 +3122,7 @@ class DataStore:
                     "lat_avg":        lat_avg,
                     "lat_max":        lat_max,
                     "lat_p95":        lat_p95,
+                    "p95_from_raw":   bool(lat.get("p95_from_raw")) if lat else False,
                     "outage_count":   outage_count,
                     "outage_minutes": round(outage_secs / 60, 1),
                     "sample_n":       total,

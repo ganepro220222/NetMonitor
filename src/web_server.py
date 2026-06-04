@@ -5716,7 +5716,7 @@ function renderSLATable(){
     if(v!=null) return `${v} ms`;
     if((r.sample_n||0)>0 && r.p95_from_raw===false)
       return '<span style="color:var(--orange);font-size:11px" '
-        +'title="查询起点超出原始探测明细保留期，P95 不可精确计算（非未跑够时间）">N/A</span>';
+        +'title="窗口内部分样本仅有小时聚合、无完整原始明细，P95 不可精确计算">N/A</span>';
     return '--';
   };
   const pct=v=>{
@@ -6886,12 +6886,10 @@ class WebServer:
             # len(tids) serial DB hits (2 SQL each).  Now it's 2 SQL total.
             batch = self._data_store.get_sla_stats_batch(
                 list(tids.keys()), start, end)
-            p95_from_raw = self._data_store._raw_covers_window_start(start)
             result = {}
             for tid, meta in tids.items():
                 s = batch.get(tid) or self._data_store.get_sla_stats(tid, start, end)
                 s["label"] = meta["label"]; s["ip"] = meta["ip"]
-                s["p95_from_raw"] = p95_from_raw
                 result[tid] = s
             return json.dumps(result), 200, {"Content-Type": "application/json"}
 
