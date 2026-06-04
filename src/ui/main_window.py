@@ -1820,10 +1820,12 @@ class MainWindow(ctk.CTk):
         # the engine and in-memory caches still point at the old one, a
         # split-brain that survives until the next app restart.
         ip_changed   = target.get("ip",        "") != r["ip"]
-        type_changed = target.get("ping_type", "icmp") != r.get("ping_type", "icmp")
+        old_ping_type = target.get("ping_type", "icmp")
+        new_ping_type = r.get("ping_type", "icmp")
+        type_changed = old_ping_type != new_ping_type
         # Must snapshot before config.update_target() -- get_targets() is a
         # shallow copy, so `target` is the live dict that update_target()
-        # mutates in place; comparing after persist always sees the new value.
+        # mutates in place; re-reading ping_type after persist loses old type.
         dns_domain_changed = (
             (target.get("dns_domain") or "")
             != (r.get("dns_domain") or "")
@@ -2046,11 +2048,10 @@ class MainWindow(ctk.CTk):
         if target_id in self._cards:
             self._cards[target_id].update_info(r["label"], r["ip"])
 
-        # If ping_type changed, destroy the old probe and create a new one.
-        # Merely updating settings would leave the wrong Monitor class running.
-        old_type = target.get("ping_type", "icmp")
-        new_type = r.get("ping_type", "icmp")
-        if old_type != new_type:
+        # If ping_type changed, create the new Monitor (remove_target ran above).
+        # Use pre-persist old_ping_type / type_changed -- not target["ping_type"],
+        # which update_target() already mutated to new_ping_type.
+        if type_changed:
             # Snapshot the card's pause flag BEFORE the engine swap.
             # Pre-2025 add_target() unconditionally start()d the fresh
             # monitor with _pause_event clear, then the call site did
@@ -2065,7 +2066,7 @@ class MainWindow(ctk.CTk):
             # remove_target was already hoisted to the top of the
             # ip/type-change block above; no second call needed here.
             self.engine.add_target(target_id, r["ip"],
-                                   ping_type=new_type,
+                                   ping_type=new_ping_type,
                                    custom_settings=combined or None,
                                    start_paused=was_paused)
         # same-type: update_target_thresholds already applied above
