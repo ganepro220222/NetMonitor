@@ -5,6 +5,7 @@ from src.host_validation import (
     is_valid_host as _is_valid_host,
     normalize_dns_expected_ipv4 as _normalize_dns_expected_ipv4,
     normalize_http_success_codes as _normalize_http_success_codes,
+    effective_latency_warn_ms_hint as _effective_latency_warn_ms_hint,
 )
 
 """
@@ -281,6 +282,18 @@ class _BaseDialog(ctk.CTkToplevel):
             self._http_frame.grid()
         elif selected == "DNS 监控" and hasattr(self, "_dns_frame"):
             self._dns_frame.grid()
+        self._refresh_latency_warn_placeholder()
+
+    def _refresh_latency_warn_placeholder(self) -> None:
+        if not hasattr(self, "e_wlat"):
+            return
+        ptype = PING_TYPE_VALUES.get(self._type_var.get(), "icmp")
+        hint = _effective_latency_warn_ms_hint(
+            ptype, getattr(self, "_global", {}))
+        try:
+            self.e_wlat.configure(placeholder_text=hint)
+        except Exception:
+            pass
 
     def _collect_type_result(self) -> dict | None:
         ptype = PING_TYPE_VALUES.get(self._type_var.get(), "icmp")
@@ -394,7 +407,13 @@ class AddTargetDialog(_BaseDialog):
         self.e_lat_o   = _mk(tf, 2, "连续高延时 → 橙色（次）", "consecutive_lat_orange",   3)
         # consecutive_lat_red hidden: engine caps latency at ORANGE, not RED
         self.e_lat_r = None  # noqa
-        self.e_wlat    = _mk(tf, 4, "延时警告阈值（ms）",      "latency_warn_ms",        150)
+        ctk.CTkLabel(tf, text="延时警告阈值（ms）", font=F(11), anchor="w").grid(
+            row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        ptype0 = PING_TYPE_VALUES.get(self._type_var.get(), "icmp")
+        hint_wlat = _effective_latency_warn_ms_hint(ptype0, g)
+        self.e_wlat = ctk.CTkEntry(tf, width=72, height=26, font=F(11),
+                                    justify="center", placeholder_text=hint_wlat)
+        self.e_wlat.grid(row=4, column=1, sticky="w", pady=3)
         self.e_elat    = None  # latency_error_ms hidden (same reason)
         ctk.CTkLabel(tf, text="Ping 间隔（秒）", font=F(11), anchor="w").grid(
             row=6, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -405,6 +424,7 @@ class AddTargetDialog(_BaseDialog):
         ctk.CTkLabel(tf, text="ICMP 建议 1~5 秒，HTTP 建议 30~60 秒",
                      font=F(9), text_color="gray50", anchor="w").grid(
             row=6, column=2, sticky="w", padx=(6, 0))
+        self._refresh_latency_warn_placeholder()
 
         ctk.CTkButton(self._btn_outer, text="取消", width=100,
                       fg_color="gray30", hover_color="gray40",
@@ -537,8 +557,16 @@ class EditTargetDialog(_BaseDialog):
         self.e_lat_o   = _mk(tf, 2, "连续高延时 → 橙色（次）", "consecutive_lat_orange",   3)
         # consecutive_lat_red hidden: engine caps latency at ORANGE, not RED
         self.e_lat_r = None  # noqa
-        self.e_wlat    = _mk(tf, 4, "延时警告阈值（ms）",      "latency_warn_ms",        150)
+        ctk.CTkLabel(tf, text="延时警告阈值（ms）", font=F(11), anchor="w").grid(
+            row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        hint_wlat = _effective_latency_warn_ms_hint(self._init_ptype, g)
+        self.e_wlat = ctk.CTkEntry(tf, width=72, height=26, font=F(11),
+                                    justify="center", placeholder_text=hint_wlat)
+        if "latency_warn_ms" in th:
+            self.e_wlat.insert(0, str(th["latency_warn_ms"]))
+        self.e_wlat.grid(row=4, column=1, sticky="w", pady=3)
         self.e_elat    = None  # latency_error_ms hidden (same reason)
+        self._refresh_latency_warn_placeholder()
 
         # Per-target ping interval
         ctk.CTkLabel(tf, text="Ping 间隔（秒）", font=F(11), anchor="w").grid(

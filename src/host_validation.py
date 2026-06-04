@@ -85,6 +85,17 @@ def normalize_http_success_codes(raw: str) -> tuple[str | None, str | None]:
     return ",".join(out), None
 
 
+def effective_latency_warn_ms_hint(
+    ping_type: str, global_settings: dict | None = None,
+) -> str:
+    """Placeholder for per-target latency_warn_ms when field is left empty."""
+    from src.ping_engine import HTTPMonitor
+    if (ping_type or "icmp").lower() in ("http", "https"):
+        return str(HTTPMonitor.DEFAULT_WARN_LAT)
+    g = global_settings or {}
+    return str(g.get("latency_warn_ms", 150))
+
+
 def is_valid_host(host: str) -> bool:
     if not host:
         return False
