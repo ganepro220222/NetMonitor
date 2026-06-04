@@ -1788,6 +1788,13 @@ class MainWindow(ctk.CTk):
         # split-brain that survives until the next app restart.
         ip_changed   = target.get("ip",        "") != r["ip"]
         type_changed = target.get("ping_type", "icmp") != r.get("ping_type", "icmp")
+        # Must snapshot before config.update_target() -- get_targets() is a
+        # shallow copy, so `target` is the live dict that update_target()
+        # mutates in place; comparing after persist always sees the new value.
+        dns_domain_changed = (
+            (target.get("dns_domain") or "")
+            != (r.get("dns_domain") or "")
+        )
 
         # When the probe's IP or type changes, ask the operator what the
         # change *means*: same physical node (keep history) or a different
@@ -2052,10 +2059,6 @@ class MainWindow(ctk.CTk):
                 dns_domain=r.get("dns_domain", ""),
                 is_probe_result=False)   # label/extras meta-sync
 
-        dns_domain_changed = (
-            (target.get("dns_domain") or "")
-            != (r.get("dns_domain") or "")
-        )
         self._refresh_open_diag_windows_after_edit(
             target_id, r,
             ip_changed=ip_changed,

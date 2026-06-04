@@ -22,6 +22,25 @@ def test_on_edit_calls_refresh_helper():
     return ok
 
 
+def test_dns_domain_changed_before_config_update():
+    with open(MAIN_WINDOW, encoding="utf-8") as f:
+        edit_block = f.read().split("def _on_edit", 1)[1].split(
+            "def _on_delete", 1)[0]
+    assign_pos = edit_block.find("dns_domain_changed =")
+    update_pos = edit_block.find("self.config.update_target(")
+    # No second assignment after update_target (Bug107 follow-up)
+    tail = edit_block[update_pos:]
+    second_assign = tail.find("dns_domain_changed =")
+    ok = (
+        assign_pos != -1
+        and update_pos != -1
+        and assign_pos < update_pos
+        and second_assign == -1
+    )
+    print(f"Bug107 dns_domain_changed before config update -> {ok}")
+    return ok
+
+
 def test_identity_change_closes_diag_windows():
     with open(MAIN_WINDOW, encoding="utf-8") as f:
         block = f.read().split(
@@ -77,6 +96,7 @@ def test_delete_still_closes_registries():
 def main():
     results = [
         ("on_edit_hook", test_on_edit_calls_refresh_helper()),
+        ("dns_domain_timing", test_dns_domain_changed_before_config_update()),
         ("close_identity", test_identity_change_closes_diag_windows()),
         ("label_refresh", test_label_only_refreshes_not_closes()),
         ("dns_prefill", test_dns_prefill_helper_shared()),
