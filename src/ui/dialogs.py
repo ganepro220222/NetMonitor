@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from src.config_manager import MIN_PING_INTERVAL_S, is_valid_ping_interval
-from src.host_validation import is_valid_host as _is_valid_host
+from src.host_validation import (
+    is_valid_host as _is_valid_host,
+    normalize_dns_expected_ipv4 as _normalize_dns_expected_ipv4,
+)
 
 """
 dialogs.py
@@ -323,7 +326,12 @@ class _BaseDialog(ctk.CTkToplevel):
                 self._error("DNS 监控必须填写查询域名"); return None
             extra["dns_domain"] = domain
             exp = self._dns_expected.get().strip() if hasattr(self,"_dns_expected") else ""
-            if exp: extra["dns_expected"] = exp
+            if exp:
+                normalized, err = _normalize_dns_expected_ipv4(exp)
+                if err:
+                    self._error(err)
+                    return None
+                extra["dns_expected"] = normalized
         if ptype != "dns" and hasattr(self,"_ipv6_var") and self._ipv6_var.get():
             extra["ipv6_only"] = True
         return {"ping_type": ptype, **extra}

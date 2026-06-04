@@ -253,6 +253,12 @@ class IPCard(ctk.CTkFrame):
         if latency_ms is not None:
             self.latency_label.configure(
                 text=f"{latency_ms:.1f} ms", text_color=color, font=F(18, "bold"))
+        elif status == "gray" and not failure_reason:
+            # Reset / waiting for first probe — not a failure (Bug103).
+            self.latency_label.configure(
+                text="探测中...",
+                text_color=STATUS_COLORS["gray"],
+                font=F(12, "bold"))
         else:
             # When failed, prefer a meaningful reason over a generic "超时"
             fail_text = self._format_failure(failure_reason)
