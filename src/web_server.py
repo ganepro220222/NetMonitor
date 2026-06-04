@@ -1486,6 +1486,11 @@ function toggleSound(){soundEnabled=!soundEnabled;localStorage.setItem('web_soun
 
 // Theme
 let cTheme=localStorage.getItem('theme')||'system';
+// Waveform globals must exist before applyTheme(cTheme) -> _syncWaveformChartTheme
+// (let TDZ: helper runs at page load, long before the waveform module below).
+let _waveChart = null;
+let _waveReqId = 0;
+let _waveYScale = (localStorage.getItem('wave_y_scale') === 'log') ? 'log' : 'linear';
 function toggleFullscreen(){
   if(!document.fullscreenElement){
     document.documentElement.requestFullscreen().catch(()=>{});
@@ -4815,9 +4820,6 @@ async function exportWaveform(){
 }
 
 // ── Waveform chart ─────────────────────────────────────────────────────
-let _waveChart = null;
-let _waveReqId = 0;   // incremented on each loadWaveform call; stale responses discard themselves
-let _waveYScale = (localStorage.getItem('wave_y_scale') === 'log') ? 'log' : 'linear';
 function updateWaveformScaleButton(){
   const btn=document.getElementById('waveform-scale-btn');
   if(!btn) return;
