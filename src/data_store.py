@@ -2302,6 +2302,16 @@ class DataStore:
                     "ALTER TABLE pings_raw ADD COLUMN probe_success INTEGER")
             conn.execute("PRAGMA user_version = 10")
             conn.commit()
+            ver = 10
+
+        # v10 → v11: rebuild cum_stats from pings_raw (Bug91).
+        # Pre-Bug90 builds could persist failed-probe RTT into lat_avg/lat_n.
+        # Recompute from the raw rows still in retention so Web restart loads
+        # probe_success-correct cumulative latency instead of stale pollution.
+        if ver == 10:
+            self._rebuild_cum_stats_from_raw(conn)
+            conn.execute("PRAGMA user_version = 11")
+            conn.commit()
 
         # Restore in-memory active-incident state from DB
         self._restore_active_incidents(conn)
@@ -2523,6 +2533,45 @@ class DataStore:
 
             else:
                 ev['incident_id'] = None
+
+    def _rebuild_cum_stats_from_raw(self, conn) -> None:
+        """Rebuild cum_stats from all pings_raw using row_probe_success semantics.
+
+        One-shot correction for databases polluted before Bug90 (failed RTT
+        counted in lat_avg/lat_n).  Only rows still in pings_raw retention
+        contribute; older history cannot be reconstructed.
+        """
+        conn.execute("DELETE FROM cum_stats")
+        rows = conn.execute(
+            "SELECT target_id, latency_ms, status, failure_reason, probe_success "
+            "FROM pings_raw ORDER BY target_id, ts ASC, id ASC"
+        ).fetchall()
+        if not rows:
+            return
+        groups: dict[str, list] = defaultdict(list)
+        for tid, lat, st, fr, ps in rows:
+            groups[tid].append({
+                "latency_ms": lat, "status": st or "green",
+                "failure_reason": fr, "probe_success": ps,
+            })
+        now = int(time.time())
+        for tid, pings in groups.items():
+            total, success, lat_avg, lat_n = 0, 0, 0.0, 0
+            for p in pings:
+                total += 1
+                probe_ok = self.row_probe_success(
+                    p.get("latency_ms"), p.get("status", "green"),
+                    p.get("failure_reason"), p.get("probe_success"))
+                if probe_ok:
+                    success += 1
+                if probe_ok and p.get("latency_ms") is not None:
+                    lat_n   += 1
+                    lat_avg += (p["latency_ms"] - lat_avg) / lat_n
+            conn.execute(
+                "INSERT INTO cum_stats "
+                "(target_id,total,success,lat_avg,lat_n,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (tid, total, success, lat_avg, lat_n, now))
 
     def _update_cum_stats(self, conn, ping_buf: list):
         """用 CMA 公式更新累计统计——与 WebServer 端保持一致的数值稳定性。"""
