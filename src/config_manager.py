@@ -91,8 +91,12 @@ DEFAULT_CONFIG = {
         # 红色告警阈值：在滑动窗口内，连续丢包超过此数量触发红色
         "consecutive_loss_red": 5,
 
-        # 橙色延时阈值（ms）：平均延时超过此值，即使不丢包也变橙色
+        # 橙色延时阈值（ms）：ICMP/TCP/DNS 节点平均延时超过此值即变橙色
         "latency_warn_ms": 150,
+
+        # HTTP/HTTPS 专用橙色延时阈值（ms）：网站请求含 DNS+TLS+服务器处理，
+        # 天然比 ICMP/TCP/DNS 慢，故单列默认 2000，避免误报性能告警
+        "http_latency_warn_ms": 2000,
 
         # 红色延时阈值（ms）：平均延时超过此值变红色
         "latency_error_ms": 400,

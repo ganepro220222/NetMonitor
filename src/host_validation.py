@@ -90,9 +90,9 @@ def effective_latency_warn_ms_hint(
 ) -> str:
     """Placeholder for per-target latency_warn_ms when field is left empty."""
     from src.ping_engine import HTTPMonitor
-    if (ping_type or "icmp").lower() in ("http", "https"):
-        return str(HTTPMonitor.DEFAULT_WARN_LAT)
     g = global_settings or {}
+    if (ping_type or "icmp").lower() in ("http", "https"):
+        return str(g.get("http_latency_warn_ms", HTTPMonitor.DEFAULT_WARN_LAT))
     return str(g.get("latency_warn_ms", 150))
 
 

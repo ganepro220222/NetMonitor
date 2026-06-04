@@ -811,7 +811,11 @@ class TargetMonitor:
 # ======================================================================
 
 class TCPMonitor(TargetMonitor):
-    DEFAULT_WARN_LAT = 200
+    # No DEFAULT_WARN_LAT override: a TCP connect is a single round-trip,
+    # same order of magnitude as an ICMP ping, so TCP shares the global
+    # latency_warn_ms (150) with ICMP/DNS.  The previous 200 here was dead
+    # code -- add_target copies the global latency_warn_ms into every TCP
+    # monitor, so _compute_state never fell through to this class constant.
 
     def _do_ping(self) -> PingResult:
         port    = int(self.settings.get("tcp_port", 80))
@@ -1898,15 +1902,22 @@ class PingEngine:
 
     @staticmethod
     def _strip_global_latency_warn_for_http(merged, ping_type, custom_settings):
-        """Drop engine-global latency_warn_ms for HTTP/HTTPS without per-target override.
+        """Resolve the effective latency_warn_ms for HTTP/HTTPS monitors.
 
-        ICMP/TCP/DNS use settings latency_warn_ms (default 150). HTTPMonitor's
-        DEFAULT_WARN_LAT (2000) applies only when that key is absent from
-        monitor.settings — copying global 150 would false-trigger performance alarms.
+        ICMP/TCP/DNS use the global latency_warn_ms (default 150).  HTTP/HTTPS
+        without a per-target override instead use the dedicated global
+        http_latency_warn_ms (default 2000) — copying 150 onto HTTP would
+        false-trigger performance alarms on normally-slow HTTPS.  When no
+        global http_latency_warn_ms is present we drop the key so the probe
+        falls back to HTTPMonitor.DEFAULT_WARN_LAT (also 2000).
         """
         if ping_type in ("http", "https"):
             if not custom_settings or "latency_warn_ms" not in custom_settings:
-                merged.pop("latency_warn_ms", None)
+                http_warn = merged.get("http_latency_warn_ms")
+                if http_warn is not None:
+                    merged["latency_warn_ms"] = http_warn
+                else:
+                    merged.pop("latency_warn_ms", None)
 
     def add_target(self, target_id, ip, ping_type="icmp", custom_settings=None,
                    initial_status: str = "gray", start_paused: bool = False):
@@ -2112,7 +2123,13 @@ class PingEngine:
                     # HTTPMonitor.DEFAULT_WARN_LAT — not global 150ms.
                     if (k == "latency_warn_ms" and isinstance(m, HTTPMonitor)
                             and "latency_warn_ms" not in new_thresholds):
-                        merged.pop(k, None)
+                        # HTTP reverts to the global http_latency_warn_ms
+                        # (default 2000), not the ICMP/TCP/DNS 150.
+                        http_warn = self.settings.get("http_latency_warn_ms")
+                        if http_warn is not None:
+                            merged[k] = http_warn
+                        else:
+                            merged.pop(k, None)
                     elif k in self.settings:
                         merged[k] = self.settings[k]
                     else:
@@ -2199,7 +2216,14 @@ class PingEngine:
             if isinstance(m, HTTPMonitor) and "latency_warn_ms" not in overrides:
                 applied.pop("latency_warn_ms", None)
                 merged = {**m.settings, **applied}
-                merged.pop("latency_warn_ms", None)
+                # HTTP uses the dedicated global http_latency_warn_ms, not the
+                # ICMP/TCP/DNS 150.  Recompute from the (possibly just-changed)
+                # global value so a settings save takes effect immediately.
+                http_warn = merged.get("http_latency_warn_ms")
+                if http_warn is not None:
+                    merged["latency_warn_ms"] = http_warn
+                else:
+                    merged.pop("latency_warn_ms", None)
                 m.settings = merged
             else:
                 m.settings = {**m.settings, **applied}

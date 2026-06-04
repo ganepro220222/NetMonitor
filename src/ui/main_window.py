@@ -718,11 +718,13 @@ class MainWindow(ctk.CTk):
 
     @staticmethod
     def _chart_warn_latency(target, merged):
-        """Chart warning line — mirrors HTTPMonitor.DEFAULT_WARN_LAT when no per-target override."""
+        """Chart warning line — mirrors the engine's effective warn latency:
+        per-target override > global http_latency_warn_ms (HTTP) > global
+        latency_warn_ms (ICMP/TCP/DNS)."""
         if "latency_warn_ms" in (target.get("thresholds") or {}):
             return merged.get("latency_warn_ms") or 150
         if (target.get("ping_type") or "icmp").lower() in ("http", "https"):
-            return HTTPMonitor.DEFAULT_WARN_LAT
+            return merged.get("http_latency_warn_ms") or HTTPMonitor.DEFAULT_WARN_LAT
         return merged.get("latency_warn_ms") or 150
 
     def _sync_card_chart_warn_line(self, target_id: str) -> None:
@@ -1382,16 +1384,14 @@ class MainWindow(ctk.CTk):
                 traceroute=changed.get("db_traceroute_retention_days"),
                 diag=changed.get("db_diag_retention_days"),
             )
-        if "latency_warn_ms" in changed:
-            new_val = changed["latency_warn_ms"]
-            # Build a tid → "has per-target latency_warn_ms override" map
-            # once.  PingEngine.update_global_settings already preserves
-            # per-target latency_warn_ms overrides at the alarm-logic
-            # level (see _override_keys); the chart warning line MUST
-            # follow the same rule, otherwise the visual line on a
-            # custom-threshold node desyncs from the actual alarm
-            # threshold and operators reading the chart get a false
-            # sense of where the alarm will fire.
+        if "latency_warn_ms" in changed or "http_latency_warn_ms" in changed:
+            # latency_warn_ms drives ICMP/TCP/DNS chart lines;
+            # http_latency_warn_ms drives HTTP/HTTPS ones.  Each only moves
+            # the node types it governs, and per-target overrides are left
+            # alone (their line follows the custom threshold, see _override
+            # rationale in PingEngine.update_global_settings).
+            new_icmp = changed.get("latency_warn_ms")
+            new_http = changed.get("http_latency_warn_ms")
             has_override = {
                 t["id"]: "latency_warn_ms" in (t.get("thresholds") or {})
                 for t in self.config.get_targets()
@@ -1401,11 +1401,12 @@ class MainWindow(ctk.CTk):
                     continue
                 if has_override.get(tid):
                     continue
-                ptype = (self._target_ping_types.get(tid) or "icmp").lower()
-                if ptype in ("http", "https"):
-                    card._chart_panel.set_warn_latency(HTTPMonitor.DEFAULT_WARN_LAT)
-                else:
-                    card._chart_panel.set_warn_latency(new_val)
+                is_http = (self._target_ping_types.get(tid)
+                           or "icmp").lower() in ("http", "https")
+                if is_http and new_http is not None:
+                    card._chart_panel.set_warn_latency(new_http)
+                elif not is_http and new_icmp is not None:
+                    card._chart_panel.set_warn_latency(new_icmp)
 
         self.status_label.configure(text="设置已应用")
         self.after(3000, lambda: self.status_label.configure(

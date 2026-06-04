@@ -31,7 +31,10 @@ _SECTIONS = [
         ("recovery_count",          "恢复确认次数",              "int",   1,   20,  "连续成功 N 次才恢复绿色，防抖动"),
     ]),
     ("延时告警阈值", [
-        ("latency_warn_ms",        "警告延时阈值 (ms)",         "int",  10, 2000, "单次延时超过此值时开始计数"),
+        ("latency_warn_ms",        "警告延时阈值·ICMP/TCP/DNS (ms)", "int",  10, 2000,
+         "ICMP / TCP / DNS 节点：单次延时超过此值开始计数（默认 150）"),
+        ("http_latency_warn_ms",   "警告延时阈值·HTTP (ms)",        "int", 100, 10000,
+         "HTTP/HTTPS 节点：网站含 DNS+TLS+服务器处理天然较慢，故单列（默认 2000）"),
         ("consecutive_lat_orange", "连续高延时 → 橙色 (次)",   "int",   1,   20,  "连续 N 次延时 ≥ 警告阈值才变橙色，防抖动"),
         # latency_error_ms / consecutive_lat_red removed: engine design caps
         # performance degradation at ORANGE — latency never escalates to RED.
