@@ -1609,8 +1609,8 @@ function switchTab(n,btn){
   document.getElementById('tab-monitor').style.display=n==='monitor'?'flex':'none';
   document.getElementById('tab-stats').style.display=n==='stats'?'block':'none';
   document.getElementById('tab-sla').style.display=n==='sla'?'block':'none';
-  if(n==='stats')setTimeout(initStatsTab,50);
-  if(n==='sla')setTimeout(initSLATab,50);}
+  if(n==='stats')setTimeout(onStatsTabActive,50);
+  if(n==='sla')setTimeout(onSLATabActive,50);}
 function toggleHist(){histOpen=!histOpen;
   document.getElementById('hist-body').classList.toggle('collapsed',!histOpen);
   document.getElementById('htarrow').classList.toggle('open',histOpen);}
@@ -4737,6 +4737,7 @@ function applyServerStats(serverStats){
 let _statsStart = Math.floor(Date.now()/1000) - 3600;   // 默认近1小时
 let _statsEnd   = Math.floor(Date.now()/1000);
 let _statsReqId = 0;   // incremented on each _refreshStatsCharts; stale responses discard themselves
+let _statsTabInited = false;  // first visit only: default 1h; later visits keep user range
 
 function _fmt(ts){
   const d=new Date(ts*1000);
@@ -5281,9 +5282,21 @@ async function doExportExcel(){
   }
 }
 
-// 初始化统计 tab：设置默认时间段并刷新
+// 首次进入统计 tab：默认近 1 小时。再次进入保留 _statsStart/_statsEnd（导出同源）。
+function onStatsTabActive(){
+  if(!_statsTabInited){
+    _statsTabInited=true;
+    initStatsTab();
+    return;
+  }
+  const ds=document.getElementById('dt-start');
+  const de=document.getElementById('dt-end');
+  if(ds) ds.value=_toInputVal(_statsStart);
+  if(de) de.value=_toInputVal(_statsEnd);
+  _refreshStatsCharts();
+  loadWaveform();
+}
 function initStatsTab(){
-  // 默认选"近1小时"
   const firstBtn=document.querySelector('.tbtn[data-sec="3600"]');
   if(firstBtn) setQuick(firstBtn);
   else _refreshStatsCharts();
@@ -5684,6 +5697,7 @@ connect();
 // SLA Report
 let _slaData=[],_slaSortCol=1,_slaSortAsc=true;
 let _slaRollingDays=null;  // 7/30: rolling window; null: calendar dates in inputs
+let _slaTabInited=false;   // first visit only: default rolling 7d; later visits keep user range
 function _slaFmtDate(d){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
@@ -5702,11 +5716,21 @@ function getSLATimeRange(){
     label: `${sv} — ${ev}`,
   };
 }
+function onSLATabActive(){
+  if(!_slaTabInited){
+    _slaTabInited=true;
+    initSLATab();
+    return;
+  }
+  loadSLA();
+}
 function initSLATab(){
   const now=new Date();
   document.getElementById("sla-e").value=_slaFmtDate(now);
   document.getElementById("sla-s").value=_slaFmtDate(new Date(+now-7*86400000));
   _slaRollingDays=7;
+  document.querySelectorAll("[id^=slab-]").forEach(b=>b.classList.remove("active"));
+  document.getElementById("slab-7d").classList.add("active");
   loadSLA();
 }
 function setSLAPeriod(days){
