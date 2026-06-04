@@ -1446,6 +1446,63 @@ class MainWindow(ctk.CTk):
             # NOTE: no _schedule_auto_resize — adding a node must NEVER
             # change the window width. Scrollbar handles content overflow.
 
+    @staticmethod
+    def _dns_diag_host_prefill(tg: dict, target_id: str) -> str:
+        ptype = tg.get("ping_type", "icmp")
+        if ptype == "dns":
+            return tg.get("dns_domain") or tg.get("ip") or target_id
+        return tg.get("ip", target_id)
+
+    def _close_registered_window(self, registry: dict, target_id: str) -> None:
+        win = registry.pop(target_id, None)
+        if win is None:
+            return
+        try:
+            if win.winfo_exists():
+                win._on_close()
+        except Exception:
+            pass
+
+    def _refresh_open_diag_windows_after_edit(
+        self, target_id: str, r: dict, *,
+        ip_changed: bool, type_changed: bool,
+        dns_domain_changed: bool,
+    ) -> None:
+        """Keep ICMP/DNS diag windows in sync after _on_edit().
+
+        Refocus paths (_open_icmp_diag / _open_dns_diag) already refresh
+        stale windows, but editing without re-opening left self._host /
+        domain entry frozen — the next diag run probed the old target while
+        persisting under the current target_id.
+        """
+        identity_changed = ip_changed or type_changed or dns_domain_changed
+        if identity_changed:
+            self._close_registered_window(self._icmp_diag_windows, target_id)
+            self._close_registered_window(self._dns_diag_windows, target_id)
+        else:
+            icmp = self._icmp_diag_windows.get(target_id)
+            if icmp is not None:
+                try:
+                    if icmp.winfo_exists():
+                        icmp.update_host(r["label"], r["ip"])
+                except Exception:
+                    pass
+            dns = self._dns_diag_windows.get(target_id)
+            if dns is not None:
+                try:
+                    if dns.winfo_exists():
+                        prefill = self._dns_diag_host_prefill(r, target_id)
+                        dns.update_target(r["label"], prefill)
+                except Exception:
+                    pass
+        wf = self._waveform_windows.get(target_id)
+        if wf is not None:
+            try:
+                if wf.winfo_exists():
+                    wf.update_target(r["label"], r["ip"])
+            except Exception:
+                pass
+
     def _open_icmp_diag(self, target_id: str):
         """Open (or focus) the ICMP advanced diagnostics window."""
         # Always look up the target's CURRENT config first.  We need
@@ -1517,21 +1574,13 @@ class MainWindow(ctk.CTk):
         target = next((t for t in self.config.get_targets()
                        if t["id"] == target_id), None)
 
-        def _compute_host_prefill(tg: dict) -> str:
-            ptype = tg.get("ping_type", "icmp")
-            if ptype == "dns":
-                return (tg.get("dns_domain")
-                        or tg.get("ip")
-                        or target_id)
-            return tg.get("ip", target_id)
-
         existing = self._dns_diag_windows.get(target_id)
         if existing:
             try:
                 if existing.winfo_exists():
                     if target is not None:
                         new_label = target.get("label", target_id)
-                        new_host  = _compute_host_prefill(target)
+                        new_host  = self._dns_diag_host_prefill(target, target_id)
                         if (existing._label != new_label
                             or existing._host  != new_host):
                             try:
@@ -1544,7 +1593,7 @@ class MainWindow(ctk.CTk):
         if not target:
             return
 
-        host_prefill = _compute_host_prefill(target)
+        host_prefill = self._dns_diag_host_prefill(target, target_id)
 
         win = DnsDiagWindow(
             parent       = self,
@@ -2002,6 +2051,17 @@ class MainWindow(ctk.CTk):
                 tcp_probe_ports=r.get("tcp_probe_ports", ""),
                 dns_domain=r.get("dns_domain", ""),
                 is_probe_result=False)   # label/extras meta-sync
+
+        dns_domain_changed = (
+            (target.get("dns_domain") or "")
+            != (r.get("dns_domain") or "")
+        )
+        self._refresh_open_diag_windows_after_edit(
+            target_id, r,
+            ip_changed=ip_changed,
+            type_changed=type_changed,
+            dns_domain_changed=dns_domain_changed,
+        )
 
     def _on_delete(self, target_id):
         targets = {t["id"]: t for t in self.config.get_targets()}
