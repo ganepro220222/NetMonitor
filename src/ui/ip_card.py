@@ -221,6 +221,11 @@ class IPCard(ctk.CTkFrame):
     # Theme and chart theme
     # ------------------------------------------------------------------
 
+    def clear_chart_display(self):
+        """Clear the mini-chart canvas when history for this target was wiped."""
+        if self._chart_panel is not None:
+            self._chart_panel.clear_chart()
+
     def apply_chart_theme(self):
         # Apply theme to the chart object regardless of whether it is
         # currently open. This ensures that when a collapsed chart is

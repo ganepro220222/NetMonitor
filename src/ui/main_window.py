@@ -1192,6 +1192,22 @@ class MainWindow(ctk.CTk):
         else:
             self._do_start_web()
 
+    def _push_web_target_snapshots(self):
+        """Sync metadata to Web and honour desktop pause state (Bug104)."""
+        for tid, card in self._cards.items():
+            self.web_server.update_target(
+                tid=tid,
+                label=self._target_labels.get(tid, tid),
+                ip=self._target_ips.get(tid, ""),
+                status=self._current_statuses.get(tid, "gray"),
+                latency_ms=None, jitter_ms=None, loss_rate=0.0,
+                ping_type=self._target_ping_types.get(tid, "icmp"),
+                tcp_probe_ports=self._target_probe_ports.get(tid, ""),
+                dns_domain=self._target_dns_domain.get(tid, ""),
+                is_probe_result=False)   # meta-sync, not a real probe
+            if card.is_paused:
+                self.web_server.pause_target(tid)
+
     def _do_start_web(self):
         ok = self.web_server.start()
         if ok:
@@ -1202,20 +1218,10 @@ class MainWindow(ctk.CTk):
             # them, WebServer.update_target() falls back to its
             # ping_type='icmp' / tcp_probe_ports='' / dns_domain=''
             # defaults, so every HTTP / TCP / DNS node would briefly
-            # be logged as ICMP until its next state push.  For a
-            # paused node the next push never comes and the wrong
-            # metadata persists for the whole session.
-            for tid in self._cards:
-                self.web_server.update_target(
-                    tid=tid,
-                    label=self._target_labels.get(tid, tid),
-                    ip=self._target_ips.get(tid, ""),
-                    status=self._current_statuses.get(tid, "gray"),
-                    latency_ms=None, jitter_ms=None, loss_rate=0.0,
-                    ping_type=self._target_ping_types.get(tid, "icmp"),
-                    tcp_probe_ports=self._target_probe_ports.get(tid, ""),
-                    dns_domain=self._target_dns_domain.get(tid, ""),
-                    is_probe_result=False)   # meta-sync, not a real probe
+            # be logged as ICMP until its next state push.  Nodes paused
+            # while Web was off must call pause_target() after meta-sync
+            # so the browser shows "paused", not gray.
+            self._push_web_target_snapshots()
             self._update_web_btn()
         else:
             messagebox.showerror("启动失败",
@@ -1870,6 +1876,8 @@ class MainWindow(ctk.CTk):
             # The probe target changed identity — reset all state that
             # belongs to the OLD target so it doesn't pollute the new one.
             self.history.remove_target(target_id)       # clear chart history
+            if target_id in self._cards:
+                self._cards[target_id].clear_chart_display()
             self.alerter.on_target_removed(target_id)   # clear alert/sound state
             # _last_statuses: pop on "wipe" (operator chose to wipe
             # history, so prior status has no meaning for the new

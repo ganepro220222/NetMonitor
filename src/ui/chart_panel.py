@@ -453,6 +453,38 @@ class ChartPanel(ctk.CTkFrame):
         # 3. Let Tkinter finish widget destruction
         super().destroy()
 
+    def clear_chart(self):
+        """Remove all plotted data from the canvas (Bug104).
+
+        Called when in-memory history is cleared (IP/type identity change)
+        or when _render_chart() finds no history — avoids stale curves
+        from the previous target lingering on an open mini-chart.
+        """
+        if not MATPLOTLIB_AVAILABLE or not hasattr(self, "_fig"):
+            return
+        try:
+            self._line.set_data([], [])
+            self._loss_scatter.set_offsets([[0, 0]])
+            self._loss_scatter.set_visible(False)
+            if self._fill is not None:
+                self._fill.remove()
+                self._fill = None
+            self._fill_tick = 0
+            self._last_render_n = -1
+            self._last_render_lat = None
+            self._last_render_probe_ts = None
+            self._hover_vline.set_visible(False)
+            self._hover_dot.set_visible(False)
+            self._hover_annot.set_visible(False)
+            self._warn_line.set_visible(False)
+            self._ax.set_ylim(0, 50)
+            from src.history_store import TargetHistory
+            self._ax.set_xlim(-TargetHistory.WINDOW_SECONDS, 2)
+            self._stats.set_text("waiting...")
+            self._mpl_canvas.draw_idle()
+        except Exception as e:
+            print(f"[Chart {self.target_id}] clear error: {e}")
+
     def render_if_visible(self):
         """Called by the coordinator each STEP_MS tick.
         Skip if not running, destroyed, or scrolled off-screen."""
@@ -523,6 +555,7 @@ class ChartPanel(ctk.CTkFrame):
         try:
             history = self.get_history()
             if history is None or history.is_empty():
+                self.clear_chart()
                 return
             C = self._C()
             times, latencies = history.get_plot_data()
