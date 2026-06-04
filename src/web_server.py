@@ -1516,6 +1516,9 @@ function applyTheme(t){document.getElementById('body').className='theme-'+t;
   document.querySelectorAll('.theme-btns .tbtn').forEach((b,i)=>
     b.classList.toggle('active',['dark','light','system'][i]===t));
   const dark=t==='dark'||(t==='system'&&matchMedia('(prefers-color-scheme:dark)').matches);
+  // Single source of truth for JS that cannot read body.theme-* CSS (e.g.
+  // _renderWaveform).  system resolves to the effective light/dark value.
+  document.documentElement.setAttribute('data-theme', dark?'dark':'light');
   // typeof Chart guard: the only Chart.js source is a public CDN.
   // When the host is offline / DNS-blocked / behind a strict proxy
   // the script tag silently fails, leaving `Chart` undefined.
