@@ -1664,8 +1664,11 @@ class HTTPMonitor(TargetMonitor):
 
     @staticmethod
     def _is_success(code: int, spec: str) -> bool:
-        spec = spec.strip().lower().replace(" ", "")
-        for part in spec.split(","):
+        from src.host_validation import normalize_http_success_codes
+        norm, err = normalize_http_success_codes(spec)
+        if err:
+            norm = "2xx,3xx"
+        for part in norm.split(","):
             if part == "2xx" and 200 <= code < 300: return True
             if part == "3xx" and 300 <= code < 400: return True
             if part == "4xx" and 400 <= code < 500: return True

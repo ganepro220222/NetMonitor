@@ -4,6 +4,7 @@ from src.config_manager import MIN_PING_INTERVAL_S, is_valid_ping_interval
 from src.host_validation import (
     is_valid_host as _is_valid_host,
     normalize_dns_expected_ipv4 as _normalize_dns_expected_ipv4,
+    normalize_http_success_codes as _normalize_http_success_codes,
 )
 
 """
@@ -309,7 +310,11 @@ class _BaseDialog(ctk.CTkToplevel):
             if not url or not url.startswith(("http://", "https://")):
                 self._error("URL 必须以 http:// 或 https:// 开头")
                 return None
-            codes = self._http_success_codes.get().strip() or "2xx,3xx"
+            codes, codes_err = _normalize_http_success_codes(
+                self._http_success_codes.get().strip())
+            if codes_err:
+                self._error(codes_err)
+                return None
             extra["http_url"]           = url
             extra["http_success_codes"] = codes
             kw = self._http_keyword.get().strip() if hasattr(self, "_http_keyword") else ""

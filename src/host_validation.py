@@ -43,6 +43,48 @@ def normalize_dns_expected_ipv4(raw: str) -> tuple[str | None, str | None]:
     return ",".join(out), None
 
 
+_HTTP_SUCCESS_CLASSES = frozenset({"2xx", "3xx", "4xx", "5xx"})
+
+
+def normalize_http_success_codes(raw: str) -> tuple[str | None, str | None]:
+    """Parse HTTP success status rule. Returns (canonical_csv, err).
+
+    Supports class tokens 2xx/3xx/4xx/5xx and exact codes 100-599, comma-separated.
+    Empty input normalizes to the default ``2xx,3xx``.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "2xx,3xx", None
+    if any(sep in text for sep in ("，", ";", "；")):
+        return None, "成功状态码请使用英文逗号分隔，例如：2xx,3xx 或 200,201"
+    if "-" in text:
+        return None, "成功状态码不支持范围写法，请使用 2xx 或精确状态码，例如：200,201"
+    parts_raw = [p.strip().lower().replace(" ", "") for p in text.split(",")]
+    if not parts_raw or any(not p for p in parts_raw):
+        return None, "成功状态码格式错误，不能包含空项"
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in parts_raw:
+        if part in _HTTP_SUCCESS_CLASSES:
+            if part not in seen:
+                seen.add(part)
+                out.append(part)
+            continue
+        try:
+            code = int(part)
+        except ValueError:
+            return None, f"无法识别的成功状态码规则：{part}"
+        if not (100 <= code <= 599):
+            return None, f"状态码必须在 100–599 之间：{code}"
+        token = str(code)
+        if token not in seen:
+            seen.add(token)
+            out.append(token)
+    if not out:
+        return None, "成功状态码格式错误"
+    return ",".join(out), None
+
+
 def is_valid_host(host: str) -> bool:
     if not host:
         return False
