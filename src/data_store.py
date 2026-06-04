@@ -2541,11 +2541,12 @@ class DataStore:
 
             for p in pings:
                 total += 1
-                if self.row_probe_success(
-                        p.get("latency_ms"), p.get("status", "green"),
-                        p.get("failure_reason"), p.get("probe_success")):
+                probe_ok = self.row_probe_success(
+                    p.get("latency_ms"), p.get("status", "green"),
+                    p.get("failure_reason"), p.get("probe_success"))
+                if probe_ok:
                     success += 1
-                if p["latency_ms"] is not None:
+                if probe_ok and p["latency_ms"] is not None:
                     lat_n   += 1
                     lat_avg += (p["latency_ms"] - lat_avg) / lat_n
 
