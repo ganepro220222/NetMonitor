@@ -5600,6 +5600,16 @@ function connect(){
           _refreshStatsCharts();
         }}
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
+    if(msg.type==='stats_reset'){
+      purgeDonutTarget(msg.tid);
+      const _statsTabW=document.getElementById('tab-stats');
+      if(_statsTabW&&_statsTabW.style.display!=='none'){
+        buildBarCharts();
+        _refreshStatsCharts();
+        resetWaveformUi();
+        loadWaveform();
+      }
+      document.getElementById('upd').textContent='统计已重置';return;}
     if(msg.type==='remove'){
       delete targets[msg.tid];
       purgeDonutTarget(msg.tid);
@@ -6246,6 +6256,20 @@ class WebServer:
             self._scheduler.bump_generation(tid)
             self._tracer_cache.pop(tid, None)
         self._broadcaster.push(json.dumps({"type": "remove", "tid": tid}))
+
+    def reset_target_stats(self, tid: str) -> None:
+        """Clear in-memory cumulative stats after a history wipe.
+
+        DataStore.wipe_target_history deletes cum_stats on disk, but
+        WebServer._stats is a separate process-lifetime cache used for
+        dashboard uptime / SSE init.  Without this, a repurposed target_id
+        keeps the previous node's total/success/latency_avg in the browser.
+        """
+        with self._lock:
+            self._stats.pop(tid, None)
+        if self._running:
+            self._broadcaster.push(
+                json.dumps({"type": "stats_reset", "tid": tid}))
 
     def invalidate_traceroute(self, tid: str) -> None:
         """Public hook for callers (e.g. main_window before
