@@ -453,6 +453,19 @@ class ChartPanel(ctk.CTkFrame):
         # 3. Let Tkinter finish widget destruction
         super().destroy()
 
+    def set_warn_latency(self, value: int | float) -> None:
+        """Update the latency warning threshold line (y position + visibility)."""
+        self.warn_latency = value
+        if not MATPLOTLIB_AVAILABLE or not hasattr(self, "_warn_line"):
+            return
+        try:
+            self._warn_line.set_ydata([value, value])
+        except Exception:
+            pass
+        self._last_render_n = -1
+        if self._running:
+            self._render_chart()
+
     def clear_chart(self):
         """Remove all plotted data from the canvas (Bug104).
 
@@ -637,6 +650,7 @@ class ChartPanel(ctk.CTkFrame):
             if lat_ok:
                 y_max = max(max(lat_ok) * 1.5, 20)
                 self._ax.set_ylim(0, y_max)
+                self._warn_line.set_ydata([self.warn_latency, self.warn_latency])
                 self._warn_line.set_visible(self.warn_latency < y_max)
             else:
                 self._ax.set_ylim(0, 50)

@@ -725,6 +725,18 @@ class MainWindow(ctk.CTk):
             return HTTPMonitor.DEFAULT_WARN_LAT
         return merged.get("latency_warn_ms") or 150
 
+    def _sync_card_chart_warn_line(self, target_id: str) -> None:
+        card = self._cards.get(target_id)
+        if not card or not card._chart_panel:
+            return
+        target = next(
+            (t for t in self.config.get_targets() if t["id"] == target_id), None)
+        if not target:
+            return
+        merged = self.config.get_target_settings(target_id)
+        card._chart_panel.set_warn_latency(
+            self._chart_warn_latency(target, merged))
+
     def _create_card(self, target):
         tid = target["id"]
         self.history.ensure_target(tid)
@@ -1380,9 +1392,9 @@ class MainWindow(ctk.CTk):
                     continue
                 ptype = (self._target_ping_types.get(tid) or "icmp").lower()
                 if ptype in ("http", "https"):
-                    card._chart_panel.warn_latency = HTTPMonitor.DEFAULT_WARN_LAT
+                    card._chart_panel.set_warn_latency(HTTPMonitor.DEFAULT_WARN_LAT)
                 else:
-                    card._chart_panel.warn_latency = new_val
+                    card._chart_panel.set_warn_latency(new_val)
 
         self.status_label.configure(text="设置已应用")
         self.after(3000, lambda: self.status_label.configure(
@@ -2067,6 +2079,8 @@ class MainWindow(ctk.CTk):
                 tcp_probe_ports=r.get("tcp_probe_ports", ""),
                 dns_domain=r.get("dns_domain", ""),
                 is_probe_result=False)   # label/extras meta-sync
+
+        self._sync_card_chart_warn_line(target_id)
 
         self._refresh_open_diag_windows_after_edit(
             target_id, r,
