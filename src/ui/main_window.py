@@ -4,7 +4,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 from src.config_manager import ConfigManager
-from src.ping_engine import PingEngine, TargetState
+from src.ping_engine import PingEngine, TargetState, HTTPMonitor
 from src.alert_manager import AlertManager
 from src.logger import Logger
 from src.history_store import HistoryStore
@@ -716,6 +716,15 @@ class MainWindow(ctk.CTk):
         self._refresh_summary()
         self._schedule_auto_resize(120)   # debounced
 
+    @staticmethod
+    def _chart_warn_latency(target, merged):
+        """Chart warning line — mirrors HTTPMonitor.DEFAULT_WARN_LAT when no per-target override."""
+        if "latency_warn_ms" in (target.get("thresholds") or {}):
+            return merged.get("latency_warn_ms") or 150
+        if (target.get("ping_type") or "icmp").lower() in ("http", "https"):
+            return HTTPMonitor.DEFAULT_WARN_LAT
+        return merged.get("latency_warn_ms") or 150
+
     def _create_card(self, target):
         tid = target["id"]
         self.history.ensure_target(tid)
@@ -726,7 +735,7 @@ class MainWindow(ctk.CTk):
             on_pause=self._on_target_pause,
             on_resume=self._on_target_resume,
             get_history=lambda tid=tid: self.history.get_history(tid),
-            warn_latency=merged.get("latency_warn_ms") or 150,
+            warn_latency=self._chart_warn_latency(target, merged),
             on_detail=self._open_waveform_detail,
             on_icmp_diag=self._open_icmp_diag,
             on_dns_diag=self._open_dns_diag)
@@ -1369,7 +1378,11 @@ class MainWindow(ctk.CTk):
                     continue
                 if has_override.get(tid):
                     continue
-                card._chart_panel.warn_latency = new_val
+                ptype = (self._target_ping_types.get(tid) or "icmp").lower()
+                if ptype in ("http", "https"):
+                    card._chart_panel.warn_latency = HTTPMonitor.DEFAULT_WARN_LAT
+                else:
+                    card._chart_panel.warn_latency = new_val
 
         self.status_label.configure(text="设置已应用")
         self.after(3000, lambda: self.status_label.configure(

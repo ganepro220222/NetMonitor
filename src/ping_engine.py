@@ -1893,6 +1893,18 @@ class PingEngine:
             for m in self._monitors.values():
                 m._data_store = data_store
 
+    @staticmethod
+    def _strip_global_latency_warn_for_http(merged, ping_type, custom_settings):
+        """Drop engine-global latency_warn_ms for HTTP/HTTPS without per-target override.
+
+        ICMP/TCP/DNS use settings latency_warn_ms (default 150). HTTPMonitor's
+        DEFAULT_WARN_LAT (2000) applies only when that key is absent from
+        monitor.settings — copying global 150 would false-trigger performance alarms.
+        """
+        if ping_type in ("http", "https"):
+            if not custom_settings or "latency_warn_ms" not in custom_settings:
+                merged.pop("latency_warn_ms", None)
+
     def add_target(self, target_id, ip, ping_type="icmp", custom_settings=None,
                    initial_status: str = "gray", start_paused: bool = False):
         """Register and start a new probe monitor.
@@ -1913,6 +1925,8 @@ class PingEngine:
             merged = dict(self.settings)
             if custom_settings: merged.update(custom_settings)
             ping_type = (ping_type or "icmp").lower()
+            self._strip_global_latency_warn_for_http(
+                merged, ping_type, custom_settings)
             cls = {"tcp": TCPMonitor, "http": HTTPMonitor, "https": HTTPMonitor,
                    "dns": DNSMonitor}.get(ping_type, TargetMonitor)
             monitor = cls(target_id=target_id, ip=ip,
@@ -2091,7 +2105,12 @@ class PingEngine:
                     # box.  Falls through to `merged.pop` only when the
                     # engine itself doesn't carry that key (e.g.
                     # type-specific extras like http_url).
-                    if k in self.settings:
+                    # HTTP/HTTPS without per-target latency_warn_ms uses
+                    # HTTPMonitor.DEFAULT_WARN_LAT — not global 150ms.
+                    if (k == "latency_warn_ms" and isinstance(m, HTTPMonitor)
+                            and "latency_warn_ms" not in new_thresholds):
+                        merged.pop(k, None)
+                    elif k in self.settings:
                         merged[k] = self.settings[k]
                     else:
                         merged.pop(k, None)
@@ -2174,7 +2193,13 @@ class PingEngine:
             overrides = getattr(m, "_override_keys", set())
             applied = {k: v for k, v in new_settings.items()
                         if k not in overrides}
-            m.settings = {**m.settings, **applied}
+            if isinstance(m, HTTPMonitor) and "latency_warn_ms" not in overrides:
+                applied.pop("latency_warn_ms", None)
+                merged = {**m.settings, **applied}
+                merged.pop("latency_warn_ms", None)
+                m.settings = merged
+            else:
+                m.settings = {**m.settings, **applied}
             # If the new global window_size actually reached this monitor
             # (i.e. it isn't overridden per-target), resize its deque so
             # the change takes effect immediately on the running
