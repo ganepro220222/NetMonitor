@@ -213,6 +213,10 @@ class DataStore:
         # bumps fan out per-tid without serialising unrelated nodes.
         self._commit_locks: dict[str, threading.Lock] = {}
         self._commit_locks_lock = threading.Lock()
+        # Optional hook: invoked on the write thread after a wipe_target
+        # job commits (so WebServer can notify browsers only after DB rows
+        # are actually deleted, not when the wipe is merely enqueued).
+        self._wipe_complete_callback = None
 
         threading.Thread(
             target=self._maybe_vacuum, daemon=True,
@@ -1860,6 +1864,12 @@ class DataStore:
                             # Safe to mutate from this thread -- write
                             # thread is the sole writer of _active_incidents.
                             self._active_incidents.pop(tid, None)
+                            cb = self._wipe_complete_callback
+                            if cb is not None:
+                                try:
+                                    cb(tid)
+                                except Exception:
+                                    pass
 
                         elif kind == "diag":
                             # ICMP advanced-diagnostic result.  Inserted
@@ -3278,6 +3288,10 @@ class DataStore:
             target_id, label, ip, ts,
             json.dumps(payload, ensure_ascii=False),
         ), captured_generation)))
+
+    def set_wipe_complete_callback(self, callback) -> None:
+        """Register fn(target_id) called on the write thread after wipe commits."""
+        self._wipe_complete_callback = callback
 
     def wipe_target_history(self, target_id: str) -> None:
         """Erase every historical row belonging to ``target_id``.

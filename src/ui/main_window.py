@@ -1960,9 +1960,9 @@ class MainWindow(ctk.CTk):
                         self.web_server.invalidate_traceroute(target_id)
                     except Exception:
                         pass
-                if hasattr(self.web_server, "reset_target_stats"):
+                if hasattr(self.web_server, "begin_target_history_wipe"):
                     try:
-                        self.web_server.reset_target_stats(target_id)
+                        self.web_server.begin_target_history_wipe(target_id)
                     except Exception:
                         pass
                 _ds = self.__dict__.get("data_store")

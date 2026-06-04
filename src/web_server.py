@@ -5602,6 +5602,10 @@ function connect(){
       document.getElementById('upd').textContent='更新 '+new Date().toTimeString().slice(0,8);}
     if(msg.type==='stats_reset'){
       purgeDonutTarget(msg.tid);
+      resetWaveformUi();
+      document.getElementById('upd').textContent='统计已重置';return;}
+    if(msg.type==='history_wiped'){
+      purgeDonutTarget(msg.tid);
       const _statsTabW=document.getElementById('tab-stats');
       if(_statsTabW&&_statsTabW.style.display!=='none'){
         buildBarCharts();
@@ -5609,7 +5613,7 @@ function connect(){
         resetWaveformUi();
         loadWaveform();
       }
-      document.getElementById('upd').textContent='统计已重置';return;}
+      document.getElementById('upd').textContent='历史已清空';return;}
     if(msg.type==='remove'){
       delete targets[msg.tid];
       purgeDonutTarget(msg.tid);
@@ -5883,6 +5887,9 @@ class WebServer:
         #                "latency_sum": float,# rolling sum for avg
         #                "latency_n":   int}} # samples in sum
         self._lock         = threading.Lock()
+        # target_ids whose DB history wipe is queued/in-flight — Web APIs
+        # return empty history until on_target_history_wiped() fires.
+        self._history_wipe_pending: set[str] = set()
         self._broadcaster  = _SSEBroadcaster()
         self._tracer_cache: dict[str, dict] = {}
         self._tracer_lock  = threading.Lock()
@@ -6017,6 +6024,8 @@ class WebServer:
         """Attach a DataStore. Called from main() after both are created."""
         self._data_store = ds
         self._scheduler._data_store = ds   # scheduler needs it to persist traceroute history
+        if ds is not None and hasattr(ds, "set_wipe_complete_callback"):
+            ds.set_wipe_complete_callback(self.on_target_history_wiped)
         # Load historical cum_stats → seed in-memory _stats so first browser
         # connection shows real uptime, not 0%, even right after a restart.
         if ds:
@@ -6257,19 +6266,35 @@ class WebServer:
             self._tracer_cache.pop(tid, None)
         self._broadcaster.push(json.dumps({"type": "remove", "tid": tid}))
 
-    def reset_target_stats(self, tid: str) -> None:
-        """Clear in-memory cumulative stats after a history wipe.
-
-        DataStore.wipe_target_history deletes cum_stats on disk, but
-        WebServer._stats is a separate process-lifetime cache used for
-        dashboard uptime / SSE init.  Without this, a repurposed target_id
-        keeps the previous node's total/success/latency_avg in the browser.
-        """
+    def begin_target_history_wipe(self, tid: str) -> None:
+        """Mark a target as mid-wipe so history APIs return empty until done."""
         with self._lock:
+            self._history_wipe_pending.add(tid)
+
+    def _history_data_available(self, tid: str) -> bool:
+        if not tid:
+            return False
+        with self._lock:
+            return tid not in self._history_wipe_pending
+
+    def _tids_for_history_query(self, tids: list[str]) -> list[str]:
+        with self._lock:
+            pending = self._history_wipe_pending
+            return [t for t in tids if t not in pending]
+
+    def on_target_history_wiped(self, tid: str) -> None:
+        """Called from DataStore write thread after wipe_target commits."""
+        with self._lock:
+            self._history_wipe_pending.discard(tid)
             self._stats.pop(tid, None)
         if self._running:
             self._broadcaster.push(
-                json.dumps({"type": "stats_reset", "tid": tid}))
+                json.dumps({"type": "history_wiped", "tid": tid}))
+
+    def reset_target_stats(self, tid: str) -> None:
+        """Clear in-memory cumulative stats only (no SSE — use history_wiped)."""
+        with self._lock:
+            self._stats.pop(tid, None)
 
     def invalidate_traceroute(self, tid: str) -> None:
         """Public hook for callers (e.g. main_window before
@@ -6933,6 +6958,7 @@ class WebServer:
             end   = _qnum("end",   int(time.time()))
             with self._lock:
                 tids = list(self._targets.keys())
+            tids = self._tids_for_history_query(tids)
             result = self._data_store.get_dashboard_stats_batch(tids, start, end)
             return json.dumps(result), 200, {"Content-Type":"application/json"}
 
@@ -6950,6 +6976,9 @@ class WebServer:
             end   = _qnum("end",   now)
             if not tid:
                 return "缺少 tid 参数", 400
+            if not self._history_data_available(tid):
+                return json.dumps({"error": "该时间范围内无可导出数据"}), 404, \
+                       {"Content-Type": "application/json"}
             # Resolve label from the trusted server-side snapshot,
             # not from the URL query.  The previous code did
             # `label = request.args.get("label","节点").strip()`,
@@ -7057,6 +7086,9 @@ class WebServer:
                        {"Content-Type":"application/json"}
             tid = request.args.get("tid","").strip()
             now = int(time.time())
+            if not self._history_data_available(tid):
+                return json.dumps({"resolution":"raw","points":[],"summary":{}}), 200, \
+                       {"Content-Type":"application/json"}
             quick = request.args.get("range","")
             span_map = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
             if quick in span_map:
@@ -7084,6 +7116,9 @@ class WebServer:
                        {"Content-Type":"application/json"}
             tid = request.args.get("tid","").strip()
             now = int(time.time())
+            if not self._history_data_available(tid):
+                return json.dumps({"red":[],"orange":[],"events":[]}), 200, \
+                       {"Content-Type":"application/json"}
             quick = request.args.get("range","")
             span_map = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
             if quick in span_map:
@@ -7918,7 +7953,8 @@ class WebServer:
                         # filtering here prevents "ghost" charts on the stats page.
                         init_stats = {tid: dict(s)
                                       for tid, s in self._stats.items()
-                                      if tid in self._targets}
+                                      if tid in self._targets
+                                      and tid not in self._history_wipe_pending}
                     # Include any cached port-status so browser shows
                     # indicators immediately without waiting for the next
                     # background tracert cycle.
