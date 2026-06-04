@@ -853,17 +853,18 @@ class MainWindow(ctk.CTk):
         #
         # Solution: replay alert_events to find each target's last known status
         # and pre-populate _last_statuses BEFORE the first probe fires.
-        # Now the first green probe correctly compares against "red" and
-        # writes the red->green recovery event that closes the open outage.
+        # _load_cards() runs first and setdefault(tid, "gray") on every card,
+        # so we must OVERWRITE that placeholder for current targets when the
+        # DB has a real last status (e.g. crash while RED -> first green must
+        # record red->green, not gray->green).
         last_statuses = {}   # default — engine starts fresh if DB read fails
         _ds = self.__dict__.get("data_store")
         if _ds:
             try:
                 last_statuses = _ds.get_last_known_statuses()
                 _lst = self.__dict__.get("_last_statuses", {})
-                # Only seed targets that aren't already tracked (safety guard)
                 for tid, st in last_statuses.items():
-                    if tid not in _lst:
+                    if tid in self._cards:
                         _lst[tid] = st
             except Exception:
                 pass   # never block startup on a DB read failure
