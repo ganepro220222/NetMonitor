@@ -40,21 +40,17 @@ def test_legacy_config_migrates_7_to_8():
             pass
 
 
-def test_rolling_7d_covered_with_7d_retention_and_tolerance():
-    """7d retention + 120s tolerance covers client start ~1s before server cutoff."""
-    now = int(time.time())
-    browser_start = now - 7 * 86400
-    server_now = now + 1
+def test_7d_retention_strict_boundary_rejects_early_start():
+    """7d retention: start even 1s before cutoff must not claim raw coverage."""
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     ds = DataStore(path, raw_retention_days=7)
     ds._schema_ready.wait(timeout=5)
     try:
-        cutoff = server_now - 7 * 86400
-        delta = browser_start - cutoff
-        covered = int(browser_start) >= cutoff - ds._RAW_COVERS_TOLERANCE_S
-        ok = delta < 0 and covered
-        print(f"Bug99 7d+tolerance: delta={delta}s covered={covered} -> {ok}")
+        cutoff = ds._raw_retention_cutoff()
+        start = cutoff - 1
+        ok = not ds._raw_covers_window_start(start)
+        print(f"Bug99 7d strict: start=cutoff-1 covered=False -> {ok}")
         return ok
     finally:
         ds.shutdown()
@@ -83,27 +79,31 @@ def test_migrated_8d_covers_rolling_7d():
             pass
 
 
-def test_source_migration_and_tolerance():
+def test_source_migration_no_p95_tolerance():
     with open(CONFIG_MANAGER, encoding="utf-8") as f:
         cm = f.read()
     with open(DATA_STORE, encoding="utf-8") as f:
         ds = f.read()
+    block = ds.split("def _raw_covers_window_start", 1)[1].split(
+        "def _global_lat_p95_sql", 1)[0]
     ok = (
         "_apply_config_migrations" in cm
         and "raw_retention_7_to_8" in cm
         and DEFAULT_CONFIG["settings"]["db_raw_retention_days"] == 8
-        and "_RAW_COVERS_TOLERANCE_S" in ds
+        and "_RAW_COVERS_TOLERANCE_S" not in ds
+        and "Bug100" in block or "no slack" in block.lower() or
+        "int(start_ts) >= self._raw_retention_cutoff()" in block
     )
-    print(f"Bug99 source migration + tolerance -> {ok}")
+    print(f"Bug99 source migration, strict P95 cutoff -> {ok}")
     return ok
 
 
 def main():
     results = [
         ("migrate", test_legacy_config_migrates_7_to_8()),
-        ("tolerance", test_rolling_7d_covered_with_7d_retention_and_tolerance()),
+        ("7d_strict", test_7d_retention_strict_boundary_rejects_early_start()),
         ("eight_day", test_migrated_8d_covers_rolling_7d()),
-        ("source", test_source_migration_and_tolerance()),
+        ("source", test_source_migration_no_p95_tolerance()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:

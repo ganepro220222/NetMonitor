@@ -721,18 +721,15 @@ class DataStore:
             "loss_rate": loss_rate,
         }
 
-    # Seconds of slack for SLA P95 coverage: browser rolling-window start
-    # is computed client-side; the server evaluates cutoff slightly later.
-    _RAW_COVERS_TOLERANCE_S = 120
-
     def _raw_covers_window_start(self, start_ts) -> bool:
-        """True when pings_raw should still cover the query window start.
+        """True when pings_raw still retains samples from the query window start.
 
-        A small tolerance absorbs client/server clock skew and request
-        latency without pretending deleted raw rows still exist (Bug99).
+        Strict cutoff only — no slack (Bug100).  Tolerance would mark P95 as
+        \"exact\" while the first minutes of the window may already be purged.
+        Default 8-day raw retention + 7→8 config migration covers rolling
+        \"近 7 天\"; users who set 7-day retention may see N/A for that preset.
         """
-        return (int(start_ts)
-                >= self._raw_retention_cutoff() - self._RAW_COVERS_TOLERANCE_S)
+        return int(start_ts) >= self._raw_retention_cutoff()
 
     def _global_lat_p95_sql(self, conn, target_id: str,
                             win_start: float, win_end: float) -> Optional[float]:
