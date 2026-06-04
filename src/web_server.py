@@ -1622,6 +1622,12 @@ const ST={green:{color:'var(--green)',label:'正常',bg:'rgba(34,197,94,.1)',br:
   paused:{color:'var(--dim)',label:'已暂停',bg:'rgba(107,114,128,.1)'}};
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 const st=s=>ST[s]||ST.gray;
+function measuredFailMs(t){
+  if(!t)return null;
+  if(t.latency_ms!=null)return t.latency_ms;
+  if(t.response_latency_ms!=null)return t.response_latency_ms;
+  return null;
+}
 function formatFailure(r){
   if(!r)return '请求超时';
   const l=String(r).toLowerCase();
@@ -1655,8 +1661,8 @@ function renderCards(){
       ?`<div class="paused-label">⏸ 已暂停</div>`
       :t.latency_ms!=null&&t.status!=='red'
         ?`<div class="lat-big" style="color:${s.color}">${t.latency_ms.toFixed(1)}<span class="lat-u">ms</span></div>`
-        :t.latency_ms!=null  // failed but with measured time (e.g. wrong HTTP status)
-          ?`<div class="tout" style="font-size:16px">${esc(failText)}<span style="font-size:11px;color:var(--dim);margin-left:6px">${t.latency_ms.toFixed(0)} ms</span></div>`
+        :(measuredFailMs(t)!=null)  // failed but with measured time (e.g. wrong HTTP status)
+          ?`<div class="tout" style="font-size:16px">${esc(failText)}<span style="font-size:11px;color:var(--dim);margin-left:6px">${measuredFailMs(t).toFixed(0)} ms</span></div>`
           :`<div class="tout">${esc(failText)}</div>`;
     // Subline: alert category, then jitter / HTTP status / type-specific hint
     const subParts=[];
@@ -1713,8 +1719,9 @@ function buildLatHtml(t,s){
   const failText=t.failure_reason?formatFailure(t.failure_reason):'请求超时';
   if(t.latency_ms!=null&&t.status!=='red')
     return`<div class="lat-big" style="color:${s.color}">${t.latency_ms.toFixed(1)}<span class="lat-u">ms</span></div>`;
-  if(t.latency_ms!=null)
-    return`<div class="tout" style="font-size:16px">${esc(failText)}<span style="font-size:11px;color:var(--dim);margin-left:6px">${t.latency_ms.toFixed(0)} ms</span></div>`;
+  const _mfm=measuredFailMs(t);
+  if(_mfm!=null)
+    return`<div class="tout" style="font-size:16px">${esc(failText)}<span style="font-size:11px;color:var(--dim);margin-left:6px">${_mfm.toFixed(0)} ms</span></div>`;
   return`<div class="tout">${esc(failText)}</div>`;
 }
 function buildSubHtml(t){
@@ -6189,6 +6196,7 @@ class WebServer:
                       dns_domain="",
                       keyword_ok=None,
                       probe_success: bool = True,
+                      response_latency_ms=None,
                       is_probe_result: bool = True):
         """Push a status snapshot into the Web-side _targets dict.
 
@@ -6208,6 +6216,9 @@ class WebServer:
         # Build data dict outside the lock (pure computation, no shared state)
         data = {"tid": tid, "label": label, "ip": ip, "status": status,
                 "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
+                "response_latency_ms": (
+                    round(response_latency_ms, 1)
+                    if response_latency_ms is not None else None),
                 "jitter_ms":  round(jitter_ms,  1) if jitter_ms  is not None else None,
                 "loss_rate":  loss_rate, "ping_type": ping_type,
                 "alert_category": alert_category,

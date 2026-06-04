@@ -239,7 +239,8 @@ class IPCard(ctk.CTkFrame):
 
     def update_status(self, status, latency_ms=None, jitter_ms=None, loss_rate=0.0,
                     ping_type="icmp", alert_category="ok",
-                    status_code=None, failure_reason=None):
+                    status_code=None, failure_reason=None,
+                    response_latency_ms=None):
         """
         Update the card visuals from a state observation.
 
@@ -265,8 +266,9 @@ class IPCard(ctk.CTkFrame):
                 text_color=STATUS_COLORS["gray"],
                 font=F(12, "bold"))
         else:
-            # When failed, prefer a meaningful reason over a generic "超时"
             fail_text = self._format_failure(failure_reason)
+            if response_latency_ms is not None:
+                fail_text = f"{fail_text}  {response_latency_ms:.0f} ms"
             self.latency_label.configure(
                 text=fail_text, text_color=STATUS_COLORS["red"], font=F(13, "bold"))
 

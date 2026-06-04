@@ -1070,10 +1070,13 @@ class MainWindow(ctk.CTk):
                 if _commit_lock is not None \
                    and not self._state_is_current(state):
                     return
+                _persist_lat = state.latency_ms
+                if _persist_lat is None and state.response_latency_ms is not None:
+                    _persist_lat = state.response_latency_ms
                 accepted = _ds.record_ping(
                     target_id=tid, label=label, ip=ip,
                     ping_type=ptype, ts=_t.time(), status=state.status,
-                    latency_ms=state.latency_ms, loss_rate=state.loss_rate,
+                    latency_ms=_persist_lat, loss_rate=state.loss_rate,
                     probe_success=state.probe_success,
                     status_code=state.status_code,
                     failure_reason=state.failure_reason,
@@ -1158,7 +1161,8 @@ class MainWindow(ctk.CTk):
                 tcp_probe_ports=self._target_probe_ports.get(tid, ""),
                 dns_domain=self._target_dns_domain.get(tid, ""),
                 keyword_ok=state.keyword_ok,
-                probe_success=state.probe_success)
+                probe_success=state.probe_success,
+                response_latency_ms=state.response_latency_ms)
 
         old = self._current_statuses.get(tid, "gray")
         if old != state.status:
@@ -1182,7 +1186,8 @@ class MainWindow(ctk.CTk):
             ping_type=_ping_type_local,
             alert_category=state.alert_category,
             status_code=state.status_code,
-            failure_reason=state.failure_reason)
+            failure_reason=state.failure_reason,
+            response_latency_ms=state.response_latency_ms)
 
     def _evaluate_global_alarm(self):
         """

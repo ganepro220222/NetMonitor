@@ -103,10 +103,11 @@ class TargetState:
     """What the UI sees — aggregated state of a target."""
     target_id: str
     status: str                                  # "gray" | "green" | "orange" | "red"
-    latency_ms:    Optional[float]
+    latency_ms:    Optional[float]   # success probes only — RTT charts / success stats
     jitter_ms:     Optional[float]
     loss_rate:     float
     consecutive_loss: int
+    response_latency_ms: Optional[float] = None  # failed probe with measured RTT (HTTP 5xx, etc.)
     # Extended
     alert_category: str = "ok"
     status_code:    Optional[int]  = None
@@ -789,11 +790,15 @@ class TargetMonitor:
         loss_rate = (sum(1 for r in self._window if not r.success) / len(self._window)
                      if self._window else 0.0)
 
+        _resp_lat = (latest.latency_ms
+                     if (not latest.success and latest.latency_ms is not None)
+                     else None)
         return TargetState(
             target_id        = self.target_id,
             status           = self._status,
             alert_category   = self._last_category,
             latency_ms       = latest.latency_ms if latest.success else None,
+            response_latency_ms = _resp_lat,
             jitter_ms        = round(jitter, 1) if jitter is not None else None,
             loss_rate        = loss_rate,
             consecutive_loss = self._consecutive_loss,
