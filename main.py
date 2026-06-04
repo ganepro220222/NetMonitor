@@ -145,7 +145,7 @@ def main():
     # MAIN-4: pass traceroute_retention_days so startup matches runtime behaviour
     data_store = DataStore(
         db_path=_db_path,
-        raw_retention_days=int(config.get_setting("db_raw_retention_days") or 7),
+        raw_retention_days=int(config.get_setting("db_raw_retention_days") or 8),
         hourly_retention_days=int(config.get_setting("db_hourly_retention_days") or 90),
         alert_retention_days=int(config.get_setting("db_alert_retention_days") or 365),
         traceroute_retention_days=int(

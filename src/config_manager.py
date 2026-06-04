@@ -169,13 +169,50 @@ class ConfigManager:
                 # DEFAULT_CONFIG 里加了新字段，老用户的配置文件
                 # 也不会缺少这些新字段
                 self.config = self._merge(DEFAULT_CONFIG, loaded)
+                self._apply_config_migrations(loaded)
             except (json.JSONDecodeError, IOError) as e:
                 print(f"[ConfigManager] 配置文件读取失败，使用默认配置: {e}")
                 self.config = copy.deepcopy(DEFAULT_CONFIG)
+                self._mark_config_migrations_done()
         else:
             print("[ConfigManager] 配置文件不存在，创建默认配置。")
             self.config = copy.deepcopy(DEFAULT_CONFIG)
+            self._mark_config_migrations_done()
             self.save()
+
+    def _apply_config_migrations(self, loaded: dict) -> None:
+        """One-time upgrades for legacy on-disk settings (Bug99).
+
+        Merges user overrides before this runs, so an untouched legacy
+        db_raw_retention_days=7 (old product default) is bumped to 8 so
+        SLA \"滚动近 7 天\" can compute exact P95.  Users who later set
+        7 explicitly in Settings are left alone once the marker is set.
+        """
+        settings = self.config.setdefault("settings", {})
+        mig = settings.get("_config_migrations")
+        if not isinstance(mig, dict):
+            mig = {}
+            settings["_config_migrations"] = mig
+        if mig.get("raw_retention_7_to_8"):
+            return
+
+        loaded_settings = loaded.get("settings")
+        if not isinstance(loaded_settings, dict):
+            loaded_settings = {}
+        if loaded_settings.get("db_raw_retention_days") == 7:
+            settings["db_raw_retention_days"] = 8
+            print("[ConfigManager] 已迁移 db_raw_retention_days: 7 → 8 "
+                  "（支持 SLA「近 7 天」精确 P95）")
+        mig["raw_retention_7_to_8"] = True
+        self.save()
+
+    def _mark_config_migrations_done(self) -> None:
+        settings = self.config.setdefault("settings", {})
+        mig = settings.get("_config_migrations")
+        if not isinstance(mig, dict):
+            mig = {}
+            settings["_config_migrations"] = mig
+        mig.setdefault("raw_retention_7_to_8", True)
 
     def _merge(self, default: dict, override: dict) -> dict:
         """

@@ -721,9 +721,18 @@ class DataStore:
             "loss_rate": loss_rate,
         }
 
+    # Seconds of slack for SLA P95 coverage: browser rolling-window start
+    # is computed client-side; the server evaluates cutoff slightly later.
+    _RAW_COVERS_TOLERANCE_S = 120
+
     def _raw_covers_window_start(self, start_ts) -> bool:
-        """True when every sample in [start_ts, now] should still be in pings_raw."""
-        return int(start_ts) >= self._raw_retention_cutoff()
+        """True when pings_raw should still cover the query window start.
+
+        A small tolerance absorbs client/server clock skew and request
+        latency without pretending deleted raw rows still exist (Bug99).
+        """
+        return (int(start_ts)
+                >= self._raw_retention_cutoff() - self._RAW_COVERS_TOLERANCE_S)
 
     def _global_lat_p95_sql(self, conn, target_id: str,
                             win_start: float, win_end: float) -> Optional[float]:
