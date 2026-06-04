@@ -6282,6 +6282,19 @@ class WebServer:
             pending = self._history_wipe_pending
             return [t for t in tids if t not in pending]
 
+    @staticmethod
+    def _empty_sla_stats() -> dict:
+        """Same defaults as get_sla_stats_batch() for targets with no data."""
+        return {
+            "uptime_pct": 100.0,
+            "lat_avg": None,
+            "lat_max": None,
+            "lat_p95": None,
+            "outage_count": 0,
+            "outage_minutes": 0,
+            "sample_n": 0,
+        }
+
     def on_target_history_wiped(self, tid: str) -> None:
         """Called from DataStore write thread after wipe_target commits."""
         with self._lock:
@@ -6931,13 +6944,15 @@ class WebServer:
             with self._lock:
                 tids = {tid: {"label": t.get("label",""), "ip": t.get("ip","")}
                         for tid, t in self._targets.items()}
-            # Batch fetch all targets at once: previously this did
-            # len(tids) serial DB hits (2 SQL each).  Now it's 2 SQL total.
-            batch = self._data_store.get_sla_stats_batch(
-                list(tids.keys()), start, end)
+            query_tids = self._tids_for_history_query(list(tids.keys()))
+            batch = self._data_store.get_sla_stats_batch(query_tids, start, end)
             result = {}
             for tid, meta in tids.items():
-                s = batch.get(tid) or self._data_store.get_sla_stats(tid, start, end)
+                if not self._history_data_available(tid):
+                    s = dict(self._empty_sla_stats())
+                else:
+                    s = batch.get(tid) or self._data_store.get_sla_stats(
+                        tid, start, end)
                 s["label"] = meta["label"]; s["ip"] = meta["ip"]
                 result[tid] = s
             return json.dumps(result), 200, {"Content-Type": "application/json"}
@@ -6977,7 +6992,7 @@ class WebServer:
             if not tid:
                 return "缺少 tid 参数", 400
             if not self._history_data_available(tid):
-                return json.dumps({"error": "该时间范围内无可导出数据"}), 404, \
+                return json.dumps({"error": "该节点历史正在清空，请稍后再试"}), 404, \
                        {"Content-Type": "application/json"}
             # Resolve label from the trusted server-side snapshot,
             # not from the URL query.  The previous code did
@@ -7138,6 +7153,8 @@ class WebServer:
             if not self._data_store:
                 return json.dumps([]), 200, {"Content-Type":"application/json"}
             tid   = request.args.get("tid","").strip()
+            if tid and not self._history_data_available(tid):
+                return json.dumps([]), 200, {"Content-Type":"application/json"}
             start = _qnum("start", int(time.time()) - 86400)
             end   = _qnum("end",   int(time.time()))
             dtype = request.args.get("type", "raw")
@@ -7170,17 +7187,15 @@ class WebServer:
             with self._lock:
                 tids = {tid: {"label": t.get("label",""), "ip": t.get("ip","")}
                         for tid, t in self._targets.items()}
-            # Use the batch API: get_sla_stats() looped per-target opens N
-            # DB connections / runs N hourly-aggregate queries and was
-            # already known-bad enough for the dashboard JSON API to
-            # switch (see /api/sla above).  Fall back to the per-target
-            # call only if a tid is missing from the batch result (e.g.
-            # added between snapshot and query).
-            stats = self._data_store.get_sla_stats_batch(
-                list(tids.keys()), start, end)
+            query_tids = self._tids_for_history_query(list(tids.keys()))
+            stats = self._data_store.get_sla_stats_batch(query_tids, start, end)
             rows = []
             for tid, meta in tids.items():
-                s = stats.get(tid) or self._data_store.get_sla_stats(tid, start, end)
+                if not self._history_data_available(tid):
+                    s = self._empty_sla_stats()
+                else:
+                    s = stats.get(tid) or self._data_store.get_sla_stats(
+                        tid, start, end)
                 # Sanitise label / ip BEFORE building the row dict --
                 # ws_xl.append below pulls cell values verbatim from
                 # this dict.  An admin-typed (or attacker-supplied)
@@ -7256,6 +7271,10 @@ class WebServer:
                 # behaviour the dashboard relies on for the global
                 # export button.
                 tids = list(valid_tids)
+            tids = self._tids_for_history_query(tids)
+            if not tids:
+                return (json.dumps({"error": "no valid tid"}), 400,
+                        {"Content-Type": "application/json"})
             start = _qnum("start", int(time.time()) - 86400)
             end   = _qnum("end",   int(time.time()))
             import tempfile, os
