@@ -2535,43 +2535,25 @@ class DataStore:
                 ev['incident_id'] = None
 
     def _rebuild_cum_stats_from_raw(self, conn) -> None:
-        """Rebuild cum_stats from all pings_raw using row_probe_success semantics.
+        """Rebuild cum_stats from pings_raw via SQL aggregate (Bug91/93).
 
         One-shot correction for databases polluted before Bug90 (failed RTT
-        counted in lat_avg/lat_n).  Only rows still in pings_raw retention
-        contribute; older history cannot be reconstructed.
+        counted in lat_avg/lat_n).  Uses GROUP BY in SQLite so v11 migration
+        does not fetchall() millions of raw rows into Python on upgrade.
         """
         conn.execute("DELETE FROM cum_stats")
-        rows = conn.execute(
-            "SELECT target_id, latency_ms, status, failure_reason, probe_success "
-            "FROM pings_raw ORDER BY target_id, ts ASC, id ASC"
-        ).fetchall()
-        if not rows:
-            return
-        groups: dict[str, list] = defaultdict(list)
-        for tid, lat, st, fr, ps in rows:
-            groups[tid].append({
-                "latency_ms": lat, "status": st or "green",
-                "failure_reason": fr, "probe_success": ps,
-            })
         now = int(time.time())
-        for tid, pings in groups.items():
-            total, success, lat_avg, lat_n = 0, 0, 0.0, 0
-            for p in pings:
-                total += 1
-                probe_ok = self.row_probe_success(
-                    p.get("latency_ms"), p.get("status", "green"),
-                    p.get("failure_reason"), p.get("probe_success"))
-                if probe_ok:
-                    success += 1
-                if probe_ok and p.get("latency_ms") is not None:
-                    lat_n   += 1
-                    lat_avg += (p["latency_ms"] - lat_avg) / lat_n
-            conn.execute(
-                "INSERT INTO cum_stats "
-                "(target_id,total,success,lat_avg,lat_n,updated_at) "
-                "VALUES(?,?,?,?,?,?)",
-                (tid, total, success, lat_avg, lat_n, now))
+        conn.execute(
+            f"INSERT INTO cum_stats "
+            f"(target_id,total,success,lat_avg,lat_n,updated_at) "
+            f"SELECT target_id, "
+            f"COUNT(*), "
+            f"SUM(CASE WHEN {_PROBE_OK_SQL} = 1 THEN 1 ELSE 0 END), "
+            f"AVG(CASE WHEN {_PROBE_LAT_OK_SQL} THEN latency_ms END), "
+            f"SUM(CASE WHEN {_PROBE_LAT_OK_SQL} THEN 1 ELSE 0 END), "
+            f"? "
+            f"FROM pings_raw GROUP BY target_id",
+            (now,))
 
     def _update_cum_stats(self, conn, ping_buf: list):
         """用 CMA 公式更新累计统计——与 WebServer 端保持一致的数值稳定性。"""
