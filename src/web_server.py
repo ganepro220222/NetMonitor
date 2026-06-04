@@ -5603,6 +5603,10 @@ function connect(){
     if(msg.type==='stats_reset'){
       purgeDonutTarget(msg.tid);
       resetWaveformUi();
+      const _statsTabRs=document.getElementById('tab-stats');
+      if(_statsTabRs&&_statsTabRs.style.display!=='none'){
+        buildBarCharts();
+      }
       document.getElementById('upd').textContent='统计已重置';return;}
     if(msg.type==='history_wiped'){
       purgeDonutTarget(msg.tid);
@@ -6270,9 +6274,20 @@ class WebServer:
         self._broadcaster.push(json.dumps({"type": "remove", "tid": tid}))
 
     def begin_target_history_wipe(self, tid: str) -> None:
-        """Mark a target as mid-wipe so history APIs return empty until done."""
+        """Mark a target as mid-wipe so history APIs return empty until done.
+
+        Also clears server _stats and broadcasts stats_reset so the browser
+        drops frontend stats[tid] immediately — before the gray meta-update
+        that follows from MainWindow.  Without this, accumStat() no-ops on
+        is_probe_result=False and Donut/Bar charts keep showing old totals
+        under the new label/IP until history_wiped arrives.
+        """
         with self._lock:
             self._history_wipe_pending.add(tid)
+            self._stats.pop(tid, None)
+        if self._running:
+            self._broadcaster.push(
+                json.dumps({"type": "stats_reset", "tid": tid}))
 
     def _history_data_available(self, tid: str) -> bool:
         if not tid:
