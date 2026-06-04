@@ -5887,8 +5887,11 @@ class WebServer:
         #                "latency_sum": float,# rolling sum for avg
         #                "latency_n":   int}} # samples in sum
         self._lock         = threading.Lock()
-        # target_ids whose DB history wipe is queued/in-flight — Web APIs
-        # return empty history until on_target_history_wiped() fires.
+        # target_ids whose DB history wipe is queued/in-flight — every
+        # history-read API (/api/stats, /api/sla, /api/waveform*, /api/history,
+        # /api/export*, /api/traceroute/history, /api/*_diag/history) must
+        # use _history_data_available() or _tids_for_history_query() before
+        # touching DataStore; returns empty until on_target_history_wiped().
         self._history_wipe_pending: set[str] = set()
         self._broadcaster  = _SSEBroadcaster()
         self._tracer_cache: dict[str, dict] = {}
@@ -6281,6 +6284,15 @@ class WebServer:
         with self._lock:
             pending = self._history_wipe_pending
             return [t for t in tids if t not in pending]
+
+    def _filter_rows_excluding_pending_wipe(self, rows: list) -> list:
+        """Drop diag/traceroute history rows for targets mid async wipe."""
+        with self._lock:
+            pending = self._history_wipe_pending
+            if not pending:
+                return rows
+        return [r for r in rows
+                if r.get("target_id") not in pending]
 
     @staticmethod
     def _empty_sla_stats() -> dict:
@@ -7361,6 +7373,8 @@ class WebServer:
             limit = max(1, min(500, limit))
             if not tid or not self._data_store:
                 return json.dumps([]), 200, {"Content-Type": "application/json"}
+            if not self._history_data_available(tid):
+                return json.dumps([]), 200, {"Content-Type": "application/json"}
             try:
                 rows = self._data_store.get_traceroute_history(tid, limit)
             except Exception:
@@ -7654,11 +7668,15 @@ class WebServer:
             if not self._data_store:
                 return (json.dumps([]),
                         200, {"Content-Type": "application/json"})
+            if tid and not self._history_data_available(tid):
+                return (json.dumps([]),
+                        200, {"Content-Type": "application/json"})
             try:
                 rows = self._data_store.get_diag_history(
                     target_id=tid or None, limit=limit)
             except Exception:
                 rows = []
+            rows = self._filter_rows_excluding_pending_wipe(rows)
             return (json.dumps(rows, ensure_ascii=False),
                     200, {"Content-Type": "application/json"})
 
@@ -7948,11 +7966,15 @@ class WebServer:
             if not self._data_store:
                 return (json.dumps([]),
                         200, {"Content-Type": "application/json"})
+            if tid and not self._history_data_available(tid):
+                return (json.dumps([]),
+                        200, {"Content-Type": "application/json"})
             try:
                 rows = self._data_store.get_dns_diag_history(
                     target_id=tid or None, limit=limit)
             except Exception:
                 rows = []
+            rows = self._filter_rows_excluding_pending_wipe(rows)
             return (json.dumps(rows, ensure_ascii=False),
                     200, {"Content-Type": "application/json"})
 
