@@ -754,6 +754,12 @@ class MainWindow(ctk.CTk):
         self._cards[tid] = card
         card._dns_domain = target.get("dns_domain", "")  # for matches_search
         self._current_statuses[tid] = "gray"
+        # Keep _status_counts a faithful histogram of _current_statuses: a
+        # new gray card must grow the gray bucket, matching the +1/-1 the
+        # pause / edit / delete paths already do.  Previously omitted -- it
+        # stayed harmless only because the summary never shows gray and
+        # max(0,...) absorbs the deficit on the first gray→X transition.
+        self._status_counts["gray"] = self._status_counts.get("gray", 0) + 1
         # Seed alert-event baseline so the first probe can record gray→red
         # (or gray→orange) when the node has no _last_statuses entry yet.
         self._last_statuses.setdefault(tid, "gray")
@@ -1350,6 +1356,11 @@ class MainWindow(ctk.CTk):
             new_hops = changed.pop("tracert_max_hops")
             self.config.set_setting("tracert_max_hops", new_hops)
             self.web_server.set_traceroute_max_hops(new_hops)
+
+        # autostart lives in the Windows registry (written in
+        # SettingsDialog._save); drop it so it never leaks into config.json
+        # / engine settings the way every other UI-only key above is popped.
+        changed.pop("autostart", None)
 
         engine_updates = {}
         retention_keys = {"db_raw_retention_days", "db_hourly_retention_days",
