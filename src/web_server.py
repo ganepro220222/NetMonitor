@@ -1508,6 +1508,24 @@ function _animateLatUpdate(tid){
   setTimeout(()=>el.classList.remove('updated'),300);
 }
 
+function _syncWaveformChartTheme(dark){
+  if(!_waveChart) return;
+  const gridC = dark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+  const textC = dark ? '#9ca3af' : '#6b7280';
+  const sx = _waveChart.options.scales && _waveChart.options.scales.x;
+  const sy = _waveChart.options.scales && _waveChart.options.scales.y;
+  if(sx){
+    if(sx.ticks) sx.ticks.color = textC;
+    if(sx.grid)  sx.grid.color  = gridC;
+  }
+  if(sy){
+    if(sy.ticks) sy.ticks.color = textC;
+    if(sy.grid)  sy.grid.color  = gridC;
+    if(sy.title) sy.title.color = textC;
+  }
+  try{ _waveChart.update('none'); }catch(e){}
+}
+
 function applyTheme(t){document.getElementById('body').className='theme-'+t;
   const _icons={dark:'🌙',light:'☀️',system:'💻'};
   const _tog=document.getElementById('theme-toggle');
@@ -1547,6 +1565,7 @@ function applyTheme(t){document.getElementById('body').className='theme-'+t;
     }catch{}
   });
   Object.values(barCharts).forEach(c=>{try{c.update();}catch{}});
+  _syncWaveformChartTheme(dark);
   // ── Calendar icon color-scheme (3-layer defence) ──────────────────
   // Layer 1: html root color-scheme → browser renders ALL native controls
   //          (calendar icon, scrollbars, etc.) in the right mode.
