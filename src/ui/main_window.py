@@ -733,6 +733,9 @@ class MainWindow(ctk.CTk):
         self._cards[tid] = card
         card._dns_domain = target.get("dns_domain", "")  # for matches_search
         self._current_statuses[tid] = "gray"
+        # Seed alert-event baseline so the first probe can record gray→red
+        # (or gray→orange) when the node has no _last_statuses entry yet.
+        self._last_statuses.setdefault(tid, "gray")
         self._target_labels[tid]       = target["label"]
         self._target_ips[tid]          = target["ip"]
         self._target_probe_ports[tid]  = target.get("tcp_probe_ports", "")
