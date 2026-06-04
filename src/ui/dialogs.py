@@ -121,7 +121,8 @@ class _BaseDialog(ctk.CTkToplevel):
 
         self._type_var = ctk.StringVar(value=PING_TYPE_LABELS.get(initial_type, "ICMP Ping"))
         ctk.CTkOptionMenu(type_row, values=PING_TYPES, variable=self._type_var,
-                          font=F(12), dropdown_font=F(12), width=160, height=30,
+                          font=F(12), dropdown_font=F(12), width=130, height=30,
+                          anchor="center",
                           command=self._on_type_changed).pack(side="left")
         self._type_hint = ctk.CTkLabel(type_row, text="", font=F(10), text_color="gray50")
         self._type_hint.pack(side="left", padx=(10, 0))
