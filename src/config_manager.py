@@ -115,7 +115,7 @@ DEFAULT_CONFIG = {
 
         # 数据库持久化配置
         "db_path": "data/monitor.db",
-        "db_raw_retention_days": 7,
+        "db_raw_retention_days": 8,
         "db_hourly_retention_days": 90,
         "db_alert_retention_days": 365,
         "db_traceroute_retention_days": 30,

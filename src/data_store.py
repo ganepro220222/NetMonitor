@@ -145,7 +145,7 @@ class DataStore:
 
     def __init__(self,
                  db_path: str = "data/monitor.db",
-                 raw_retention_days: int = 7,
+                 raw_retention_days: int = 8,
                  hourly_retention_days: int = 90,
                  alert_retention_days: int = 365,
                  traceroute_retention_days: int = 30,

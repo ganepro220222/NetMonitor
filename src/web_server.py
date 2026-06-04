@@ -1294,6 +1294,10 @@ body.theme-dark{
           <option value="">— 选择节点 —</option>
         </select>
         <span id="waveform-resolution" style="font-size:10px;color:var(--dim)"></span>
+        <button id="waveform-scale-btn" onclick="toggleWaveformScale()"
+                title="比例刻度用于放大低延时区间，尖峰仍保留"
+                style="padding:3px 10px;border-radius:5px;border:1px solid var(--border2);cursor:pointer;
+                       font-size:11px;background:var(--surface2);color:var(--text)">Y轴：线性</button>
         <button onclick="loadWaveform()"
                 style="padding:3px 10px;border-radius:5px;border:none;cursor:pointer;
                        font-size:11px;background:var(--blue);color:#fff">🔄 刷新</button>
@@ -1369,9 +1373,11 @@ body.theme-dark{
     <button class="tbtn" id="slab-30d" onclick="setSLAPeriod(30)">近 30 天</button>
     <button class="tbtn" id="slab-mo"  onclick="setSLACurrentMonth()">本月</button>
     <span style="color:var(--dim);font-size:12px;margin-left:4px">自定义：</span>
-    <input type="date" id="sla-s" style="font-size:12px;padding:3px 6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px">
+    <input type="date" id="sla-s" onchange="_slaRollingDays=null"
+           style="font-size:12px;padding:3px 6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px">
     <span style="color:var(--dim)">—</span>
-    <input type="date" id="sla-e" style="font-size:12px;padding:3px 6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px">
+    <input type="date" id="sla-e" onchange="_slaRollingDays=null"
+           style="font-size:12px;padding:3px 6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px">
     <button onclick="loadSLA()"
             style="padding:7px 16px;border:none;border-radius:6px;cursor:pointer;
                    font-size:12px;font-weight:600;background:var(--blue);color:#fff">
@@ -1391,8 +1397,9 @@ body.theme-dark{
        font-size:11px;color:var(--dim);line-height:1.8">
     📌 <b style="color:var(--text)">数据说明：</b>
     <b>连通率 / 故障次数 / 累计中断</b> — 基于实时告警事件，精确到秒；
-    &nbsp;<b>均延时 / P95 延时 / 最大延时</b> — 基于每小时聚合数据，
-    当前不完整小时的数据最长滞后 <b>1 小时</b>才会计入。
+    &nbsp;<b>均延时 / 最大延时</b> — 基于每小时聚合（不完整小时最长滞后 <b>1 小时</b>）；
+    &nbsp;<b>P95 延时</b> — 在查询起点仍位于原始探测明细保留期内时，从明细精确计算；
+    超出保留期显示 <b>N/A</b>（非“未跑够时间”）。「近 7/30 天」按钮为滚动时间窗口。
   </div>
   <div style="overflow-x:auto">
   </div>
@@ -4788,6 +4795,21 @@ async function exportWaveform(){
 // ── Waveform chart ─────────────────────────────────────────────────────
 let _waveChart = null;
 let _waveReqId = 0;   // incremented on each loadWaveform call; stale responses discard themselves
+let _waveYScale = (localStorage.getItem('wave_y_scale') === 'log') ? 'log' : 'linear';
+function updateWaveformScaleButton(){
+  const btn=document.getElementById('waveform-scale-btn');
+  if(!btn) return;
+  btn.textContent=_waveYScale==='log' ? 'Y轴：比例' : 'Y轴：线性';
+  btn.title=_waveYScale==='log'
+    ? '切换为线性刻度'
+    : '比例刻度用于放大低延时区间，尖峰仍保留';
+}
+function toggleWaveformScale(){
+  _waveYScale=_waveYScale==='linear' ? 'log' : 'linear';
+  localStorage.setItem('wave_y_scale', _waveYScale);
+  updateWaveformScaleButton();
+  loadWaveform();
+}
 
 // Chart.js plugin: paint outage bands behind the data and transition markers above it.
 // Reads from chart.$alertOverlay (set by _renderWaveform when alert data arrives).
@@ -5061,8 +5083,16 @@ function _renderWaveform(data, alerts){
     return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
   });
   const rttData      = pts.map(p=>p.ok ? p.rtt_ms : null);
+  const useLogY      = _waveYScale === 'log';
+  const positiveVals = pts
+    .map(p => (p.ok && p.rtt_ms > 0) ? p.rtt_ms : null)
+    .filter(v => v != null);
+  const yFloor = positiveVals.length
+    ? Math.max(0.1, Math.min(...positiveVals) / 2)
+    : 0.1;
   // all_fail: red X markers; partial_fail: orange diamond markers
-  const allFailData  = pts.map(p=>(p.bucket_state==='all_fail') ? 0 : null);
+  const allFailY     = useLogY ? yFloor : 0;
+  const allFailData  = pts.map(p=>(p.bucket_state==='all_fail') ? allFailY : null);
   const partialData  = pts.map(p=>(p.bucket_state==='partial_fail' && p.rtt_ms!=null)
                                    ? p.rtt_ms : null);
 
@@ -5131,9 +5161,13 @@ function _renderWaveform(data, alerts){
       scales:{
         x:{ ticks:{color:textC,maxTicksLimit:8,maxRotation:0},
             grid:{color:gridC} },
-        y:{ min:0, ticks:{color:textC},
-            grid:{color:gridC},
-            title:{display:true,text:'ms',color:textC,font:{size:11}} }
+        y: useLogY
+          ? { type:'logarithmic', min:yFloor, ticks:{color:textC},
+              grid:{color:gridC},
+              title:{display:true,text:'ms（比例刻度）',color:textC,font:{size:11}} }
+          : { min:0, ticks:{color:textC},
+              grid:{color:gridC},
+              title:{display:true,text:'ms',color:textC,font:{size:11}} }
       }
     }
   });
@@ -5499,6 +5533,7 @@ function saveCardSel(){
 // SSE
 let es=null,retryTimer=null;
 function connect(){
+  updateWaveformScaleButton();
   if(es){es.close();es=null;}
   es=new EventSource('/events');
   es.onopen=()=>{const p=document.getElementById('conn-pill');p.textContent='● 已连接';p.className='';
@@ -5606,44 +5641,61 @@ connect();
 
 // SLA Report
 let _slaData=[],_slaSortCol=1,_slaSortAsc=true;
+let _slaRollingDays=null;  // 7/30: rolling window; null: calendar dates in inputs
+function _slaFmtDate(d){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function getSLATimeRange(){
+  const sv=document.getElementById("sla-s").value;
+  const ev=document.getElementById("sla-e").value;
+  if(!sv||!ev) return null;
+  if(_slaRollingDays!=null){
+    const end=Math.floor(Date.now()/1000);
+    const start=end-_slaRollingDays*86400;
+    return {start, end, label:`滚动近 ${_slaRollingDays} 天`};
+  }
+  return {
+    start: new Date(sv+" 00:00:00").getTime()/1000,
+    end:   new Date(ev+" 23:59:59").getTime()/1000,
+    label: `${sv} — ${ev}`,
+  };
+}
 function initSLATab(){
-  const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   const now=new Date();
-  document.getElementById("sla-e").value=fmt(now);
-  const s=new Date(+now-7*86400000);
-  document.getElementById("sla-s").value=fmt(s);
+  document.getElementById("sla-e").value=_slaFmtDate(now);
+  document.getElementById("sla-s").value=_slaFmtDate(new Date(+now-7*86400000));
+  _slaRollingDays=7;
   loadSLA();
 }
 function setSLAPeriod(days){
   document.querySelectorAll("[id^=slab-]").forEach(b=>b.classList.remove("active"));
   if(days===7)document.getElementById("slab-7d").classList.add("active");
   else if(days===30)document.getElementById("slab-30d").classList.add("active");
-  const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   const now=new Date();
-  document.getElementById("sla-s").value=fmt(new Date(+now-days*86400000));
-  document.getElementById("sla-e").value=fmt(now);
+  _slaRollingDays=days;
+  document.getElementById("sla-s").value=_slaFmtDate(new Date(+now-days*86400000));
+  document.getElementById("sla-e").value=_slaFmtDate(now);
   loadSLA();
 }
 function setSLACurrentMonth(){
   document.querySelectorAll("[id^=slab-]").forEach(b=>b.classList.remove("active"));
   document.getElementById("slab-mo").classList.add("active");
   const now=new Date(),y=now.getFullYear(),m=now.getMonth();
-  const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  document.getElementById("sla-s").value=fmt(new Date(y,m,1));
-  document.getElementById("sla-e").value=fmt(now);
+  _slaRollingDays=null;
+  document.getElementById("sla-s").value=_slaFmtDate(new Date(y,m,1));
+  document.getElementById("sla-e").value=_slaFmtDate(now);
   loadSLA();
 }
 async function loadSLA(){
-  const sv=document.getElementById("sla-s").value,ev=document.getElementById("sla-e").value;
-  if(!sv||!ev)return;
-  const start=new Date(sv+" 00:00:00").getTime()/1000;
-  const end  =new Date(ev+" 23:59:59").getTime()/1000;
+  const range=getSLATimeRange();
+  if(!range) return;
+  const {start, end, label}=range;
   document.getElementById("sla-hint").textContent="计算中...";
   document.getElementById("sla-tbody").innerHTML='<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--dim)">⏳ 计算中...</td></tr>';
   try{
     const data=await(await fetch(`/api/sla?start=${start}&end=${end}`)).json();
     _slaData=Object.values(data);
-    document.getElementById("sla-hint").textContent=`${sv} — ${ev}，共 ${_slaData.length} 个节点`;
+    document.getElementById("sla-hint").textContent=`${label}，共 ${_slaData.length} 个节点`;
     renderSLATable();
   }catch(e){
     document.getElementById("sla-tbody").innerHTML='<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--red)">加载失败</td></tr>';
@@ -5660,6 +5712,13 @@ function renderSLATable(){
     if(av==null)return 1;if(bv==null)return -1;
     return _slaSortAsc?(av>bv?1:-1):(av<bv?1:-1);});
   const ms=v=>v==null?"--":`${v} ms`;
+  const msP95=(v,r)=>{
+    if(v!=null) return `${v} ms`;
+    if((r.sample_n||0)>0 && r.p95_from_raw===false)
+      return '<span style="color:var(--orange);font-size:11px" '
+        +'title="查询起点超出原始探测明细保留期，P95 不可精确计算（非未跑够时间）">N/A</span>';
+    return '--';
+  };
   const pct=v=>{
     if(v==null)return'<span style="color:var(--dim)">--</span>';
     const c=v>=99.9?"var(--green)":v>=99?"var(--orange)":"var(--red)";
@@ -5677,7 +5736,7 @@ function renderSLATable(){
       <td style="padding:9px 14px"><b style="color:var(--text)">${esc(r.label)}</b><br><span style="font-size:11px;color:var(--dim)">${esc(r.ip)}</span></td>
       <td style="text-align:center;padding:9px 14px">${pct(r.uptime_pct)}</td>
       <td style="text-align:right;padding:9px 14px;color:var(--text)">${ms(r.lat_avg)}</td>
-      <td style="text-align:right;padding:9px 14px;color:var(--text)">${ms(r.lat_p95)}</td>
+      <td style="text-align:right;padding:9px 14px;color:var(--text)">${msP95(r.lat_p95,r)}</td>
       <td style="text-align:right;padding:9px 14px;color:var(--dim)">${ms(r.lat_max)}</td>
       <td style="text-align:center;padding:9px 14px;color:${r.outage_count?"var(--red)":"var(--green)"};">${r.outage_count} 次</td>
       <td style="text-align:right;padding:9px 14px">${fmtMin(r.outage_minutes)}</td>
@@ -5686,11 +5745,10 @@ function renderSLATable(){
   document.getElementById("sla-tbody").innerHTML=tbody;
 }
 function exportSLAExcel(){
-  const sv=document.getElementById("sla-s").value,ev=document.getElementById("sla-e").value;
+  const range=getSLATimeRange();
   if(!_slaData.length){alert("请先查询 SLA 数据");return;}
-  const start=new Date(sv+" 00:00:00").getTime()/1000;
-  const end  =new Date(ev+" 23:59:59").getTime()/1000;
-  window.open(`/api/export/sla?start=${start}&end=${end}`);
+  if(!range) return;
+  window.open(`/api/export/sla?start=${range.start}&end=${range.end}`);
 }
 </script>
 </body>
@@ -6828,10 +6886,12 @@ class WebServer:
             # len(tids) serial DB hits (2 SQL each).  Now it's 2 SQL total.
             batch = self._data_store.get_sla_stats_batch(
                 list(tids.keys()), start, end)
+            p95_from_raw = self._data_store._raw_covers_window_start(start)
             result = {}
             for tid, meta in tids.items():
                 s = batch.get(tid) or self._data_store.get_sla_stats(tid, start, end)
                 s["label"] = meta["label"]; s["ip"] = meta["ip"]
+                s["p95_from_raw"] = p95_from_raw
                 result[tid] = s
             return json.dumps(result), 200, {"Content-Type": "application/json"}
 
