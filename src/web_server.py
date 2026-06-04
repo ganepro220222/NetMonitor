@@ -4660,6 +4660,7 @@ function replayDnsHistory(idx){
 // reconnecting always reset the counters to 0.
 function accumStat(t){
   if(t.status==='paused')return;
+  if(t.is_probe_result===false)return;
   if(!stats[t.tid])stats[t.tid]={total:0,success:0,latency_avg:0,latency_n:0,
                                   latencies:[],label:t.label,ip:t.ip};
   const s=stats[t.tid];s.total++;s.label=t.label;s.ip=t.ip;
@@ -6008,7 +6009,9 @@ class WebServer:
         """Mark a target as paused — web card shows ⏸, no alerts, not counted in stats."""
         with self._lock:
             self._paused.add(tid)
-            self._targets[tid] = {**self._targets.get(tid, {}), "status": "paused"}
+            self._targets[tid] = {**self._targets.get(tid, {}),
+                                  "status": "paused",
+                                  "is_probe_result": False}
             # Snapshot inside the lock so the push payload can't race against
             # a concurrent remove_target / update_target that mutates _targets.
             to_push = dict(self._targets[tid])
@@ -6034,6 +6037,7 @@ class WebServer:
             self._paused.discard(tid)
             if tid in self._targets:
                 self._targets[tid]["status"] = "gray"
+                self._targets[tid]["is_probe_result"] = False
                 to_push = dict(self._targets[tid])   # snapshot inside lock
             else:
                 to_push = None
@@ -6089,7 +6093,8 @@ class WebServer:
                 # None = node not configured for keyword check,
                 # True/False = match result.
                 "keyword_ok":       keyword_ok,
-                "probe_success":    probe_success}
+                "probe_success":    probe_success,
+                "is_probe_result":  is_probe_result}
         # Single atomic lock section — paused check, write, history, and
         # building all_t all happen under one lock so there is no window
         # between the paused check and the _targets write.

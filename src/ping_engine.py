@@ -1110,7 +1110,14 @@ class HTTPMonitor(TargetMonitor):
             r = PingResult(success=False, latency_ms=None, failure_reason="invalid_url")
             r._redirect_to = r._body = r._content_type = None
             return r
-        port    = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            explicit_port = parsed.port
+            port = explicit_port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            r = PingResult(success=False, latency_ms=None,
+                            failure_reason="invalid_url")
+            r._redirect_to = r._body = r._content_type = None
+            return r
         use_tls = parsed.scheme == "https"
         path    = parsed.path or "/"
         if parsed.query:
@@ -1243,8 +1250,8 @@ class HTTPMonitor(TargetMonitor):
             # because parsed.hostname strips them).
             default_port = 443 if parsed.scheme == "https" else 80
             host_in_header = f"[{host}]" if ":" in host else host
-            if parsed.port and parsed.port != default_port:
-                host_header = f"{host_in_header}:{parsed.port}"
+            if explicit_port and explicit_port != default_port:
+                host_header = f"{host_in_header}:{explicit_port}"
             else:
                 host_header = host_in_header
             req = (
