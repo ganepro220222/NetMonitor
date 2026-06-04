@@ -1112,8 +1112,16 @@ class HTTPMonitor(TargetMonitor):
             return r
         try:
             explicit_port = parsed.port
-            port = explicit_port or (443 if parsed.scheme == "https" else 80)
         except ValueError:
+            r = PingResult(success=False, latency_ms=None,
+                            failure_reason="invalid_url")
+            r._redirect_to = r._body = r._content_type = None
+            return r
+        if explicit_port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        elif 1 <= explicit_port <= 65535:
+            port = explicit_port
+        else:
             r = PingResult(success=False, latency_ms=None,
                             failure_reason="invalid_url")
             r._redirect_to = r._body = r._content_type = None
