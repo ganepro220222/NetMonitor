@@ -1467,6 +1467,7 @@ class MainWindow(ctk.CTk):
         self, target_id: str, r: dict, *,
         ip_changed: bool, type_changed: bool,
         dns_domain_changed: bool,
+        wipe_intent: bool = False,
     ) -> None:
         """Keep ICMP/DNS diag windows in sync after _on_edit().
 
@@ -1474,6 +1475,11 @@ class MainWindow(ctk.CTk):
         stale windows, but editing without re-opening left self._host /
         domain entry frozen — the next diag run probed the old target while
         persisting under the current target_id.
+
+        wipe_intent: operator chose to reuse this target_id as a new
+        physical object and clear history — close the large waveform window
+        so stale _pts_cache / matplotlib figure cannot be shown or exported
+        under the new label/IP (update_target alone only rewrites the header).
         """
         identity_changed = ip_changed or type_changed or dns_domain_changed
         if identity_changed:
@@ -1495,13 +1501,16 @@ class MainWindow(ctk.CTk):
                         dns.update_target(r["label"], prefill)
                 except Exception:
                     pass
-        wf = self._waveform_windows.get(target_id)
-        if wf is not None:
-            try:
-                if wf.winfo_exists():
-                    wf.update_target(r["label"], r["ip"])
-            except Exception:
-                pass
+        if wipe_intent:
+            self._close_registered_window(self._waveform_windows, target_id)
+        else:
+            wf = self._waveform_windows.get(target_id)
+            if wf is not None:
+                try:
+                    if wf.winfo_exists():
+                        wf.update_target(r["label"], r["ip"])
+                except Exception:
+                    pass
 
     def _open_icmp_diag(self, target_id: str):
         """Open (or focus) the ICMP advanced diagnostics window."""
@@ -2064,6 +2073,7 @@ class MainWindow(ctk.CTk):
             ip_changed=ip_changed,
             type_changed=type_changed,
             dns_domain_changed=dns_domain_changed,
+            wipe_intent=wipe_intent,
         )
 
     def _on_delete(self, target_id):
