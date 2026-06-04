@@ -1752,27 +1752,34 @@ class MainWindow(ctk.CTk):
         combined = dict(r.get("thresholds") or {})
         combined.update(new_extra)
 
-        # Pre-bump the monitor's _settings_version BEFORE anything
-        # observable about the new identity becomes visible.  The
-        # previous round of this fix only fired on `ip_changed or
-        # type_changed`, so a pure same-type semantic edit (TCP port,
-        # DNS domain, HTTP URL with same scheme, http_success_codes,
-        # http_timeout, ...) skipped the pre-bump entirely -- an
-        # in-flight probe under the OLD settings could land during the
-        # gap, pass _run_loop's settings_version check, and be
-        # attributed to the NEW identity in DataStore via the freshly-
-        # rewritten _target_* metadata caches further down.  Fire
-        # the bump on every same-type edit whose probe-semantic keys
-        # actually changed; type-change skips because remove+add
-        # rebuilds the monitor with a fresh version=0.
+        _EDIT_CLEAR_KEYS = (
+            "tcp_port", "tcp_probe_ports",
+            "http_url", "http_success_codes",
+            "http_timeout", "http_verify_ssl",
+            "http_follow_redirects", "http_expected_status",
+            "http_keyword", "http_keyword_mode",
+            "dns_domain", "dns_expected",
+            "ipv6_only", "timeout",
+            "consecutive_loss_orange", "consecutive_loss_red",
+            "consecutive_lat_orange", "latency_warn_ms",
+            "ping_interval",
+        )
+
+        # Same-type edits: swap monitor.settings + bump _settings_version
+        # atomically under _commit_lock BEFORE UI metadata caches are
+        # rewritten.  Bug95: a version-only pre-bump
+        # (invalidate_target_settings) left probes able to capture
+        # (new_version, old_settings) and commit stale results.
+        # Type-change skips — remove+add rebuilds the monitor.
         if not type_changed:
+            self.engine.update_target_thresholds(
+                target_id, combined, clear_keys=_EDIT_CLEAR_KEYS)
             from src.ping_engine import TargetMonitor as _TM
             _SEM = _TM.PROBE_SEMANTIC_KEYS
             _MISSING = object()
             old_view = {k: target.get(k, _MISSING) for k in _SEM}
             new_view = {k: combined.get(k, _MISSING) for k in _SEM}
             if old_view != new_view:
-                self.engine.invalidate_target_settings(target_id)
                 # Reseed _last_statuses from the LAST PERSISTED ping
                 # status, NOT from an in-memory constant.  The previous
                 # round set it to "gray", but `gray -> green` is not
@@ -1789,12 +1796,7 @@ class MainWindow(ctk.CTk):
                 # Falls back to leaving the in-memory value untouched
                 # when the DataStore isn't wired or has no persisted
                 # ping yet -- a never-probed target has no SLA
-                # baseline to preserve.  Residual race: a stale
-                # callback whose record_ping + record_alert flushed
-                # to DB BEFORE invalidate_target_settings ran can
-                # still poison the seed, but the commit_lock makes
-                # that window vanishingly narrow and the writer-side
-                # captured_generation guard catches the common case.
+                # baseline to preserve.
                 _lst = self.__dict__.get("_last_statuses", {})
                 _ds  = self.__dict__.get("data_store")
                 if _ds is not None and hasattr(_ds, "get_last_persisted_status"):
@@ -1912,23 +1914,12 @@ class MainWindow(ctk.CTk):
                     ping_type=r.get("ping_type", "icmp"),
                     is_probe_result=False)   # ip/type changed; not a probe
 
-        # Hoist UI metadata caches BEFORE any engine reconfiguration
-        # so the new identity is visible the moment a new probe lands.
-        # _on_state_update (which runs on the ping thread) looks up
-        # label / ip / ping_type / probe_ports / dns_domain from these
-        # O(1) caches to build the DataStore record_ping payload --
-        # NOT from the monitor's own attributes.  Pre-2025 these
-        # writes happened AFTER engine.add_target() in the type-
-        # change branch (which immediately monitor.start()s the new
-        # thread), so the new-type monitor's first probe could
-        # complete and be attributed to the OLD label / ip / type in
-        # DataStore.  Same race exists in the same-type branch the
-        # instant update_target_thresholds() returns -- if a probe is
-        # already mid-flight on the old settings the engine guards
-        # (settings_version / ip_version) discard it, but a probe
-        # that lands strictly after the engine swap still uses these
-        # caches for its DataStore identity columns, so they must be
-        # current first.
+        # Hoist UI metadata caches before type-change add_target so a
+        # new-type monitor's first probe uses the new identity columns.
+        # Same-type settings were already swapped above (before this
+        # block) so probes never observe new _settings_version with old
+        # monitor.settings.  _on_state_update reads label/ip/type from
+        # these caches for DataStore rows.
         self._target_labels[target_id]       = r["label"]
         self._target_ips[target_id]           = r["ip"]
         self._target_probe_ports[target_id]   = r.get("tcp_probe_ports", "")
@@ -1961,37 +1952,7 @@ class MainWindow(ctk.CTk):
                                    ping_type=new_type,
                                    custom_settings=combined or None,
                                    start_paused=was_paused)
-        else:
-            # Call update_target_thresholds even when `combined` is empty:
-            # the empty case means "user cleared every per-target override
-            # in the dialog" and we still need to push that intent to the
-            # live monitor so it drops stale settings.  clear_keys covers
-            # every field the edit dialog has authoritative control over
-            # (the same set ConfigManager.EDIT_MANAGED_KEYS covers on disk,
-            # plus the threshold keys the dialog manages).  Anything not
-            # in clear_keys (e.g. ping_interval injected by the engine,
-            # window_size, ipv6_only set elsewhere) is left untouched.
-            self.engine.update_target_thresholds(
-                target_id, combined,
-                clear_keys=(
-                    # extras synced by the edit dialog
-                    "tcp_port", "tcp_probe_ports",
-                    "http_url", "http_success_codes",
-                    "http_timeout", "http_verify_ssl",
-                    "http_follow_redirects", "http_expected_status",
-                    "http_keyword", "http_keyword_mode",
-                    "dns_domain", "dns_expected",
-                    "ipv6_only", "timeout",
-                    # thresholds the dialog form has fields for
-                    "consecutive_loss_orange", "consecutive_loss_red",
-                    "consecutive_lat_orange", "latency_warn_ms",
-                    "ping_interval",
-                ),
-            )
-
-        # (UI metadata caches are now updated BEFORE the engine
-        # reconfiguration above -- see the comment block there for the
-        # race-window rationale.)
+        # same-type: update_target_thresholds already applied above
         # Only propagate the IP change to the engine when it actually
         # moved.  Calling update_target_ip on a label-only edit used
         # to silently reset the monitor's recovery debounce counter

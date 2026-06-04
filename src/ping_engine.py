@@ -1989,38 +1989,16 @@ class PingEngine:
             pass
 
     def invalidate_target_settings(self, target_id) -> None:
-        """Pre-emptively bump the monitor's _settings_version (and
-        the DataStore-side target generation, when wired).
+        """Bump _settings_version and DataStore generation without
+        swapping monitor.settings.
 
-        Counterpart to update_target_ip's pre-emptive bump.  Called
-        from MainWindow._on_edit BEFORE the UI metadata caches are
-        rewritten so a probe that started under the OLD config and
-        is still in-flight gets dropped by _run_loop's
-        settings_version re-check on return -- even though the
-        actual settings replacement (via update_target_thresholds)
-        happens several function calls later.
-
-        Without this hook there's a real window between "UI caches
-        now reflect the new identity" and "monitor.settings carry
-        the new config".  An old-config probe completing in that
-        window would pass the version check (no bump yet) and be
-        attributed to the new identity in DataStore.  Bumping here
-        invalidates it; the subsequent update_target_thresholds
-        bumps again (idempotent for correctness -- the swap and
-        bump aren't perfectly atomic, but the residual sub-call
-        window is microscopic compared to the user-perceived
-        edit-save window this hook closes).
-
-        DataStore-side bump closes the additional TOCTOU between
-        _on_state_update's _state_is_current check and the
-        downstream record_ping / record_alert queue submission.  A
-        probe that captured (old monitor versions, old DS gen) and
-        is suspended INSIDE _on_state_update between the identity
-        check and the queue.put would otherwise survive: the
-        captured monitor versions still matched at check time, and
-        no wipe occurred so the DS gen guard ALSO matched.  Bumping
-        DS gen here means the writer thread sees a mismatch on the
-        record_*'s captured_generation and drops the row.
+        Legacy hook — do NOT call from same-type semantic edit flows.
+        A version-only bump before update_target_thresholds creates a
+        window where probes capture (new_version, old_settings) and
+        commit stale results (Bug95).  MainWindow now calls
+        update_target_thresholds first; that path swaps settings then
+        bumps version atomically under _commit_lock and bumps DS gen
+        when PROBE_SEMANTIC_KEYS change.
         """
         with self._monitors_lock:
             m = self._monitors.get(target_id)
@@ -2129,11 +2107,25 @@ class PingEngine:
             # have invalidate's cleanup undone -- the same shape as
             # the rollback-overwrites-edit bug.
             old_settings = m.settings
+            _MISSING = object()
+            semantic_changed = any(
+                old_settings.get(k, _MISSING) != merged.get(k, _MISSING)
+                for k in m.PROBE_SEMANTIC_KEYS)
             with m._commit_lock:
                 m.settings = merged
                 m.invalidate_stale_extended_caches(old_settings, merged)
             # Window-size override may have changed — keep the deque in sync.
             self._resize_window_if_needed(m, merged.get("window_size", 10))
+            # DataStore generation bump for semantic edits (replaces the
+            # version-only pre-bump that invalidate_target_settings used to
+            # provide from MainWindow — tied to the real settings swap).
+            if semantic_changed:
+                try:
+                    _ds = getattr(self, "_data_store", None)
+                    if _ds is not None:
+                        _ds.bump_target_generation(target_id)
+                except Exception:
+                    pass
 
     def pause_target(self, target_id):
         with self._monitors_lock:
