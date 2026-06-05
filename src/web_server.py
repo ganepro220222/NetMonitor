@@ -3028,6 +3028,7 @@ function renderDnsTab(){
   </div>
   <div id="dns-output"></div>`;
   document.getElementById('diag-body').innerHTML = html;
+  _ensureDnsTraceDelegation();
   // Phase 3C-1.5 — keep the modal width in sync with the active mode.
   // Done here (rather than only in setDnsQueryMode) because renderDnsTab
   // is also called on tab re-entry from history / icmp, where the user
@@ -3368,6 +3369,23 @@ function traceDnsIp(ip){
     'width=620,height=700,resizable=yes,scrollbars=yes,menubar=no,toolbar=no,location=no');
 }
 
+function _dnsTraceBtnHtml(ip){
+  // data-trace-ip + delegated listener — esc() in onclick attributes is
+  // HTML-safe but not JS-safe (see renderGrid openDiag comment).
+  return `<button type="button" class="dns-trace-btn" data-trace-ip="${esc(ip)}">追踪此 IP</button>`;
+}
+
+function _ensureDnsTraceDelegation(){
+  const host = document.getElementById('diag-body');
+  if(!host || host.dataset.dnsTraceBound) return;
+  host.dataset.dnsTraceBound = '1';
+  host.addEventListener('click', ev => {
+    const btn = ev.target.closest('.dns-trace-btn[data-trace-ip]');
+    if(!btn) return;
+    traceDnsIp(btn.dataset.traceIp);
+  });
+}
+
 function renderDnsProgress(data){
   const out = document.getElementById('dns-output');
   if(!out) return;
@@ -3491,8 +3509,7 @@ function _renderDnsResultBlock(r){
     answers.forEach(a => {
       const ttl = (a.ttl!=null) ? a.ttl : '—';
       const action = (a.qtype === 'A' || a.qtype === 'AAAA')
-        ? `<button class="dns-trace-btn"
-                   onclick="traceDnsIp('${esc(a.value)}')">追踪此 IP</button>`
+        ? _dnsTraceBtnHtml(a.value)
         : '';
       html += `<tr>
         <td>${esc(a.name)}</td>
@@ -3825,8 +3842,7 @@ function _renderDnsCompareDetailBody(r){
     answers.forEach(a => {
       const ttl = (a.ttl != null) ? a.ttl : '—';
       const action = (a.qtype === 'A' || a.qtype === 'AAAA')
-        ? `<button class="dns-trace-btn"
-                   onclick="traceDnsIp('${esc(a.value)}')">追踪此 IP</button>`
+        ? _dnsTraceBtnHtml(a.value)
         : '';
       html += `<tr>
         <td>${esc(a.name)}</td>
@@ -4109,8 +4125,7 @@ function _renderDnsAuthBlock(r){
     answers.forEach(a => {
       const ttl = (a.ttl != null) ? a.ttl : '—';
       const action = (a.qtype === 'A' || a.qtype === 'AAAA')
-        ? `<button class="dns-trace-btn"
-                   onclick="traceDnsIp('${esc(a.value)}')">追踪此 IP</button>`
+        ? _dnsTraceBtnHtml(a.value)
         : '';
       html += `<tr>
         <td>${esc(a.name)}</td>

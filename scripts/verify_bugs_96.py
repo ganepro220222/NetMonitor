@@ -88,13 +88,16 @@ def test_source_http_port_invalid_url_guard():
     with open(PING_ENGINE, encoding="utf-8") as f:
         block = f.read().split("def _do_single_request", 1)[1].split(
             "def _do_ping", 1)[0]
+    port_idx = block.find("explicit_port = parsed.port")
+    ex_idx = block.find("except ValueError", port_idx)
+    inv_idx = block.find('failure_reason="invalid_url"', ex_idx)
     ok = (
-        "except ValueError" in block
-        and "explicit_port" in block
-        and 'failure_reason="invalid_url"' in block
-        or "failure_reason=\"invalid_url\"" in block
+        port_idx >= 0
+        and ex_idx > port_idx
+        and inv_idx > ex_idx
+        and inv_idx < ex_idx + 160
     )
-    print(f"BugA source port ValueError -> invalid_url -> {ok}")
+    print(f"BugA source port ValueError -> invalid_url (ordered) -> {ok}")
     return ok
 
 
@@ -104,6 +107,19 @@ def test_source_update_target_exports_flag():
             "def remove_target", 1)[0]
     ok = "is_probe_result" in block and "is_probe_result" in block.split("data = ", 1)[1]
     print(f"BugB source update_target payload flag -> {ok}")
+    return ok
+
+
+def test_source_trace_dns_ip_delegated():
+    with open(WEB_SERVER, encoding="utf-8") as f:
+        src = f.read()
+    ok = (
+        "function _dnsTraceBtnHtml" in src
+        and "data-trace-ip" in src
+        and "_ensureDnsTraceDelegation" in src
+        and 'onclick="traceDnsIp(' not in src
+    )
+    print(f"Bug hygiene traceDnsIp uses data-trace-ip delegation -> {ok}")
     return ok
 
 
@@ -125,6 +141,7 @@ def main():
         ("web_meta", test_web_meta_sync_payload_and_server_stats()),
         ("accumstat", test_accumstat_skips_meta_sync()),
         ("source_http", test_source_http_port_invalid_url_guard()),
+        ("trace_dns_deleg", test_source_trace_dns_ip_delegated()),
         ("source_web", test_source_update_target_exports_flag()),
         ("gitignore", test_gitignore_ignores_pycache()),
     ]
