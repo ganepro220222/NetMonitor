@@ -488,18 +488,31 @@ class AlertManager:
 
     def _red_alarm_loop(self):
         try:
-            while not self._red_alarm_stop.is_set():
+            while True:
+                # Decide whether to keep looping ATOMICALLY with the
+                # active-flag reset, under the same lock _ensure/_stop use.
+                # The old code checked stop in the UNLOCKED `while` head and
+                # cleared active in a `finally` -- two non-atomic steps with
+                # a gap where a concurrent _ensure_red_alarm_running() saw
+                # active=True, no-op'd (clearing the stop event), then this
+                # thread exited: a node that stayed red afterwards got NO
+                # alarm until the next evaluate_alarm.  A finally reset is
+                # itself unsafe here -- it would run AFTER the locked return,
+                # by which point _ensure may have started a fresh thread and
+                # set active=True, so finally would flip it back to False and
+                # the NEXT _ensure would spawn a SECOND concurrent loop.
+                # Fix: check stop + clear active under one lock, return with
+                # NO finally.  If _ensure cleared stop after signalling us,
+                # we simply keep looping (the node is red again).
+                with self._alarm_lock:
+                    if self._red_alarm_stop.is_set():
+                        self._red_alarm_active = False
+                        return
                 self._play_sync(self._sound_files["alarm"])
-                # Use Event.wait() instead of 30×sleep(0.1) — lower CPU,
-                # faster response to stop signal.
+                # Event.wait() instead of sleep — lower CPU, instant stop.
                 self._red_alarm_stop.wait(timeout=3.0)
         except Exception as e:
             print(f"[AlertManager._red_alarm_loop] unexpected error: {e}")
-        finally:
-            # Reset flag UNCONDITIONALLY -- whether we exited the loop
-            # because of a stop signal, an exception, or anything else,
-            # this thread is gone and _ensure_red_alarm_running must
-            # be able to start a fresh one next time.
             with self._alarm_lock:
                 self._red_alarm_active = False
 
