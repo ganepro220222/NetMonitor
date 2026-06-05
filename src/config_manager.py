@@ -13,6 +13,8 @@ import json
 import copy
 import uuid
 import os
+import shutil
+from datetime import datetime
 
 
 # Per-target optional config keys that the edit dialog has authoritative
@@ -169,13 +171,15 @@ class ConfigManager:
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
+                loaded = self._normalize_loaded_config(loaded)
                 # 用加载的内容覆盖默认值，这样即使将来我们在
                 # DEFAULT_CONFIG 里加了新字段，老用户的配置文件
                 # 也不会缺少这些新字段
                 self.config = self._merge(DEFAULT_CONFIG, loaded)
                 self._apply_config_migrations(loaded)
-            except (json.JSONDecodeError, IOError) as e:
+            except (json.JSONDecodeError, IOError, ValueError) as e:
                 print(f"[ConfigManager] 配置文件读取失败，使用默认配置: {e}")
+                self._backup_broken_config()
                 self.config = copy.deepcopy(DEFAULT_CONFIG)
                 self._mark_config_migrations_done()
         else:
@@ -183,6 +187,52 @@ class ConfigManager:
             self.config = copy.deepcopy(DEFAULT_CONFIG)
             self._mark_config_migrations_done()
             self.save()
+
+    def _normalize_loaded_config(self, loaded) -> dict:
+        """Validate user config shape before merge; raise ValueError on bad root."""
+        if not isinstance(loaded, dict):
+            raise ValueError("config root must be object")
+
+        normalized = dict(loaded)
+
+        if not isinstance(normalized.get("settings"), dict):
+            normalized["settings"] = {}
+
+        raw_targets = normalized.get("targets")
+        if not isinstance(raw_targets, list):
+            normalized["targets"] = []
+        else:
+            valid_targets = []
+            for item in raw_targets:
+                if not isinstance(item, dict):
+                    continue
+                tid = item.get("id")
+                label = item.get("label")
+                ip = item.get("ip")
+                if not isinstance(tid, str) or not tid.strip():
+                    continue
+                if not isinstance(label, str) or not label.strip():
+                    continue
+                if not isinstance(ip, str) or not ip.strip():
+                    continue
+                valid_targets.append(item)
+            normalized["targets"] = valid_targets
+
+        return normalized
+
+    def _backup_broken_config(self) -> None:
+        """Preserve a broken config.json before falling back to defaults."""
+        if not self.config_path.exists():
+            return
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup = self.config_path.with_name(
+            f"{self.config_path.stem}.broken-{ts}{self.config_path.suffix}"
+        )
+        try:
+            shutil.copy2(self.config_path, backup)
+            print(f"[ConfigManager] 已备份损坏的配置: {backup}")
+        except OSError as e:
+            print(f"[ConfigManager] 无法备份损坏的配置文件: {e}")
 
     def _apply_config_migrations(self, loaded: dict) -> None:
         """One-time upgrades for legacy on-disk settings (Bug99).
