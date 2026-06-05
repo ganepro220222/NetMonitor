@@ -257,6 +257,40 @@ def test_bad_webhook_events_list_sanitized():
     return ok
 
 
+def test_window_geometry_preserved_on_load():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "settings": {
+                "window_geometry": "1200x800+10+10",
+                "theme": "light",
+            },
+            "targets": [],
+        }
+        cm = _init_with_payload(payload, td)
+        ok = (
+            cm.get_setting("window_geometry") == "1200x800+10+10"
+            and cm.get_setting("theme") == "light"
+        )
+    print(f"Bug125 window_geometry preserved on load -> {ok}")
+    return ok
+
+
+def test_bad_window_geometry_dropped():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "settings": {
+                "window_geometry": 123,
+                "theme": "dark",
+            },
+            "targets": [],
+        }
+        cm = _init_with_payload(payload, td)
+        geo = cm.get_setting("window_geometry")
+        ok = (geo == "" or geo is None) and cm.get_setting("theme") == "dark"
+    print(f"Bug125 bad window_geometry falls back to default -> {ok}")
+    return ok
+
+
 def test_valid_settings_override_preserved():
     with tempfile.TemporaryDirectory() as td:
         payload = {
@@ -286,6 +320,8 @@ def test_source_has_settings_sanitization():
         pe_src = f.read()
     ok = (
         "def _sanitize_settings" in cm_src
+        and "window_geometry" in cm_src
+        and "_PERSISTED_UI_STATE_KEYS" in cm_src
         and "normalized[\"settings\"] = _sanitize_settings(raw_settings)" in cm_src
         and "_SETTINGS_INT_RANGES" in cm_src
         and "int(settings.get(\"window_size\", 10))" in pe_src
@@ -332,6 +368,8 @@ def main():
         ("filter_targets", test_invalid_target_entries_filtered()),
         ("bad_window_size", test_bad_window_size_sanitized()),
         ("engine_window", test_engine_add_target_after_bad_window_size()),
+        ("window_geometry", test_window_geometry_preserved_on_load()),
+        ("bad_window_geometry", test_bad_window_geometry_dropped()),
         ("bad_webhook_events", test_bad_webhook_events_list_sanitized()),
         ("valid_settings", test_valid_settings_override_preserved()),
         ("settings_sanitize", test_source_has_settings_sanitization()),

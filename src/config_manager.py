@@ -13,6 +13,7 @@ import json
 import copy
 import uuid
 import os
+import re
 import shutil
 from datetime import datetime
 
@@ -202,6 +203,10 @@ _SETTINGS_STRING_KEYS = frozenset({
     "db_path", "webhook_url",
 })
 
+# Runtime UI state persisted via set_setting(); must survive _sanitize_settings.
+_PERSISTED_UI_STATE_KEYS = frozenset({"window_geometry"})
+_WINDOW_GEOMETRY_RE = re.compile(r'(\d+)x(\d+)(?:\+(-?\d+)\+(-?\d+))?')
+
 
 def _sanitize_settings(raw: dict) -> dict:
     """Normalize settings values; omit keys that fail type coercion."""
@@ -230,6 +235,12 @@ def _sanitize_settings(raw: dict) -> dict:
                 theme = val.strip().lower()
                 if theme in ("dark", "light"):
                     out[key] = theme
+            continue
+        if key in _PERSISTED_UI_STATE_KEYS:
+            if key == "window_geometry" and isinstance(val, str):
+                geo = val.strip()
+                if geo and _WINDOW_GEOMETRY_RE.fullmatch(geo):
+                    out[key] = geo
             continue
         if key == "webhook_events":
             if isinstance(val, list):
@@ -339,6 +350,9 @@ DEFAULT_CONFIG = {
 
         # 主题: "dark" 或 "light"
         "theme": "dark",
+
+        # 主窗口几何（关闭时写入 geometry()，启动时恢复；空 = 默认居中）
+        "window_geometry": "",
 
         # 是否启用声音告警（关闭后只静音；颜色变化、桌面通知、
         # webhook 仍照常推送）。新增于 sound-persistence 修复以前
