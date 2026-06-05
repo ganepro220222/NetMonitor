@@ -1120,6 +1120,11 @@ class HTTPMonitor(TargetMonitor):
             r._redirect_to = r._body = r._content_type = None
             return r
 
+        if parsed.scheme not in ("http", "https"):
+            r = PingResult(success=False, latency_ms=None, failure_reason="invalid_url")
+            r._redirect_to = r._body = r._content_type = None
+            return r
+
         host    = parsed.hostname
         if not host:
             r = PingResult(success=False, latency_ms=None, failure_reason="invalid_url")

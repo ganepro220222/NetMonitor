@@ -15,6 +15,7 @@ import uuid
 import os
 import re
 import shutil
+import urllib.parse
 from datetime import datetime
 
 
@@ -130,6 +131,18 @@ def _sanitize_target(item: dict) -> dict:
                 out[key] = float(val.strip())
             except ValueError:
                 pass
+
+    http_url = out.get("http_url")
+    if http_url and pt in ("http", "https"):
+        try:
+            scheme = urllib.parse.urlparse(http_url).scheme
+        except Exception:
+            scheme = ""
+        if scheme not in ("http", "https"):
+            print(
+                f"[ConfigManager] 目标 {out['id']} 的 http_url 非 HTTP(S) scheme: "
+                f"{http_url!r}，探测时将报 invalid_url"
+            )
 
     return out
 
