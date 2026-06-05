@@ -201,7 +201,7 @@ def run_traceroute(ip: str, max_hops: int = 30) -> list:
                 "hop":      hop_num,
                 "ip":       hop_ip,
                 "hostname": host,
-                "rtt_ms":   round(rtt, 1) if rtt else None,
+                "rtt_ms":   round(rtt, 1) if rtt is not None else None,
                 "status":   "timeout_raw" if not hop_ip else "ok",
             }
             if unreach_reason:

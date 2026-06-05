@@ -2678,6 +2678,38 @@ def _find_rrset_and_rrsig(resp, name: str, qtype: str):
     return data_rrset, rrsig_rrset
 
 
+def _dnssec_has_ns_records(resp, zone: str) -> bool:
+    """True when `resp` carries NS rrsets for `zone` in ANSWER or AUTHORITY."""
+    if resp is None:
+        return False
+    import dns.rdatatype
+    zone_norm = zone.rstrip(".").lower()
+    try:
+        sections = list(resp.answer or []) + list(resp.authority or [])
+        for rrset in sections:
+            if rrset.rdtype != dns.rdatatype.NS:
+                continue
+            rrset_name = str(rrset.name).rstrip(".").lower()
+            if rrset_name == zone_norm and len(rrset) > 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _dnssec_is_delegation_point(resolver, zone: str) -> bool:
+    """True when `zone` is a child delegation (NS exists at this name).
+
+    NOERROR + no NS means the name is an in-zone record (e.g. ``www``
+    under ``google.com``), not a zone cut — same apex-pivot semantics
+    as trace_auth (see run_authority_trace hop ~2129-2144).
+    """
+    ns_resp, ns_ec, _ = _dnssec_lookup(resolver, zone, "NS")
+    if ns_ec == ERROR_NXDOMAIN:
+        return False
+    return _dnssec_has_ns_records(ns_resp, zone)
+
+
 def _zone_labels_root_to_leaf(qname: str) -> list:
     """For "www.example.com" return [".", "com.", "example.com.", "www.example.com."].
 
@@ -2879,14 +2911,16 @@ def _verify_zone_link(resolver, zone: str,
     """Fetch + verify ONE zone link (non-root) from its parent's DNSKEY.
 
     Returns (zone_trusted_dnskey_rrset_or_None, status_hint, message).
-      status_hint ∈ {"ok", "insecure", "bogus", "indeterminate"}.
+      status_hint ∈ {"ok", "contained", "insecure", "bogus", "indeterminate"}.
 
     Algorithm:
       1.  Query parent for child's DS rrset (the resolver does the
           recursion; we just need the answer + RRSIG).
-      2.  If no DS rrset returned → INSECURE (zone未签名).  Chain stops
-          but we still annotate the link so the operator sees where
-          the trust boundary is.
+      2.  If no DS rrset returned → distinguish delegation vs in-zone
+          leaf: only real zone cuts (NS present) are INSECURE; a NODATA
+          DS at a non-delegation suffix (e.g. ``www`` under a signed
+          parent) returns ``contained`` so the walk stops with the
+          parent's trusted keys and terminal RRSIG validation proceeds.
       3.  Validate DS RRSIG using parent_trusted_keys.  Cryptographic
           failure → BOGUS.
       4.  Query child's own DNSKEY rrset.
@@ -2918,10 +2952,10 @@ def _verify_zone_link(resolver, zone: str,
 
     ds_rrset, ds_rrsig = _find_rrset_and_rrsig(ds_resp, zone, "DS")
     if ds_rrset is None:
-        # NOERROR + no DS = zone provably unsigned.  This is the
-        # by-far most common outcome for CN domains and MUST surface
-        # as INSECURE, not as a failure.
         link.has_ds = False
+        if not _dnssec_is_delegation_point(resolver, zone):
+            link.note = "叶名位于已信任 zone 内（非 delegation）"
+            return None, "contained", link.note
         link.note = "无 DS（未签名）"
         return None, "insecure", link.note
 
@@ -3078,9 +3112,10 @@ def run_dnssec_validate(
           mode.
       3)  Walk zone labels root → leaf.  Verify root via embedded
           anchor; verify each subsequent zone via parent's DNSKEY
-          set + DS digest match.  First missing-DS = INSECURE,
-          remaining chain truncated but already-walked links kept
-          for display.
+          set + DS digest match.  Missing DS at a real delegation
+          cut = INSECURE; missing DS at a non-delegation suffix
+          (``contained``) stops the walk with parent keys so the
+          leaf rrset can still be validated.
       4)  If chain is fully trusted, validate the leaf qtype rrset.
           BOGUS on signature failure; SECURE on success.
       5)  Across all branches, populate answers when available and
@@ -3233,6 +3268,10 @@ def run_dnssec_validate(
         if hint == "ok":
             trusted_keys[_dnsname.from_text(zone)] = new_keys
             continue
+        if hint == "contained":
+            # Leaf lives inside an already-trusted zone; stop the walk
+            # and validate the terminal rrset with current keys.
+            break
         if hint == "insecure":
             insecure_at = zone
             break
