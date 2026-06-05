@@ -202,6 +202,98 @@ def test_chart_warn_latency_tolerates_bad_ping_type():
     return ok
 
 
+def test_bad_window_size_sanitized():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "settings": {"window_size": "bad"},
+            "targets": [{
+                "id": "t",
+                "label": "T",
+                "ip": "127.0.0.1",
+            }],
+        }
+        cm = _init_with_payload(payload, td)
+        ok = cm.get_setting("window_size") == DEFAULT_CONFIG["settings"]["window_size"]
+    print(f"Bug125 bad window_size falls back to default -> {ok}")
+    return ok
+
+
+def test_engine_add_target_after_bad_window_size():
+    from src.ping_engine import PingEngine
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "settings": {"window_size": "bad"},
+            "targets": [{
+                "id": "t",
+                "label": "T",
+                "ip": "127.0.0.1",
+            }],
+        }
+        cm = _init_with_payload(payload, td)
+        engine = PingEngine(dict(cm.config.get("settings", {})),
+                            lambda *a, **k: None)
+        try:
+            engine.add_target("t", "127.0.0.1", ping_type="icmp")
+            mon = engine._monitors.get("t")
+            ok = mon is not None and mon._window.maxlen == 10
+        except Exception as exc:
+            print(f"Bug125 engine add_target exception {type(exc).__name__} {exc}")
+            ok = False
+    print(f"Bug125 PingEngine.add_target survives bad window_size -> {ok}")
+    return ok
+
+
+def test_bad_webhook_events_list_sanitized():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "settings": {
+                "webhook_events": "not-a-list",
+            },
+            "targets": [],
+        }
+        cm = _init_with_payload(payload, td)
+        ok = cm.get_setting("webhook_events") == DEFAULT_CONFIG["settings"]["webhook_events"]
+    print(f"Bug125 bad webhook_events falls back to default -> {ok}")
+    return ok
+
+
+def test_valid_settings_override_preserved():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "settings": {
+                "window_size": 15,
+                "ping_interval": 2.5,
+                "web_autostart": True,
+                "theme": "light",
+            },
+            "targets": [],
+        }
+        cm = _init_with_payload(payload, td)
+        ok = (
+            cm.get_setting("window_size") == 15
+            and cm.get_setting("ping_interval") == 2.5
+            and cm.get_setting("web_autostart") is True
+            and cm.get_setting("theme") == "light"
+        )
+    print(f"Bug125 valid settings overrides preserved -> {ok}")
+    return ok
+
+
+def test_source_has_settings_sanitization():
+    with open(CONFIG_MANAGER, encoding="utf-8") as f:
+        cm_src = f.read()
+    with open(os.path.join(ROOT, "src", "ping_engine.py"), encoding="utf-8") as f:
+        pe_src = f.read()
+    ok = (
+        "def _sanitize_settings" in cm_src
+        and "normalized[\"settings\"] = _sanitize_settings(raw_settings)" in cm_src
+        and "_SETTINGS_INT_RANGES" in cm_src
+        and "int(settings.get(\"window_size\", 10))" in pe_src
+    )
+    print(f"Bug125 source has settings sanitization -> {ok}")
+    return ok
+
+
 def test_source_has_target_field_sanitization():
     with open(CONFIG_MANAGER, encoding="utf-8") as f:
         cm_src = f.read()
@@ -238,6 +330,11 @@ def main():
         ("bad_settings", test_bad_settings_type_uses_default_settings()),
         ("bad_targets", test_bad_targets_type_becomes_empty_list()),
         ("filter_targets", test_invalid_target_entries_filtered()),
+        ("bad_window_size", test_bad_window_size_sanitized()),
+        ("engine_window", test_engine_add_target_after_bad_window_size()),
+        ("bad_webhook_events", test_bad_webhook_events_list_sanitized()),
+        ("valid_settings", test_valid_settings_override_preserved()),
+        ("settings_sanitize", test_source_has_settings_sanitization()),
         ("bad_thresholds", test_bad_thresholds_type_sanitized()),
         ("bad_ping_type", test_bad_ping_type_sanitized()),
         ("unknown_ping_type", test_unknown_ping_type_string_coerced()),

@@ -133,6 +133,130 @@ def _sanitize_target(item: dict) -> dict:
     return out
 
 
+def _coerce_settings_int(value, default: int, min_v: int, max_v: int) -> int | None:
+    """Return clamped int, or None when value is not coercible."""
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            n = value
+        elif isinstance(value, float):
+            n = int(value)
+        elif isinstance(value, str) and value.strip():
+            n = int(value.strip())
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return max(min_v, min(max_v, n))
+
+
+def _coerce_settings_float(value, default: float,
+                           min_v: float | None = None,
+                           max_v: float | None = None) -> float | None:
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            n = float(value)
+        elif isinstance(value, str) and value.strip():
+            n = float(value.strip())
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(n):
+        return None
+    if min_v is not None:
+        n = max(min_v, n)
+    if max_v is not None:
+        n = min(max_v, n)
+    return n
+
+
+_SETTINGS_INT_RANGES: dict[str, tuple[int, int]] = {
+    "window_size": (5, 30),
+    "consecutive_loss_orange": (1, 20),
+    "consecutive_loss_red": (2, 30),
+    "recovery_count": (1, 20),
+    "consecutive_lat_orange": (1, 20),
+    "latency_warn_ms": (10, 2000),
+    "http_latency_warn_ms": (100, 10000),
+    "latency_error_ms": (10, 10000),
+    "traceroute_interval": (120, 3600),
+    "web_port": (1024, 65535),
+    "tracert_max_hops": (10, 64),
+    "db_raw_retention_days": (1, 3650),
+    "db_hourly_retention_days": (1, 3650),
+    "db_alert_retention_days": (1, 3650),
+    "db_traceroute_retention_days": (1, 3650),
+    "db_diag_retention_days": (1, 3650),
+    "default_columns": (1, 2),
+}
+
+_SETTINGS_BOOL_KEYS = frozenset({
+    "web_autostart", "tray_minimize", "sound_alert_enabled",
+})
+
+_SETTINGS_STRING_KEYS = frozenset({
+    "db_path", "webhook_url",
+})
+
+
+def _sanitize_settings(raw: dict) -> dict:
+    """Normalize settings values; omit keys that fail type coercion."""
+    defaults = DEFAULT_CONFIG["settings"]
+    out: dict = {}
+
+    for key, default_val in defaults.items():
+        if key not in raw:
+            continue
+        val = raw[key]
+        if key == "ping_interval":
+            out[key] = normalize_ping_interval(val, defaults["ping_interval"])
+            continue
+        if key in _SETTINGS_INT_RANGES:
+            lo, hi = _SETTINGS_INT_RANGES[key]
+            coerced = _coerce_settings_int(val, default_val, lo, hi)
+            if coerced is not None:
+                out[key] = coerced
+            continue
+        if key in _SETTINGS_BOOL_KEYS:
+            if isinstance(val, bool):
+                out[key] = val
+            continue
+        if key == "theme":
+            if isinstance(val, str):
+                theme = val.strip().lower()
+                if theme in ("dark", "light"):
+                    out[key] = theme
+            continue
+        if key == "webhook_events":
+            if isinstance(val, list):
+                events = [e.strip() for e in val
+                          if isinstance(e, str) and e.strip()]
+                if events:
+                    out[key] = events
+            continue
+        if key in _SETTINGS_STRING_KEYS:
+            if isinstance(val, str):
+                out[key] = val.strip()
+            continue
+
+    if "default_columns" in raw and "default_columns" not in out:
+        lo, hi = _SETTINGS_INT_RANGES["default_columns"]
+        coerced = _coerce_settings_int(
+            raw["default_columns"], 1, lo, hi)
+        if coerced is not None:
+            out["default_columns"] = coerced
+
+    mig = raw.get("_config_migrations")
+    if isinstance(mig, dict):
+        out["_config_migrations"] = dict(mig)
+
+    return out
+
+
 def normalize_ping_interval(value, default: float = 1.0) -> float:
     """Clamp configured ping_interval to a finite supported [MIN, MAX] range."""
     try:
@@ -273,8 +397,11 @@ class ConfigManager:
 
         normalized = dict(loaded)
 
-        if not isinstance(normalized.get("settings"), dict):
+        raw_settings = normalized.get("settings")
+        if not isinstance(raw_settings, dict):
             normalized["settings"] = {}
+        else:
+            normalized["settings"] = _sanitize_settings(raw_settings)
 
         raw_targets = normalized.get("targets")
         if not isinstance(raw_targets, list):

@@ -227,7 +227,13 @@ class TargetMonitor:
         # m.invalidate_stale_extended_caches (which re-acquires).
         self._commit_lock = threading.RLock()
 
-        self._window: deque[PingResult] = deque(maxlen=settings.get("window_size", 10))
+        try:
+            _win = int(settings.get("window_size", 10))
+        except (TypeError, ValueError):
+            _win = 10
+        if _win <= 0:
+            _win = 10
+        self._window: deque[PingResult] = deque(maxlen=_win)
 
         # Initialise from last known DB status so that after a restart the
         # state machine continues from where it left off.  Without this, a
