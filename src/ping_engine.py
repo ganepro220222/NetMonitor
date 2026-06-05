@@ -829,7 +829,15 @@ class TCPMonitor(TargetMonitor):
     # monitor, so _compute_state never fell through to this class constant.
 
     def _do_ping(self) -> PingResult:
-        port    = int(self.settings.get("tcp_port", 80))
+        try:
+            port = int(self.settings.get("tcp_port", 80))
+        except (TypeError, ValueError):
+            return PingResult(success=False, latency_ms=None,
+                              failure_reason="invalid_port")
+        if not (1 <= port <= 65535):
+            return PingResult(success=False, latency_ms=None,
+                              failure_reason="invalid_port")
+
         timeout = float(self.settings.get("timeout", 3.0))
         start   = time.time()
         sock    = None

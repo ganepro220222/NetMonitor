@@ -132,6 +132,18 @@ def _sanitize_target(item: dict) -> dict:
             except ValueError:
                 pass
 
+    tcp_port = out.get("tcp_port")
+    if (
+        pt == "tcp"
+        and isinstance(tcp_port, int)
+        and not isinstance(tcp_port, bool)
+        and not (1 <= tcp_port <= 65535)
+    ):
+        print(
+            f"[ConfigManager] 目标 {out['id']} 的 tcp_port 超出 1–65535: "
+            f"{tcp_port!r}，探测时将报 invalid_port"
+        )
+
     http_url = out.get("http_url")
     if http_url and pt in ("http", "https"):
         try:
