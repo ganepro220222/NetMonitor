@@ -1835,6 +1835,17 @@ class MainWindow(ctk.CTk):
             (target.get("dns_domain") or "")
             != (r.get("dns_domain") or "")
         )
+        # Canonical post-edit settings snapshot (dialog result only).
+        combined = dict(r.get("thresholds") or {})
+        combined.update(new_extra)
+        # Same-type semantic reseed must compare pre-persist old vs new.
+        # `target` is a live dict — update_target() mutates it in place.
+        from src.ping_engine import TargetMonitor as _TM
+        _SEM = _TM.PROBE_SEMANTIC_KEYS
+        _MISSING = object()
+        old_semantic_view = {k: target.get(k, _MISSING) for k in _SEM}
+        new_semantic_view = {k: combined.get(k, _MISSING) for k in _SEM}
+        semantic_changed_for_reseed = old_semantic_view != new_semantic_view
 
         # When the probe's IP or type changes, ask the operator what the
         # change *means*: same physical node (keep history) or a different
@@ -1865,8 +1876,6 @@ class MainWindow(ctk.CTk):
         # monitor picks up changes to tcp_port / http_url / etc. We send
         # them through update_target_thresholds because the merge logic
         # there preserves anything not being changed.
-        combined = dict(r.get("thresholds") or {})
-        combined.update(new_extra)
 
         _EDIT_CLEAR_KEYS = (
             "tcp_port", "tcp_probe_ports",
@@ -1890,12 +1899,7 @@ class MainWindow(ctk.CTk):
         if not type_changed:
             self.engine.update_target_thresholds(
                 target_id, combined, clear_keys=_EDIT_CLEAR_KEYS)
-            from src.ping_engine import TargetMonitor as _TM
-            _SEM = _TM.PROBE_SEMANTIC_KEYS
-            _MISSING = object()
-            old_view = {k: target.get(k, _MISSING) for k in _SEM}
-            new_view = {k: combined.get(k, _MISSING) for k in _SEM}
-            if old_view != new_view:
+            if semantic_changed_for_reseed:
                 # Reseed _last_statuses from the LAST PERSISTED ping
                 # status, NOT from an in-memory constant.  The previous
                 # round set it to "gray", but `gray -> green` is not
