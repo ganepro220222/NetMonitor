@@ -33,6 +33,16 @@ EDIT_MANAGED_KEYS = (
     "dns_domain", "dns_expected",
     "ipv6_only", "timeout",
 )
+
+_VALID_PING_TYPES = frozenset({"icmp", "tcp", "http", "https", "dns"})
+_STRING_TARGET_KEYS = (
+    "tcp_probe_ports", "http_url", "http_success_codes",
+    "http_keyword", "http_keyword_mode", "dns_domain", "dns_expected",
+)
+_BOOL_TARGET_KEYS = ("http_verify_ssl", "http_follow_redirects", "ipv6_only")
+_INT_TARGET_KEYS = ("tcp_port", "http_expected_status")
+_FLOAT_TARGET_KEYS = ("http_timeout", "timeout")
+
 import math
 import threading
 from pathlib import Path
@@ -53,6 +63,74 @@ def is_valid_ping_interval(value) -> bool:
         return False
     return (math.isfinite(iv)
             and MIN_PING_INTERVAL_S <= iv <= MAX_PING_INTERVAL_S)
+
+
+def _sanitize_target(item: dict) -> dict:
+    """Return a defensive copy of one on-disk target (id/label/ip pre-validated)."""
+    out: dict = {
+        "id": item["id"].strip(),
+        "label": item["label"].strip(),
+        "ip": item["ip"].strip(),
+    }
+
+    raw_pt = item.get("ping_type", "icmp")
+    if isinstance(raw_pt, str):
+        pt = raw_pt.strip().lower()
+    else:
+        pt = "icmp"
+    if pt not in _VALID_PING_TYPES:
+        pt = "icmp"
+    out["ping_type"] = pt
+
+    enabled = item.get("enabled", True)
+    out["enabled"] = enabled if isinstance(enabled, bool) else True
+
+    thresholds = item.get("thresholds")
+    if isinstance(thresholds, dict):
+        clean_th: dict = {}
+        for key, val in thresholds.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, (int, float)):
+                clean_th[key] = val
+            elif isinstance(val, str) and val.strip():
+                try:
+                    clean_th[key] = int(val) if "." not in val else float(val)
+                except ValueError:
+                    pass
+        if clean_th:
+            out["thresholds"] = clean_th
+
+    for key in _STRING_TARGET_KEYS:
+        val = item.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val.strip()
+
+    for key in _BOOL_TARGET_KEYS:
+        val = item.get(key)
+        if isinstance(val, bool):
+            out[key] = val
+
+    for key in _INT_TARGET_KEYS:
+        val = item.get(key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            out[key] = val
+        elif isinstance(val, str) and val.strip().isdigit():
+            out[key] = int(val.strip())
+
+    for key in _FLOAT_TARGET_KEYS:
+        val = item.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            out[key] = float(val)
+        elif isinstance(val, str) and val.strip():
+            try:
+                out[key] = float(val.strip())
+            except ValueError:
+                pass
+
+    return out
 
 
 def normalize_ping_interval(value, default: float = 1.0) -> float:
@@ -215,7 +293,7 @@ class ConfigManager:
                     continue
                 if not isinstance(ip, str) or not ip.strip():
                     continue
-                valid_targets.append(item)
+                valid_targets.append(_sanitize_target(item))
             normalized["targets"] = valid_targets
 
         return normalized
@@ -396,7 +474,9 @@ class ConfigManager:
         base = dict(self.config.get("settings", {}))
         for target in self.config.get("targets", []):
             if target["id"] == target_id:
-                base.update(target.get("thresholds", {}))
+                thresholds = target.get("thresholds")
+                if isinstance(thresholds, dict):
+                    base.update(thresholds)
                 break
         return base
 

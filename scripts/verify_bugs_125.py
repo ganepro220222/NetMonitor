@@ -10,6 +10,7 @@ from src.config_manager import ConfigManager, DEFAULT_CONFIG
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_MANAGER = os.path.join(ROOT, "src", "config_manager.py")
+MAIN_WINDOW = os.path.join(ROOT, "src", "ui", "main_window.py")
 
 
 def _init_with_payload(payload, td):
@@ -116,6 +117,107 @@ def test_valid_config_unchanged():
     return ok
 
 
+def test_bad_thresholds_type_sanitized():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "targets": [{
+                "id": "t1",
+                "label": "bad-threshold",
+                "ip": "127.0.0.1",
+                "thresholds": [1],
+            }],
+        }
+        cm = _init_with_payload(payload, td)
+        t = cm.get_targets()[0]
+        try:
+            settings = cm.get_target_settings("t1")
+            ok = (
+                "thresholds" not in t
+                and isinstance(settings, dict)
+                and settings.get("web_port") == DEFAULT_CONFIG["settings"]["web_port"]
+            )
+        except Exception as exc:
+            print(f"Bug125 bad thresholds exception {type(exc).__name__} {exc}")
+            ok = False
+    print(f"Bug125 list thresholds stripped, get_target_settings ok -> {ok}")
+    return ok
+
+
+def test_bad_ping_type_sanitized():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "targets": [{
+                "id": "t2",
+                "label": "bad-type",
+                "ip": "127.0.0.1",
+                "ping_type": 123,
+            }],
+        }
+        cm = _init_with_payload(payload, td)
+        t = cm.get_targets()[0]
+        ok = t.get("ping_type") == "icmp"
+    print(f"Bug125 non-string ping_type coerced to icmp -> {ok}")
+    return ok
+
+
+def test_unknown_ping_type_string_coerced():
+    with tempfile.TemporaryDirectory() as td:
+        payload = {
+            "targets": [{
+                "id": "t3",
+                "label": "weird-type",
+                "ip": "127.0.0.1",
+                "ping_type": "ftp",
+            }],
+        }
+        cm = _init_with_payload(payload, td)
+        ok = cm.get_targets()[0].get("ping_type") == "icmp"
+    print(f"Bug125 unknown ping_type string coerced to icmp -> {ok}")
+    return ok
+
+
+def _chart_warn_latency_fixed(target, merged):
+    """Mirror main_window._chart_warn_latency defensive logic."""
+    thresholds = target.get("thresholds")
+    if isinstance(thresholds, dict) and "latency_warn_ms" in thresholds:
+        return merged.get("latency_warn_ms") or 150
+    ping_type = target.get("ping_type")
+    if not isinstance(ping_type, str):
+        ping_type = "icmp"
+    if ping_type.lower() in ("http", "https"):
+        return merged.get("http_latency_warn_ms") or 2000
+    return merged.get("latency_warn_ms") or 150
+
+
+def test_chart_warn_latency_tolerates_bad_ping_type():
+    target = {"id": "t2", "label": "x", "ip": "1.1.1.1", "ping_type": 123}
+    merged = {"latency_warn_ms": 150, "http_latency_warn_ms": 2000}
+    try:
+        val = _chart_warn_latency_fixed(target, merged)
+        ok = val == 150
+    except Exception as exc:
+        print(f"Bug125 chart_warn exception {type(exc).__name__} {exc}")
+        ok = False
+    print(f"Bug125 _chart_warn_latency survives int ping_type -> {ok}")
+    return ok
+
+
+def test_source_has_target_field_sanitization():
+    with open(CONFIG_MANAGER, encoding="utf-8") as f:
+        cm_src = f.read()
+    with open(MAIN_WINDOW, encoding="utf-8") as f:
+        mw_src = f.read()
+    ok = (
+        "def _sanitize_target" in cm_src
+        and "_VALID_PING_TYPES" in cm_src
+        and "valid_targets.append(_sanitize_target(item))" in cm_src
+        and "isinstance(thresholds, dict)" in cm_src
+        and "isinstance(ping_type, str)" in mw_src
+    )
+    print(f"Bug125 source has target field sanitization -> {ok}")
+    return ok
+
+
 def test_source_has_structure_validation():
     with open(CONFIG_MANAGER, encoding="utf-8") as f:
         src = f.read()
@@ -136,6 +238,11 @@ def main():
         ("bad_settings", test_bad_settings_type_uses_default_settings()),
         ("bad_targets", test_bad_targets_type_becomes_empty_list()),
         ("filter_targets", test_invalid_target_entries_filtered()),
+        ("bad_thresholds", test_bad_thresholds_type_sanitized()),
+        ("bad_ping_type", test_bad_ping_type_sanitized()),
+        ("unknown_ping_type", test_unknown_ping_type_string_coerced()),
+        ("chart_warn", test_chart_warn_latency_tolerates_bad_ping_type()),
+        ("target_sanitize", test_source_has_target_field_sanitization()),
         ("valid_config", test_valid_config_unchanged()),
         ("source", test_source_has_structure_validation()),
     ]

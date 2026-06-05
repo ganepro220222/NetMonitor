@@ -721,9 +721,13 @@ class MainWindow(ctk.CTk):
         """Chart warning line — mirrors the engine's effective warn latency:
         per-target override > global http_latency_warn_ms (HTTP) > global
         latency_warn_ms (ICMP/TCP/DNS)."""
-        if "latency_warn_ms" in (target.get("thresholds") or {}):
+        thresholds = target.get("thresholds")
+        if isinstance(thresholds, dict) and "latency_warn_ms" in thresholds:
             return merged.get("latency_warn_ms") or 150
-        if (target.get("ping_type") or "icmp").lower() in ("http", "https"):
+        ping_type = target.get("ping_type")
+        if not isinstance(ping_type, str):
+            ping_type = "icmp"
+        if ping_type.lower() in ("http", "https"):
             return merged.get("http_latency_warn_ms") or HTTPMonitor.DEFAULT_WARN_LAT
         return merged.get("latency_warn_ms") or 150
 
