@@ -808,11 +808,11 @@ class TargetMonitor:
             jitter_ms        = round(jitter, 1) if jitter is not None else None,
             loss_rate        = loss_rate,
             consecutive_loss = self._consecutive_loss,
-            status_code      = self._last_status_code,
+            status_code      = latest.status_code,
             failure_reason   = latest.failure_reason if not latest.success else None,
             timings          = self._last_timings,
             cert_days_left   = self._last_cert_days_left,
-            keyword_ok       = self._last_keyword_ok,
+            keyword_ok       = latest.keyword_ok,
             probe_success    = latest.success,
         )
 
