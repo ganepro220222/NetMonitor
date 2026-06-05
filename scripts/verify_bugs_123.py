@@ -1,59 +1,88 @@
-"""Regression checks for bug 123 (semantic reseed snapshot before update_target)."""
+"""Regression checks for bug 123 (red-alarm loop exit race)."""
 import os
+import re
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.config_manager import ConfigManager
-from src.ping_engine import TargetMonitor
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MAIN_WINDOW = os.path.join(ROOT, "src", "ui", "main_window.py")
+ALERT_MANAGER = os.path.join(ROOT, "src", "alert_manager.py")
 
 
-def test_live_dict_semantic_diff_lost_after_update():
-    with tempfile.TemporaryDirectory() as td:
-        cm = ConfigManager(os.path.join(td, "config.json"))
-        tid = cm.add_target("n", "1.2.3.4", ping_type="http", extra={
-            "http_url": "http://old.local",
-        })["id"]
-        ref = {t["id"]: t for t in cm.get_targets()}[tid]
-        _MISSING = object()
-        _SEM = TargetMonitor.PROBE_SEMANTIC_KEYS
-        combined = {"http_url": "http://new.local"}
-        pre_old = {k: ref.get(k, _MISSING) for k in _SEM}
-        pre_new = {k: combined.get(k, _MISSING) for k in _SEM}
-        pre_changed = pre_old != pre_new
-        cm.update_target(tid, "n", "1.2.3.4", ping_type="http",
-                         extra={"http_url": "http://new.local"})
-        post_old = {k: ref.get(k, _MISSING) for k in _SEM}
-        post_new = {k: combined.get(k, _MISSING) for k in _SEM}
-        post_changed = post_old != post_new
-        ok = pre_changed and not post_changed
-    print(f"Bug123 pre_persist semantic diff true, post false -> {ok}")
+def _loop_body():
+    with open(ALERT_MANAGER, encoding="utf-8") as f:
+        src = f.read()
+    m = re.search(
+        r"def _red_alarm_loop\(self\):.*?def _play_sync\(",
+        src, re.DOTALL,
+    )
+    return m.group(0) if m else ""
+
+
+def test_stop_check_under_lock_before_play():
+    body = _loop_body()
+    lock_pos = body.find("with self._alarm_lock:")
+    stop_pos = body.find("if self._red_alarm_stop.is_set():")
+    play_pos = body.find("self._play_sync")
+    ok = (
+        lock_pos != -1
+        and stop_pos != -1
+        and play_pos != -1
+        and lock_pos < stop_pos < play_pos
+        and "self._red_alarm_active = False" in body[lock_pos:play_pos]
+    )
+    print(f"Bug123 stop check under _alarm_lock before _play_sync -> {ok}")
     return ok
 
 
-def test_on_edit_uses_pre_persist_semantic_snapshot():
-    with open(MAIN_WINDOW, encoding="utf-8") as f:
+def test_no_finally_unconditional_reset():
+    body = _loop_body()
+    ok = "finally:" not in body
+    print(f"Bug123 _red_alarm_loop has no finally reset -> {ok}")
+    return ok
+
+
+def test_exception_path_resets_active_under_lock():
+    with open(ALERT_MANAGER, encoding="utf-8") as f:
         src = f.read()
-    ok = (
-        "old_semantic_view" in src
-        and "new_semantic_view" in src
-        and "semantic_changed_for_reseed" in src
-        and "if semantic_changed_for_reseed:" in src
-        and src.find("semantic_changed_for_reseed") < src.find("self.config.update_target")
-        and "old_view = {k: target.get(k, _MISSING)" not in src
+    m = re.search(
+        r"except Exception as e:.*?def _play_sync\(",
+        src, re.DOTALL,
     )
-    print(f"Bug123 _on_edit snapshots semantic view before update_target -> {ok}")
+    block = m.group(0) if m else ""
+    ok = (
+        "with self._alarm_lock:" in block
+        and "self._red_alarm_active = False" in block
+    )
+    print(f"Bug123 exception path resets active under lock -> {ok}")
+    return ok
+
+
+def test_stop_red_alarm_does_not_clear_active():
+    with open(ALERT_MANAGER, encoding="utf-8") as f:
+        src = f.read()
+    m = re.search(
+        r"def _stop_red_alarm\(self\):.*?def _red_alarm_loop\(",
+        src, re.DOTALL,
+    )
+    block = m.group(0) if m else ""
+    ok = (
+        "_red_alarm_stop.set()" in block
+        and re.search(
+            r"self\._red_alarm_active\s*=\s*False",
+            block,
+        ) is None
+    )
+    print(f"Bug123 _stop_red_alarm signals stop only (no active=False) -> {ok}")
     return ok
 
 
 def main():
     results = [
-        ("mutate", test_live_dict_semantic_diff_lost_after_update()),
-        ("source", test_on_edit_uses_pre_persist_semantic_snapshot()),
+        ("lock_order", test_stop_check_under_lock_before_play()),
+        ("no_finally", test_no_finally_unconditional_reset()),
+        ("except_reset", test_exception_path_resets_active_under_lock()),
+        ("stop_signal", test_stop_red_alarm_does_not_clear_active()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:
