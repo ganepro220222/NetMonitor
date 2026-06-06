@@ -304,6 +304,9 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(toolbar, text="🔔", width=36, height=30,
                       fg_color=("#5B7FA6","gray30"), hover_color=("#4A6E94","gray40"),
                       font=F(13), command=self._on_test_sound).pack(side="left", padx=(5, 0))
+        ctk.CTkButton(toolbar, text="✓ 已知晓", width=72, height=30,
+                      fg_color=("#5B7FA6","gray30"), hover_color=("#4A6E94","gray40"),
+                      font=F(12), command=self._on_ack_incidents).pack(side="left", padx=(5, 0))
         self._col_btn = ctk.CTkButton(
             toolbar,
             text="⊞ 双列" if self._columns == 1 else "⊟ 单列",
@@ -896,9 +899,21 @@ class MainWindow(ctk.CTk):
             try:
                 last_statuses = _ds.get_last_known_statuses()
                 _lst = self.__dict__.get("_last_statuses", {})
-                for tid, st in last_statuses.items():
-                    if tid in self._cards:
-                        _lst[tid] = st
+                seeded = {tid: st for tid, st in last_statuses.items()
+                          if tid in self._cards}
+                for tid, st in seeded.items():
+                    _lst[tid] = st
+                try:
+                    self.alerter.seed_status_tracking(seeded)
+                except Exception:
+                    pass
+                try:
+                    paused = {tid for tid, card in self._cards.items()
+                              if card.is_paused}
+                    self.alerter.reseed_webhook_incidents(
+                        self.config.get_targets(), paused)
+                except Exception:
+                    pass
             except Exception:
                 pass   # never block startup on a DB read failure
 
@@ -2180,6 +2195,13 @@ class MainWindow(ctk.CTk):
         self._evaluate_global_alarm()   # Re-evaluate after deletion (card + status already removed)
         # NOTE: no _schedule_auto_resize — deleting a node must NOT
         # change the window width. Scrollbar handles any overflow.
+
+    def _on_ack_incidents(self):
+        """ACK open webhook incidents (stop repeat reminders; recovery still sends)."""
+        n = self.alerter.acknowledge_all_incidents()
+        if n:
+            self.status_label.configure(
+                text=f"已确认 {n} 个未恢复告警（将停止重复 Webhook 提醒）")
 
     def _on_test_sound(self):
         self.status_label.configure(text="测试音效中（约 3 秒）...")
