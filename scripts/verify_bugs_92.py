@@ -16,7 +16,8 @@ def _simulate_first_probe_alert(last, tid, new_status, use_setdefault):
     old_st = last.get(tid)
     alerts = []
     if old_st and old_st != new_status:
-        cat = "availability" if (new_status == "red" or old_st == "red") else "ok"
+        cat = {"red": "availability", "orange": "availability",
+               "green": "ok"}.get(new_status, "ok")
         alerts.append({
             "old_status": old_st, "new_status": new_status, "category": cat,
         })

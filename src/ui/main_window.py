@@ -1116,15 +1116,10 @@ class MainWindow(ctk.CTk):
                 _lst = self.__dict__.get("_last_statuses", {})
                 old_st = _lst.get(tid)
                 if old_st and old_st != state.status:
-                    # Use 'availability' for ANY transition that touches red
-                    # status (both outage-start and recovery).  Previous code
-                    # used state.alert_category which is 'ok' on recovery —
-                    # that caused get_sla_stats to silently drop recovery
-                    # events and overstate outage duration.
-                    if state.status == "red" or old_st == "red":
-                        cat = "availability"
-                    else:
-                        cat = state.alert_category or "availability"
+                    # Persist the state machine's category (ok / availability /
+                    # performance).  get_sla_stats walks status transitions,
+                    # not category — recovery rows must be category='ok'.
+                    cat = state.alert_category or "availability"
                     _ds.record_alert(
                         target_id=tid, label=label, ip=ip,
                         ts=_t.time(), old_status=old_st,
