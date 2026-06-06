@@ -1,4 +1,5 @@
 """Regression checks for webhook reminder + traceroute diagnostic webhooks."""
+import ast
 import os
 import sys
 import time
@@ -234,17 +235,42 @@ def test_trace_refresh_requested_on_reminder():
     return ok
 
 
+def _attr_names(node) -> set:
+    return {a.attr for a in ast.walk(node) if isinstance(a, ast.Attribute)}
+
+
 def test_scheduler_callback_outside_lock():
+    """The traceroute result callback must run AFTER `with self._lock:` is
+    released — a blocking callback under the cache lock would stall every
+    scheduler commit.  Verify structurally (web_server can't be imported
+    without Flask) that the `if committed and self._result_callback:` block
+    is a TOP-LEVEL statement of _run_one (not nested inside the lock block),
+    comes after the lock block, and spawns a daemon thread for the callback.
+    """
     with open(WEB_SERVER, encoding="utf-8") as f:
-        block = f.read().split("if committed and self._result_callback:", 1)[1]
-    ok = (
-        "threading.Thread" in block
-        and block.index("threading.Thread") < block.find("self._lock", 20)
-        or "threading.Thread" in block.split("self._lock")[0]
-    )
-    # callback block is after the with self._lock section
-    ok = "threading.Thread" in block and "target=cb" in block
-    print(f"Bug131 scheduler callback async -> {ok}")
+        tree = ast.parse(f.read())
+
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_run_one"), None)
+    if fn is None:
+        print("Bug131 scheduler callback async -> False (no _run_one)")
+        return False
+
+    lock_idx = cb_idx = None
+    for i, stmt in enumerate(fn.body):          # direct children only
+        if isinstance(stmt, ast.With) and any(
+                "_lock" in _attr_names(item.context_expr) for item in stmt.items):
+            if lock_idx is None:
+                lock_idx = i
+        if isinstance(stmt, ast.If) and "_result_callback" in _attr_names(stmt.test):
+            cb_idx = i
+
+    ok = lock_idx is not None and cb_idx is not None and cb_idx > lock_idx
+    if ok:
+        cb_if = fn.body[cb_idx]
+        names = {n.id for n in ast.walk(cb_if) if isinstance(n, ast.Name)}
+        ok = "threading" in names and "Thread" in _attr_names(cb_if)
+    print(f"Bug131 scheduler callback async (top-level, after lock) -> {ok}")
     return ok
 
 
