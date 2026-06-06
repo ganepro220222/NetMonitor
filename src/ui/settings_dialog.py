@@ -53,12 +53,11 @@ _SECTIONS = [
         ("webhook_reminder_aggregate_threshold", "汇总提醒阈值 (节点数)", "int", 2, 99,
          "当前仍有 ≥ 此数量的 red 节点时发送汇总 reminder。"),
         ("webhook_include_trace", "Webhook 附带 traceroute 摘要", "bool", None, None,
-         "控制 reminder/recovery 诊断摘要及 diagnostic_update 推送；关闭后不发诊断更新。"
-         " traceroute 为疑似定位（tracert -d / traceroute -n）。"),
+         "开启后提醒与恢复附带路径摘要；关闭仍推 Webhook，不带路径、不发诊断更新。"),
         ("webhook_trace_update_enabled", "traceroute 变化时发送诊断更新", "bool", None, None, ""),
         ("webhook_trace_refresh_interval_min", "诊断刷新间隔 (分钟)", "int", 5, 120,
-         "长故障期间，重复提醒到期时多久可再发起 traceroute 以更新诊断（默认 15）。"
-         "独立于重复提醒间隔；tracert 较重，建议 ≥ 提醒间隔的 2–3 倍。"),
+         "红故障未恢复时，重复提醒后可 traceroute 刷新"
+         "（默认 15 分钟，宜 2–3 倍间隔）。"),
         ("webhook_trace_change_only", "仅故障点变化时推送诊断", "bool", None, None, ""),
     ]),
     ("Web 服务", [

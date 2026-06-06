@@ -49,7 +49,10 @@ def test_settings_help_text():
     ok = (
         "诊断刷新间隔" in src
         and "默认 15" in src
-        and "独立于重复提醒" in src
+        and "重复提醒后可" in src
+        and "宜 2–3 倍间隔" in src
+        and "关闭仍推 Webhook" in src
+        and "不带路径、不发诊断更新" in src
     )
     print(f"Bug140 settings dialog help text -> {ok}")
     return ok
