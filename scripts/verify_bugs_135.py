@@ -25,6 +25,10 @@ from src.config_manager import DEFAULT_CONFIG
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INTERVAL_MIN = 30
 INTERVAL_SEC = INTERVAL_MIN * 60
+# _tick_webhook_reminders only advances/sends when a webhook_url is set
+# (the url_ok gate added in the hygiene refactor), so every reminder test
+# must configure one or no reminder ever fires.
+_HOOK_URL = "http://127.0.0.1:9/hook"
 
 
 class _Cfg:
@@ -43,6 +47,7 @@ def _alerter(**cfg_kw):
         webhook_reminder_interval_min=INTERVAL_MIN,
         webhook_reminder_aggregate_enabled=True,
         webhook_reminder_aggregate_threshold=3,
+        webhook_url=_HOOK_URL,
         webhook_include_trace=False,
         webhook_trace_update_enabled=False,
         **cfg_kw))
