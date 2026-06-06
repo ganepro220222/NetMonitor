@@ -1186,7 +1186,10 @@ class MainWindow(ctk.CTk):
         if old != state.status:
             label = self._target_labels.get(tid, tid)
             ip    = self._target_ips.get(tid, "")
-            self.alerter.on_status_change(tid, label, ip, state.status)
+            self.alerter.on_status_change(
+                tid, label, ip, state.status,
+                ping_type=self._target_ping_types.get(tid, "icmp"),
+                failure_reason=state.failure_reason or "")
             self.logger.log_status_change(
                 label=label, ip=ip, old_status=old, new_status=state.status,
                 consecutive_loss=state.consecutive_loss, latency_ms=state.latency_ms)

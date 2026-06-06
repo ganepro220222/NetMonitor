@@ -6405,7 +6405,9 @@ class WebServer:
 
         # Lock-free: schedule traceroute, push targets snapshot, broadcast
         if status == "red" and (old_status not in ("red", "paused")):
-            self._scheduler.request_now(tid)
+            from src.trace_policy import should_request_traceroute
+            if should_request_traceroute(ping_type, failure_reason):
+                self._scheduler.request_now(tid)
         self._scheduler.set_targets(snap)
         self._broadcaster.push(json.dumps({"type": "update", "target": data}))
 

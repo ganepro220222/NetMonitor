@@ -1593,20 +1593,43 @@ class DataStore:
                 red_ts = next((e['ts'] for e in evts
                                if e.get('new_status') == 'red'), None)
                 if red_ts is not None:
-                    # incident_id is None on the Level-1 schema (get_alert_history
-                    # does not yet return it); get_incident_traceroute then uses
-                    # the time-window fallback.  Wired here for Level-2 forward-compat.
-                    inc_iid = next((e.get('incident_id') for e in evts
-                                    if e.get('new_status') == 'red'), None)
-                    snap = self.get_incident_traceroute(
-                        tid, red_ts, incident_id=inc_iid)
-                    if snap:
-                        brk = self.summarize_break(snap.get("hops", []))
-                        trace_t = _fmt_ts(snap.get("ts"))
-                        chg = "；路径较上次有变化" if snap.get("route_changed") else ""
-                        diag_text = f"🔬 故障时自动追踪 @ {trace_t}：{brk['text']}{chg}"
+                    from src.trace_policy import (
+                        should_request_traceroute,
+                        summarize_for_alert,
+                        trace_skip_summary,
+                    )
+                    red_ev = next((e for e in evts
+                                   if e.get('new_status') == 'red'), None)
+                    ptype = meta.get("ping_type", "icmp")
+                    red_fr = (red_ev.get("failure_reason") or "") if red_ev else ""
+                    if not should_request_traceroute(ptype, red_fr):
+                        diag_text = (
+                            "🔬 " + trace_skip_summary(ptype, red_fr)["text"])
                     else:
-                        diag_text = "🔬 故障时自动追踪：（无追踪记录，可能保留期已过或追踪未及执行）"
+                        # incident_id is None on the Level-1 schema
+                        # (get_alert_history does not yet return it);
+                        # get_incident_traceroute then uses the time-window
+                        # fallback.  Wired here for Level-2 forward-compat.
+                        inc_iid = next((e.get('incident_id') for e in evts
+                                        if e.get('new_status') == 'red'), None)
+                        snap = self.get_incident_traceroute(
+                            tid, red_ts, incident_id=inc_iid)
+                        if snap:
+                            brk = summarize_for_alert(
+                                snap.get("hops", []),
+                                ping_type=ptype,
+                                failure_reason=red_fr,
+                            )
+                            trace_t = _fmt_ts(snap.get("ts"))
+                            chg = ("；路径较上次有变化"
+                                   if snap.get("route_changed") else "")
+                            diag_text = (
+                                f"🔬 故障时自动追踪 @ {trace_t}："
+                                f"{brk['text']}{chg}")
+                        else:
+                            diag_text = (
+                                "🔬 故障时自动追踪：（无追踪记录，"
+                                "可能保留期已过或追踪未及执行）")
                     _write_row(ws_al, row_al, [diag_text] + [""] * 7,
                                fill=_fill("E1F5FE"), bold=False,
                                font_color="01579B", merge_to=8)

@@ -36,6 +36,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.traceroute_summary import summarize_break, trace_signature
+from src.trace_policy import (
+    should_request_traceroute,
+    summarize_for_alert,
+    trace_skip_summary,
+    trace_signature_from_summary,
+)
 
 try:
     import winsound
@@ -156,6 +162,9 @@ class WebhookIncident:
     last_trace_summary: dict | None = None
     last_trace_signature: tuple | None = None
     acknowledged: bool = False
+    ping_type: str = "icmp"
+    failure_reason: str = ""
+    trace_applicable: bool = True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -206,7 +215,9 @@ class AlertManager:
     # ──────────────────────────────────────────────────────────────
 
     def on_status_change(self, target_id: str, target_label: str,
-                         target_ip: str, new_status: str):
+                         target_ip: str, new_status: str, *,
+                         ping_type: str | None = None,
+                         failure_reason: str | None = None):
         """状态颜色发生变化时由主窗口调用，判断是否触发声音和通知。
 
         self.enabled controls AUDIO ONLY (sound files, red-alarm loop).
@@ -241,14 +252,19 @@ class AlertManager:
                 msg=f"「{target_label}」({target_ip}) 持续丢包，可能已断连！"
             )
             self._trigger_auto_trace(target_id, target_label, target_ip)
+            pt = ping_type or "icmp"
+            fr = failure_reason or ""
+            trace_ok = should_request_traceroute(pt, fr)
             _, is_new = self._open_or_update_webhook_incident(
-                target_id, target_label, target_ip, status="red")
+                target_id, target_label, target_ip, status="red",
+                ping_type=pt, failure_reason=fr,
+                trace_applicable=trace_ok)
             if is_new:
                 self._push_webhook(
                     event="alert_red", target=target_label,
                     ip=target_ip, status="red", message="连接中断",
                     extra=self._build_incident_extra(
-                        target_id, pending_trace=True))
+                        target_id, pending_trace=trace_ok))
 
         elif new_status == "orange":
             if old_status in ("gray", "green"):
@@ -536,7 +552,10 @@ class AlertManager:
     # ── Webhook incident lifecycle ───────────────────────────────────
 
     def _open_or_update_webhook_incident(self, tid: str, label: str, ip: str,
-                                         *, status: str = "red"):
+                                         *, status: str = "red",
+                                         ping_type: str = "icmp",
+                                         failure_reason: str = "",
+                                         trace_applicable: bool = True):
         with self._webhook_incident_lock:
             inc = self._webhook_incidents.get(tid)
             if inc is None:
@@ -545,7 +564,14 @@ class AlertManager:
                     tid=tid, label=label, ip=ip,
                     started_at=now, current_status=status,
                     last_reminder_at=now,
+                    ping_type=ping_type,
+                    failure_reason=failure_reason,
+                    trace_applicable=trace_applicable,
                 )
+                if not trace_applicable:
+                    skip = trace_skip_summary(ping_type, failure_reason)
+                    inc.last_trace_summary = skip
+                    inc.last_trace_signature = trace_signature_from_summary(skip)
                 self._webhook_incidents[tid] = inc
                 return self._snapshot_incident(inc), True
             inc.label = label
@@ -826,6 +852,10 @@ class AlertManager:
             inc = self._webhook_incidents.get(tid)
             if inc is None:
                 return
+            if not inc.trace_applicable:
+                return
+            if not should_request_traceroute(inc.ping_type, inc.failure_reason):
+                return
             if now - inc.last_trace_request_at < interval_sec:
                 return
             inc.last_trace_request_at = now
@@ -845,11 +875,11 @@ class AlertManager:
         if result.get("ip") is None:
             return
 
-        summary = summarize_break(result.get("hops", []))
-        signature = trace_signature(summary)
         route_changed = bool(result.get("route_changed"))
         should_send = False
         snap: dict | None = None
+        summary = None
+        signature = None
 
         with self._webhook_incident_lock:
             inc = self._webhook_incidents.get(tid)
@@ -859,6 +889,16 @@ class AlertManager:
                 return
             if result.get("ip") != inc.ip:
                 return
+            if not inc.trace_applicable:
+                return
+
+            summary = summarize_for_alert(
+                result.get("hops", []),
+                ping_type=inc.ping_type,
+                failure_reason=inc.failure_reason,
+                tcp_checks=result.get("tcp_checks"),
+            )
+            signature = trace_signature_from_summary(summary)
 
             first_trace = inc.last_trace_summary is None
             changed = signature != inc.last_trace_signature
