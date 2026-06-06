@@ -438,6 +438,14 @@ class AlertManager:
                     n += 1
         return n
 
+    def count_pending_ack_incidents(self) -> int:
+        """Un-ACK'd red incidents — matches webhook reminder eligibility."""
+        with self._webhook_incident_lock:
+            return sum(
+                1 for inc in self._webhook_incidents.values()
+                if inc.current_status == "red" and not inc.acknowledged
+            )
+
     def set_enabled(self, enabled: bool,
                     current_statuses: dict | None = None) -> None:
         """Toggle the alert manager on or off.

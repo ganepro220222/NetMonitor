@@ -304,9 +304,12 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(toolbar, text="🔔", width=36, height=30,
                       fg_color=("#5B7FA6","gray30"), hover_color=("#4A6E94","gray40"),
                       font=F(13), command=self._on_test_sound).pack(side="left", padx=(5, 0))
-        ctk.CTkButton(toolbar, text="✓ 已知晓", width=72, height=30,
-                      fg_color=("#5B7FA6","gray30"), hover_color=("#4A6E94","gray40"),
-                      font=F(12), command=self._on_ack_incidents).pack(side="left", padx=(5, 0))
+        self._ack_btn = ctk.CTkButton(
+            toolbar, text="已知晓", width=72, height=30,
+            fg_color=("#5B7FA6", "gray30"), hover_color=("#4A6E94", "gray40"),
+            font=F(12), state="disabled", command=self._on_ack_incidents)
+        self._ack_btn.pack(side="left", padx=(5, 0))
+        self._update_ack_btn()
         self._col_btn = ctk.CTkButton(
             toolbar,
             text="⊞ 双列" if self._columns == 1 else "⊟ 单列",
@@ -914,6 +917,7 @@ class MainWindow(ctk.CTk):
                         self.config.get_targets(), paused)
                 except Exception:
                     pass
+                self._update_ack_btn()
             except Exception:
                 pass   # never block startup on a DB read failure
 
@@ -1219,6 +1223,21 @@ class MainWindow(ctk.CTk):
         paused = {tid for tid, card in self._cards.items()
                   if card.is_paused}     # @property, no ()
         self.alerter.evaluate_alarm(active, paused)
+        self._update_ack_btn()
+
+    def _update_ack_btn(self):
+        """Sync ACK toolbar button with un-ACK'd red webhook incidents."""
+        n = self.alerter.count_pending_ack_incidents()
+        if n > 0:
+            text = "✓ 已知晓" if n == 1 else f"✓ 已知晓 ({n})"
+            self._ack_btn.configure(
+                text=text, state="normal",
+                fg_color="#C45C26", hover_color="#A84D1F")
+        else:
+            self._ack_btn.configure(
+                text="已知晓", state="disabled",
+                fg_color=("#5B7FA6", "gray30"),
+                hover_color=("#4A6E94", "gray40"))
 
     # ------------------------------------------------------------------
     # Web server + URL click (C12)
@@ -2199,6 +2218,7 @@ class MainWindow(ctk.CTk):
     def _on_ack_incidents(self):
         """ACK open webhook incidents (stop repeat reminders; recovery still sends)."""
         n = self.alerter.acknowledge_all_incidents()
+        self._update_ack_btn()
         if n:
             self.status_label.configure(
                 text=f"已确认 {n} 个未恢复告警（将停止重复 Webhook 提醒）")
