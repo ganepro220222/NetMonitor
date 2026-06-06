@@ -218,10 +218,19 @@ _SETTINGS_INT_RANGES: dict[str, tuple[int, int]] = {
     "db_traceroute_retention_days": (1, 3650),
     "db_diag_retention_days": (1, 3650),
     "default_columns": (1, 2),
+    "webhook_reminder_interval_min": (1, 1440),
+    "webhook_reminder_max_count": (0, 999),
+    "webhook_trace_refresh_interval_min": (5, 1440),
+    "webhook_reminder_aggregate_threshold": (2, 99),
 }
 
 _SETTINGS_BOOL_KEYS = frozenset({
     "web_autostart", "tray_minimize", "sound_alert_enabled",
+    "webhook_reminder_enabled",
+    "webhook_reminder_aggregate_enabled",
+    "webhook_include_trace",
+    "webhook_trace_update_enabled",
+    "webhook_trace_change_only",
 })
 
 _SETTINGS_STRING_KEYS = frozenset({
@@ -364,8 +373,17 @@ DEFAULT_CONFIG = {
         "db_alert_retention_days": 365,
         "db_traceroute_retention_days": 30,
         "db_diag_retention_days": 180,
-    "webhook_url":    "",
-    "webhook_events": ["red", "green"],
+        "webhook_url":    "",
+        "webhook_events": ["red", "green"],
+        "webhook_reminder_enabled": False,
+        "webhook_reminder_interval_min": 30,
+        "webhook_reminder_max_count": 0,
+        "webhook_reminder_aggregate_enabled": False,
+        "webhook_reminder_aggregate_threshold": 3,
+        "webhook_include_trace": True,
+        "webhook_trace_update_enabled": True,
+        "webhook_trace_refresh_interval_min": 30,
+        "webhook_trace_change_only": True,
 
         # 系统托盘
         "tray_minimize": False,
