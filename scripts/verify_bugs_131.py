@@ -56,7 +56,7 @@ def test_sanitize_reminder_interval():
         "webhook_reminder_enabled": True,
     })
     ok = (
-        out.get("webhook_reminder_interval_min") == 1440
+        out.get("webhook_reminder_interval_min") == 120
         and out.get("webhook_reminder_max_count") == 0
         and out.get("webhook_trace_refresh_interval_min") == 5
         and out.get("webhook_reminder_enabled") is True

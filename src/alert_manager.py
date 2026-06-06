@@ -696,7 +696,7 @@ class AlertManager:
     def _tick_webhook_reminders(self) -> None:
         if not self._cfg_bool("webhook_reminder_enabled"):
             return
-        interval_sec = self._cfg_int("webhook_reminder_interval_min", 30) * 60
+        interval_sec = self._cfg_int("webhook_reminder_interval_min", 5) * 60
         max_count = self._cfg_int("webhook_reminder_max_count", 0)
         aggregate_on = self._cfg_bool("webhook_reminder_aggregate_enabled", False)
         aggregate_threshold = self._cfg_int("webhook_reminder_aggregate_threshold", 3)

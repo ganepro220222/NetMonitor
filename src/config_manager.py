@@ -218,9 +218,9 @@ _SETTINGS_INT_RANGES: dict[str, tuple[int, int]] = {
     "db_traceroute_retention_days": (1, 3650),
     "db_diag_retention_days": (1, 3650),
     "default_columns": (1, 2),
-    "webhook_reminder_interval_min": (1, 1440),
+    "webhook_reminder_interval_min": (3, 120),
     "webhook_reminder_max_count": (0, 999),
-    "webhook_trace_refresh_interval_min": (5, 1440),
+    "webhook_trace_refresh_interval_min": (5, 120),
     "webhook_reminder_aggregate_threshold": (2, 99),
 }
 
@@ -370,7 +370,7 @@ DEFAULT_CONFIG = {
         "db_diag_retention_days": 180,
         "webhook_url":    "",
         "webhook_reminder_enabled": False,
-        "webhook_reminder_interval_min": 30,
+        "webhook_reminder_interval_min": 5,
         "webhook_reminder_max_count": 0,
         "webhook_reminder_aggregate_enabled": False,
         "webhook_reminder_aggregate_threshold": 3,

@@ -44,7 +44,8 @@ _SECTIONS = [
          "故障时自动推送到企业微信/钉钉/飞书/自定义接口。留空不推送。"),
         ("webhook_reminder_enabled", "红色未恢复重复提醒", "bool", None, None,
          "仅针对红色可用性故障；短故障在下次提醒前恢复则不会重复推送。"),
-        ("webhook_reminder_interval_min", "重复提醒间隔 (分钟)", "int", 1, 1440, ""),
+        ("webhook_reminder_interval_min", "重复提醒间隔 (分钟)", "int", 3, 120,
+         "红色未恢复且未确认时，每隔 N 分钟重复推送一次（默认 5，最短 3）"),
         ("webhook_reminder_max_count", "最多提醒次数", "int", 0, 999,
          "0 = 不限制次数"),
         ("webhook_reminder_aggregate_enabled", "多节点汇总重复提醒", "bool", None, None,
@@ -55,7 +56,7 @@ _SECTIONS = [
          "控制 reminder/recovery 诊断摘要及 diagnostic_update 推送；关闭后不发诊断更新。"
          " traceroute 为疑似定位（tracert -d / traceroute -n）。"),
         ("webhook_trace_update_enabled", "traceroute 变化时发送诊断更新", "bool", None, None, ""),
-        ("webhook_trace_refresh_interval_min", "诊断刷新间隔 (分钟)", "int", 5, 1440, ""),
+        ("webhook_trace_refresh_interval_min", "诊断刷新间隔 (分钟)", "int", 5, 120, ""),
         ("webhook_trace_change_only", "仅故障点变化时推送诊断", "bool", None, None, ""),
     ]),
     ("Web 服务", [
