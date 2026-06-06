@@ -188,6 +188,13 @@ class AlertManager:
 
         self._webhook_incidents: dict[str, WebhookIncident] = {}
         self._webhook_incident_lock = threading.RLock()
+        # Throttles the multi-node aggregate reminder to one push per
+        # reminder interval.  An aggregate already lists EVERY open-red
+        # node, so when incidents come due on different 30s ticks (the
+        # normal case — nodes rarely fail in the same second) each due
+        # event must not fire its own full aggregate, or the "avoid group
+        # message storm" feature would itself produce a storm.
+        self._last_aggregate_reminder_at = 0.0
         self._reminder_stop = threading.Event()
         self._trace_request_callback = None
         threading.Thread(
@@ -715,7 +722,13 @@ class AlertManager:
             return
 
         if aggregate_on and len(open_red) >= aggregate_threshold:
-            self._push_aggregate_reminder(open_red, now)
+            # One aggregate per interval: it already covers every open-red
+            # node (including the ones that just came due), so a second
+            # aggregate fired by the next node's due tick would be redundant
+            # noise.  Trace refreshes for the due nodes still proceed.
+            if now - self._last_aggregate_reminder_at >= interval_sec:
+                self._last_aggregate_reminder_at = now
+                self._push_aggregate_reminder(open_red, now)
             for snap in due:
                 self._maybe_request_trace_refresh(snap, now)
             return
