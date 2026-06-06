@@ -693,13 +693,23 @@ class AlertManager:
                     continue
                 if max_count and inc.reminder_count >= max_count:
                     continue
+                # Bump reminder_count BEFORE snapshotting a due incident so
+                # the emitted reminder carries the correct ordinal: the first
+                # repeat reads "提醒次数：1", not 0.  Snapshotting first (the
+                # old order) shipped a pre-increment count to both the text
+                # webhook and the custom-JSON payload (incident.reminder_count
+                # and every aggregate node), i.e. a reminder that claimed zero
+                # reminders had been sent.  Non-due incidents are snapshotted
+                # as-is — their count already reflects reminders actually sent
+                # — so the aggregate node listing stays accurate for them too.
+                is_due = now - inc.last_reminder_at >= interval_sec
+                if is_due:
+                    inc.last_reminder_at = now
+                    inc.reminder_count += 1
                 snap = self._snapshot_incident(inc)
                 open_red.append(snap)
-                if now - inc.last_reminder_at < interval_sec:
-                    continue
-                inc.last_reminder_at = now
-                inc.reminder_count += 1
-                due.append(snap)
+                if is_due:
+                    due.append(snap)
 
         if not due:
             return
