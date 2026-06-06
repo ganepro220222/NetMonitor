@@ -25,13 +25,17 @@ WAV 文件来源：
   生成后的文件会一直保留，不会每次启动都重新生成。
 """
 
+import copy
 import math
 import os
 import struct
 import threading
 import time
 import wave
+from dataclasses import dataclass
 from pathlib import Path
+
+from src.traceroute_summary import summarize_break, trace_signature
 
 try:
     import winsound
@@ -131,6 +135,31 @@ def ensure_sound_files(assets_dir: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Webhook incident lifecycle (reminder + traceroute diagnostics)
+# ──────────────────────────────────────────────────────────────────────
+
+_AGGREGATE_LIST_MAX = 10
+_AGGREGATE_TRACE_MAX = 5
+
+
+@dataclass
+class WebhookIncident:
+    tid: str
+    label: str
+    ip: str
+    started_at: float
+    current_status: str = "red"
+    last_reminder_at: float = 0.0
+    reminder_count: int = 0
+    last_trace_at: float = 0.0
+    last_trace_request_at: float = 0.0
+    last_trace_summary: dict | None = None
+    last_trace_signature: tuple | None = None
+    last_trace_update_sent_at: float = 0.0
+    acknowledged: bool = False
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 告警管理器主体
 # ──────────────────────────────────────────────────────────────────────
 
@@ -156,6 +185,15 @@ class AlertManager:
         self._data_store = None
         self._config     = None
         self._last_trace: dict = {}
+
+        self._webhook_incidents: dict[str, WebhookIncident] = {}
+        self._webhook_incident_lock = threading.RLock()
+        self._reminder_stop = threading.Event()
+        self._trace_request_callback = None
+        threading.Thread(
+            target=self._webhook_reminder_loop,
+            daemon=True, name="webhook-reminder",
+        ).start()
 
     # ──────────────────────────────────────────────────────────────
     # 主接口
@@ -197,8 +235,14 @@ class AlertManager:
                 msg=f"「{target_label}」({target_ip}) 持续丢包，可能已断连！"
             )
             self._trigger_auto_trace(target_id, target_label, target_ip)
-            self._push_webhook(event="alert_red", target=target_label,
-                               ip=target_ip, status="red", message="连接中断")
+            _, is_new = self._open_or_update_webhook_incident(
+                target_id, target_label, target_ip, status="red")
+            if is_new:
+                self._push_webhook(
+                    event="alert_red", target=target_label,
+                    ip=target_ip, status="red", message="连接中断",
+                    extra=self._build_incident_extra(
+                        target_id, pending_trace=True))
 
         elif new_status == "orange":
             if old_status in ("gray", "green"):
@@ -219,6 +263,7 @@ class AlertManager:
                 # external alert channel already knows about the open
                 # incident from the red push -- a second webhook would
                 # read as a new event).
+                self._update_webhook_incident_status(target_id, "orange")
                 if self.enabled:
                     self._play_async(self._sound_files["warning"])
                 self._send_notification(
@@ -238,13 +283,16 @@ class AlertManager:
                     # webhook, matching the loudness of the original red
                     # alert.  Operators paged for an outage deserve a
                     # follow-up "all clear" through the same channel.
+                    closed = self._close_webhook_incident(target_id)
                     self._send_notification(
                         title="🟢 网络已恢复",
                         msg=f"「{target_label}」({target_ip}) 连接已恢复正常。"
                     )
-                    self._push_webhook(event="recovery", target=target_label,
-                                       ip=target_ip, status="green",
-                                       message="连接已恢复正常")
+                    self._push_webhook(
+                        event="recovery", target=target_label,
+                        ip=target_ip, status="green",
+                        message="连接已恢复正常",
+                        extra=self._build_recovery_extra(closed))
                 else:
                     # Recovery from orange (warning, never went red):
                     # mirror orange-in's notification policy -- local
@@ -264,6 +312,7 @@ class AlertManager:
         with self._status_lock:
             self._last_alert_status.pop(target_id, None)
             self._red_targets.discard(target_id)
+        self._drop_webhook_incident(target_id)
         # Do NOT call _stop_red_alarm() here — evaluate_alarm() in MainWindow
         # will decide based on the full current state after the card is removed.
 
@@ -277,6 +326,7 @@ class AlertManager:
         with self._status_lock:
             self._last_alert_status.pop(target_id, None)
             self._red_targets.discard(target_id)
+        self._drop_webhook_incident(target_id)
         # Do NOT call _stop_red_alarm() here — evaluate_alarm() in MainWindow
         # will do a fresh scan and decide.  This prevents pausing any node
         # (even a green one) from accidentally silencing alarms on other nodes.
@@ -286,6 +336,101 @@ class AlertManager:
 
     def set_config(self, config) -> None:
         self._config = config
+
+    def set_trace_request_callback(self, cb) -> None:
+        """Bind urgent traceroute requests (e.g. WebServer.request_traceroute_now)."""
+        self._trace_request_callback = cb
+
+    def seed_status_tracking(self, statuses: dict[str, str]) -> None:
+        """Restore _last_alert_status / _red_targets after restart."""
+        with self._status_lock:
+            for tid, st in statuses.items():
+                self._last_alert_status[tid] = st
+                if st == "red":
+                    self._red_targets.add(tid)
+                else:
+                    self._red_targets.discard(tid)
+
+    def reseed_webhook_incidents(self, targets: list, paused_ids: set) -> int:
+        """Rebuild in-memory webhook incidents from DB open incidents.
+
+        Does NOT send alert_red.  Sets last_reminder_at=now so restart
+        does not immediately burst reminders.
+        """
+        if self._data_store is None:
+            return 0
+        target_map = {t["id"]: t for t in targets if isinstance(t, dict)}
+        tids = [tid for tid in target_map if tid not in paused_ids]
+        if not tids:
+            return 0
+        try:
+            open_inc = self._data_store.get_open_incidents(tids)
+        except Exception:
+            return 0
+
+        now = time.time()
+        count = 0
+        for tid, info in open_inc.items():
+            t = target_map.get(tid)
+            if t is None:
+                continue
+            last_st = info.get("last_status", "red")
+            if last_st == "paused":
+                continue
+            cur_st = last_st if last_st in ("red", "orange") else "red"
+            started_at = float(info.get("started_at") or now)
+            label = info.get("label") or t.get("label", tid)
+            ip = info.get("ip") or t.get("ip", "")
+            iid = info.get("incident_id")
+
+            summary = None
+            signature = None
+            last_trace_at = 0.0
+            try:
+                trace_snap = self._data_store.get_incident_traceroute(
+                    tid, started_at, incident_id=iid)
+                if trace_snap and trace_snap.get("hops"):
+                    summary = summarize_break(trace_snap["hops"])
+                    signature = trace_signature(summary)
+                    last_trace_at = float(trace_snap.get("ts") or 0)
+            except Exception:
+                pass
+
+            with self._webhook_incident_lock:
+                if tid in self._webhook_incidents:
+                    continue
+                self._webhook_incidents[tid] = WebhookIncident(
+                    tid=tid,
+                    label=label,
+                    ip=ip,
+                    started_at=started_at,
+                    current_status=cur_st,
+                    last_reminder_at=now,
+                    last_trace_at=last_trace_at,
+                    last_trace_summary=summary,
+                    last_trace_signature=signature,
+                )
+                count += 1
+        return count
+
+    def acknowledge_incident(self, target_id: str) -> bool:
+        """Stop webhook reminders for one open incident; recovery still fires."""
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(target_id)
+            if inc is None:
+                return False
+            inc.acknowledged = True
+        return True
+
+    def acknowledge_all_incidents(self) -> int:
+        """ACK every open incident (in-memory only)."""
+        with self._webhook_incident_lock:
+            n = 0
+            for inc in self._webhook_incidents.values():
+                if not inc.acknowledged:
+                    inc.acknowledged = True
+                    n += 1
+        return n
 
     def set_enabled(self, enabled: bool,
                     current_statuses: dict | None = None) -> None:
@@ -374,61 +519,489 @@ class AlertManager:
         # (e.g. attaching route-change detection hooks here).
         # Direct DB writes removed to eliminate double-write.
 
+    # ── Webhook incident lifecycle ───────────────────────────────────
+
+    def _open_or_update_webhook_incident(self, tid: str, label: str, ip: str,
+                                         *, status: str = "red"):
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            if inc is None:
+                now = time.time()
+                inc = WebhookIncident(
+                    tid=tid, label=label, ip=ip,
+                    started_at=now, current_status=status,
+                    last_reminder_at=now,
+                )
+                self._webhook_incidents[tid] = inc
+                return self._snapshot_incident(inc), True
+            inc.label = label
+            inc.ip = ip
+            inc.current_status = status
+            return self._snapshot_incident(inc), False
+
+    def _update_webhook_incident_status(self, tid: str, status: str) -> None:
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            if inc is not None:
+                inc.current_status = status
+
+    def _close_webhook_incident(self, tid: str) -> dict | None:
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.pop(tid, None)
+        if inc is None:
+            return None
+        snap = self._snapshot_incident(inc)
+        snap["closed_at"] = time.time()
+        return snap
+
+    def _drop_webhook_incident(self, tid: str) -> None:
+        with self._webhook_incident_lock:
+            self._webhook_incidents.pop(tid, None)
+
+    @staticmethod
+    def _snapshot_incident(inc: WebhookIncident) -> dict:
+        return {
+            "tid": inc.tid,
+            "label": inc.label,
+            "ip": inc.ip,
+            "started_at": inc.started_at,
+            "current_status": inc.current_status,
+            "reminder_count": inc.reminder_count,
+            "last_trace_at": inc.last_trace_at,
+            "last_trace_summary": copy.deepcopy(inc.last_trace_summary),
+            "last_trace_signature": inc.last_trace_signature,
+        }
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        s = max(0, int(seconds))
+        if s < 60:
+            return f"{s} 秒"
+        if s < 3600:
+            return f"{s // 60} 分钟"
+        hours = s // 3600
+        mins = (s % 3600) // 60
+        return f"{hours} 小时 {mins} 分钟" if mins else f"{hours} 小时"
+
+    def _cfg_bool(self, key: str, default: bool = False) -> bool:
+        if self._config is None:
+            return default
+        val = self._config.get_setting(key)
+        return default if val is None else bool(val)
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        if self._config is None:
+            return default
+        val = self._config.get_setting(key)
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return default
+
+    def _build_trace_extra(self, snap: dict, *, pending: bool = False) -> dict:
+        if pending:
+            return {
+                "available": False,
+                "summary": "已触发 traceroute，等待结果",
+            }
+        if not self._cfg_bool("webhook_include_trace", True):
+            return {"available": False, "summary": None}
+        summary = snap.get("last_trace_summary")
+        if not summary:
+            return {"available": False, "summary": "暂无 traceroute 结果"}
+        trace_time = None
+        if snap.get("last_trace_at"):
+            trace_time = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(snap["last_trace_at"]))
+        return {
+            "available": True,
+            "trace_time": trace_time,
+            "summary": summary.get("text"),
+            "reached": summary.get("reached"),
+            "last_ok": summary.get("last_ok"),
+            "break_at": summary.get("break_at"),
+            "route_changed": False,
+        }
+
+    def _build_incident_extra(self, tid: str, *, pending_trace: bool = False) -> dict:
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            snap = self._snapshot_incident(inc) if inc else None
+        if not snap:
+            return {}
+        now = time.time()
+        duration = now - snap["started_at"]
+        return {
+            "incident": {
+                "started_at": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(snap["started_at"])),
+                "duration_seconds": round(duration),
+                "duration_text": self._format_duration(duration),
+                "reminder_count": snap["reminder_count"],
+                "recovered": False,
+                "recovered_at": None,
+            },
+            "trace": self._build_trace_extra(snap, pending=pending_trace),
+        }
+
+    def _build_recovery_extra(self, closed: dict | None) -> dict | None:
+        if not closed:
+            return None
+        recovered_at = closed.get("closed_at", time.time())
+        duration = recovered_at - closed["started_at"]
+        trace_extra = self._build_trace_extra(closed, pending=False)
+        if not trace_extra.get("available"):
+            trace_extra = {"available": False,
+                           "summary": "故障期间 traceroute 未完成 / 无可用结果"}
+        return {
+            "incident": {
+                "started_at": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(closed["started_at"])),
+                "recovered_at": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(recovered_at)),
+                "duration_seconds": round(duration),
+                "duration_text": self._format_duration(duration),
+                "reminder_count": closed["reminder_count"],
+                "recovered": True,
+            },
+            "trace": trace_extra,
+        }
+
+    def _webhook_reminder_loop(self) -> None:
+        while not self._reminder_stop.wait(30):
+            try:
+                self._tick_webhook_reminders()
+            except Exception as e:
+                print(f"[AlertManager] reminder loop error: {e}")
+
+    def _tick_webhook_reminders(self) -> None:
+        if not self._cfg_bool("webhook_reminder_enabled"):
+            return
+        interval_sec = self._cfg_int("webhook_reminder_interval_min", 30) * 60
+        max_count = self._cfg_int("webhook_reminder_max_count", 0)
+        aggregate_on = self._cfg_bool("webhook_reminder_aggregate_enabled", False)
+        aggregate_threshold = self._cfg_int("webhook_reminder_aggregate_threshold", 3)
+        now = time.time()
+        open_red: list[dict] = []
+        due: list[dict] = []
+
+        with self._webhook_incident_lock:
+            for inc in self._webhook_incidents.values():
+                if inc.current_status != "red":
+                    continue
+                if inc.acknowledged:
+                    continue
+                if max_count and inc.reminder_count >= max_count:
+                    continue
+                snap = self._snapshot_incident(inc)
+                open_red.append(snap)
+                if now - inc.last_reminder_at < interval_sec:
+                    continue
+                inc.last_reminder_at = now
+                inc.reminder_count += 1
+                due.append(snap)
+
+        if not due:
+            return
+
+        if aggregate_on and len(open_red) >= aggregate_threshold:
+            self._push_aggregate_reminder(open_red, now)
+            for snap in due:
+                self._maybe_request_trace_refresh(snap, now)
+            return
+
+        for snap in due:
+            self._push_webhook(
+                event="alert_reminder",
+                target=snap["label"],
+                ip=snap["ip"],
+                status=snap["current_status"],
+                message="连接仍未恢复",
+                extra=self._build_reminder_extra(snap),
+            )
+            self._maybe_request_trace_refresh(snap, now)
+
+    def _push_aggregate_reminder(self, open_snaps: list[dict], now: float) -> None:
+        sorted_snaps = sorted(
+            open_snaps,
+            key=lambda s: now - s["started_at"],
+            reverse=True,
+        )
+        extra = self._build_aggregate_reminder_extra(sorted_snaps, now)
+        max_dur = extra["aggregate"]["max_duration_text"]
+        count = extra["aggregate"]["count"]
+        message = (
+            f"当前仍有 {count} 个节点 red，最长已持续 {max_dur}"
+        )
+        self._push_webhook(
+            event="alert_reminder_aggregate",
+            target=f"汇总({count}节点)",
+            ip="",
+            status="red",
+            message=message,
+            extra=extra,
+        )
+
+    def _build_aggregate_reminder_extra(self, snaps: list[dict],
+                                        now: float) -> dict:
+        nodes = []
+        max_seconds = 0
+        for snap in snaps:
+            dur_s = max(0, int(now - snap["started_at"]))
+            max_seconds = max(max_seconds, dur_s)
+            trace = self._build_trace_extra(snap, pending=False)
+            nodes.append({
+                "tid": snap["tid"],
+                "target": snap["label"],
+                "ip": snap["ip"],
+                "duration_seconds": dur_s,
+                "duration_text": self._format_duration(dur_s),
+                "reminder_count": snap["reminder_count"],
+                "trace_summary": trace.get("summary"),
+            })
+        return {
+            "aggregate": {
+                "count": len(nodes),
+                "max_duration_seconds": max_seconds,
+                "max_duration_text": self._format_duration(max_seconds),
+                "nodes": nodes,
+            },
+        }
+
+    def _build_reminder_extra(self, snap: dict) -> dict:
+        now = time.time()
+        duration = now - snap["started_at"]
+        return {
+            "incident": {
+                "started_at": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(snap["started_at"])),
+                "duration_seconds": round(duration),
+                "duration_text": self._format_duration(duration),
+                "reminder_count": snap["reminder_count"],
+                "recovered": False,
+                "recovered_at": None,
+            },
+            "trace": self._build_trace_extra(snap, pending=False),
+        }
+
+    def _maybe_request_trace_refresh(self, snap: dict, now: float) -> None:
+        if not self._cfg_bool("webhook_include_trace", True):
+            return
+        if not self._cfg_bool("webhook_trace_update_enabled", True):
+            return
+        interval_sec = (
+            self._cfg_int("webhook_trace_refresh_interval_min", 30) * 60)
+        tid = snap["tid"]
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            if inc is None:
+                return
+            if now - inc.last_trace_request_at < interval_sec:
+                return
+            inc.last_trace_request_at = now
+        cb = self._trace_request_callback
+        if cb is None:
+            return
+        try:
+            cb(tid)
+        except Exception as e:
+            print(f"[AlertManager] trace refresh request failed: {e}")
+
+    def on_traceroute_result(self, result: dict) -> None:
+        """Called by WebServer scheduler after a committed traceroute."""
+        tid = result.get("tid")
+        if not tid:
+            return
+        if result.get("ip") is None:
+            return
+
+        summary = summarize_break(result.get("hops", []))
+        signature = trace_signature(summary)
+        route_changed = bool(result.get("route_changed"))
+        should_send = False
+        snap: dict | None = None
+
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            if inc is None:
+                return
+            if inc.current_status not in ("red", "orange"):
+                return
+            if result.get("ip") != inc.ip:
+                return
+
+            first_trace = inc.last_trace_summary is None
+            changed = signature != inc.last_trace_signature
+            inc.last_trace_at = float(result.get("ts") or time.time())
+            inc.last_trace_summary = summary
+            inc.last_trace_signature = signature
+
+            if inc.acknowledged:
+                should_send = False
+            elif self._cfg_bool("webhook_trace_update_enabled", True):
+                change_only = self._cfg_bool("webhook_trace_change_only", True)
+                should_send = first_trace or (not change_only) or changed
+            snap = self._snapshot_incident(inc)
+
+        if not should_send or snap is None:
+            return
+
+        trace_extra = self._build_trace_extra(snap, pending=False)
+        trace_extra["route_changed"] = route_changed
+        now = time.time()
+        duration = now - snap["started_at"]
+        extra = {
+            "incident": {
+                "started_at": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(snap["started_at"])),
+                "duration_seconds": round(duration),
+                "duration_text": self._format_duration(duration),
+                "reminder_count": snap["reminder_count"],
+                "recovered": False,
+                "recovered_at": None,
+            },
+            "trace": trace_extra,
+        }
+        self._push_webhook(
+            event="diagnostic_update",
+            target=snap["label"],
+            ip=snap["ip"],
+            status=snap["current_status"],
+            message=summary.get("text", "traceroute 诊断更新"),
+            extra=extra,
+        )
+
     # ── Webhook push ─────────────────────────────────────────────────
 
     def _push_webhook(self, *, event: str, target: str, ip: str,
-                      status: str, message: str) -> None:
-        """Fire-and-forget webhook push in a daemon thread.
-        Silently does nothing if no URL is configured.
-        Auto-detects WeCom/DingTalk, Feishu, or generic JSON format.
-        """
-        # set_config() may not have been called yet (or ever); guard so a
-        # status-change event never crashes the caller thread.
+                      status: str, message: str,
+                      extra: dict | None = None) -> None:
+        """Fire-and-forget webhook push in a daemon thread."""
         if self._config is None:
             return
         url = (self._config.get_setting("webhook_url") or "").strip()
         if not url:
             return
-        import time
         ts_str = time.strftime("%Y-%m-%d %H:%M:%S")
         threading.Thread(
             target=self._send_webhook,
-            args=(url, event, target, ip, status, message, ts_str),
-            daemon=True, name="webhook"
+            args=(url, event, target, ip, status, message, ts_str, extra),
+            daemon=True, name="webhook",
         ).start()
 
     @staticmethod
-    def _send_webhook(url, event, target, ip, status, message, ts_str):
+    def _send_webhook(url, event, target, ip, status, message, ts_str,
+                      extra=None):
         """Build platform-aware payload and POST it. Errors are logged only."""
-        import json, urllib.request, urllib.error
-        icon = {"alert_red": "🔴", "recovery": "🟢"}.get(event, "🟠")
-        text = (f"{icon} 【网络监控告警】\n"
-                f"节点：{target}\nIP：{ip}\n"
-                f"状态：{status}\n详情：{message}\n时间：{ts_str}")
+        import json
+        import urllib.request
+
+        icons = {
+            "alert_red": "🔴",
+            "recovery": "🟢",
+            "alert_reminder": "🔴",
+            "alert_reminder_aggregate": "🔴",
+            "diagnostic_update": "🧭",
+        }
+        titles = {
+            "alert_red": "网络监控告警",
+            "recovery": "网络监控恢复",
+            "alert_reminder": "告警仍未恢复",
+            "alert_reminder_aggregate": "告警仍未恢复汇总",
+            "diagnostic_update": "故障诊断更新",
+        }
+        icon = icons.get(event, "🟠")
+        title = titles.get(event, "网络监控告警")
+        text = AlertManager._format_webhook_text(
+            icon, title, event, target, ip, status, message, ts_str, extra)
+
         url_l = url.lower()
         if "feishu" in url_l or "larkoffice" in url_l:
-            # Feishu / Lark
-            payload = {"msg_type": "text",
-                       "content": {"text": text}}
+            payload = {"msg_type": "text", "content": {"text": text}}
         elif ("qyapi" in url_l or "weixin" in url_l
               or "dingtalk" in url_l or "oapi" in url_l):
-            # WeCom / DingTalk
-            payload = {"msgtype": "text",
-                       "text": {"content": text}}
+            payload = {"msgtype": "text", "text": {"content": text}}
         else:
-            # Generic / custom HTTP endpoint
-            payload = {"event": event, "target": target, "ip": ip,
-                       "status": status, "message": message,
-                       "timestamp": ts_str}
+            payload = {
+                "event": event, "target": target, "ip": ip,
+                "status": status, "message": message,
+                "timestamp": ts_str,
+            }
+            if extra:
+                payload.update(extra)
         try:
             body = json.dumps(payload, ensure_ascii=False).encode()
-            req  = urllib.request.Request(
+            req = urllib.request.Request(
                 url, data=body,
                 headers={"Content-Type": "application/json; charset=utf-8"},
                 method="POST")
-            with urllib.request.urlopen(req, timeout=10): pass
+            with urllib.request.urlopen(req, timeout=10):
+                pass
         except Exception as e:
             print(f"[Webhook] push failed: {e}")
+
+    @staticmethod
+    def _format_webhook_text(icon, title, event, target, ip, status,
+                             message, ts_str, extra):
+        if event == "alert_reminder_aggregate":
+            return AlertManager._format_aggregate_webhook_text(
+                icon, title, message, ts_str, extra)
+
+        lines = [
+            f"{icon}【{title}】",
+            f"节点：{target}",
+            f"IP：{ip}",
+            f"状态：{status}",
+        ]
+        inc = (extra or {}).get("incident") or {}
+        trace = (extra or {}).get("trace") or {}
+        if inc.get("duration_text"):
+            lines.append(f"已持续：{inc['duration_text']}")
+        if inc.get("reminder_count") is not None and event == "alert_reminder":
+            lines.append(f"提醒次数：{inc['reminder_count']}")
+        lines.append(f"详情：{message}")
+        if trace.get("summary"):
+            lines.append(f"诊断：{trace['summary']}")
+        elif event == "alert_red":
+            lines.append("诊断：已触发 traceroute，等待结果")
+        if trace.get("trace_time"):
+            lines.append(f"追踪时间：{trace['trace_time']}")
+        if event == "recovery" and inc.get("recovered_at"):
+            lines.append(f"恢复时间：{inc['recovered_at']}")
+        lines.append(f"时间：{ts_str}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_aggregate_webhook_text(icon, title, message, ts_str, extra):
+        agg = (extra or {}).get("aggregate") or {}
+        nodes = agg.get("nodes") or []
+        lines = [
+            f"{icon}【{title}】",
+            f"详情：{message}",
+            "",
+        ]
+        listed = nodes[:_AGGREGATE_LIST_MAX]
+        for i, n in enumerate(listed, 1):
+            lines.append(
+                f"{i}. {n.get('target', '?')} {n.get('ip', '')}，"
+                f"持续 {n.get('duration_text', '?')}")
+        omitted = len(nodes) - len(listed)
+        if omitted > 0:
+            lines.append(f"其余 {omitted} 个节点请查看 Web Dashboard。")
+
+        trace_lines = []
+        if any(n.get("trace_summary") for n in nodes[:_AGGREGATE_TRACE_MAX]):
+            lines.append("")
+            lines.append("诊断摘要（疑似定位，前若干节点）：")
+            for n in nodes[:_AGGREGATE_TRACE_MAX]:
+                summary = n.get("trace_summary")
+                if not summary:
+                    continue
+                trace_lines.append(f"- {n.get('target', '?')}：{summary}")
+            lines.extend(trace_lines)
+
+        lines.append(f"时间：{ts_str}")
+        return "\n".join(lines)
 
     def acknowledge_alarm(self):
         """人工确认告警，停止循环告警声。"""

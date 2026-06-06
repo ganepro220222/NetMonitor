@@ -408,6 +408,59 @@ class DataStore:
             return {}
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
+    def get_open_incidents(self, target_ids: list[str]) -> dict[str, dict]:
+        """Return open (unrecovered) incidents for the given target ids.
+
+        Derived from alert_events + incident_id continuity restored at
+        startup via _restore_active_incidents.  Paused targets are
+        excluded — pause is operator silence, not an open outage.
+        """
+        if not target_ids:
+            return {}
+        conn = self._read_conn()
+        try:
+            placeholders = ",".join("?" * len(target_ids))
+            rows = conn.execute(
+                f"""
+                SELECT ae.target_id, ae.incident_id, ae.new_status,
+                       ae.label, ae.ip
+                FROM alert_events ae
+                INNER JOIN (
+                    SELECT target_id, MAX(id) AS max_id
+                    FROM alert_events
+                    WHERE target_id IN ({placeholders})
+                    GROUP BY target_id
+                ) latest ON ae.id = latest.max_id
+                WHERE ae.incident_id IS NOT NULL
+                  AND ae.new_status NOT IN ('green', 'paused')
+                """,
+                target_ids,
+            ).fetchall()
+            out: dict[str, dict] = {}
+            for tid, iid, ns, label, ip in rows:
+                start_row = conn.execute(
+                    "SELECT MIN(ts) FROM alert_events "
+                    "WHERE incident_id=? AND new_status IN ('red', 'orange')",
+                    (iid,),
+                ).fetchone()
+                started_at = start_row[0] if start_row and start_row[0] is not None else None
+                if started_at is None:
+                    fb = conn.execute(
+                        "SELECT MIN(ts) FROM alert_events WHERE incident_id=?",
+                        (iid,),
+                    ).fetchone()
+                    started_at = fb[0] if fb and fb[0] is not None else time.time()
+                out[tid] = {
+                    "incident_id": iid,
+                    "started_at": float(started_at),
+                    "last_status": ns,
+                    "label": label or "",
+                    "ip": ip or "",
+                }
+            return out
+        except Exception:
+            return {}
+
     def get_last_known_statuses(self) -> dict:
         """
         Return {target_id: last_new_status} — the latest alert transition per
@@ -3441,70 +3494,9 @@ class DataStore:
 
     @staticmethod
     def summarize_break(hops: list) -> dict:
-        """Reduce a hop list to a human-readable break-point summary.
-
-        run_traceroute() classifies each hop's status as:
-          ok | filtered | break | after | timeout_raw
-        where 'break' is the first unreachable hop *after* the last reachable
-        ('ok') hop — i.e. the point the path stops getting through.
-
-        Returns a dict:
-          {
-            'reached'      : bool,        # path reached destination (no break)
-            'last_ok'      : {hop, ip} | None,   # last reachable hop
-            'break_at'     : {hop, ip} | None,   # first hop that broke
-            'total_hops'   : int,
-            'text'         : str,         # ready-to-render Chinese summary
-          }
-        """
-        hops = hops or []
-        total = len(hops)
-        last_ok = None
-        break_at = None
-        for h in hops:
-            st = h.get("status")
-            if st == "ok":
-                last_ok = {"hop": h.get("hop"), "ip": h.get("ip")}
-            elif st == "break" and break_at is None:
-                # Carry `error` through so the ICMP-unreachable reason text
-                # captured by the parser (e.g. "报告: 无法访问目标网络")
-                # can be surfaced in the break-point summary instead of the
-                # misleading "断点无响应".
-                break_at = {"hop": h.get("hop"), "ip": h.get("ip"),
-                            "error": h.get("error")}
-
-        # A traceroute that returned a single synthetic "break" hop with an
-        # error (subprocess failure / no output) — surface that distinctly.
-        if total == 1 and hops[0].get("status") == "break" \
-                and hops[0].get("error"):
-            return {"reached": False, "last_ok": None, "break_at": None,
-                    "total_hops": 0,
-                    "text": f"追踪失败：{hops[0].get('error')}"}
-
-        if break_at is None:
-            # No break recorded → path completed (reached target or only
-            # ICMP-filtered intermediate hops).
-            tail = f"，最后可达 第{last_ok['hop']}跳 {last_ok['ip']}" \
-                   if last_ok and last_ok.get("ip") else ""
-            return {"reached": True, "last_ok": last_ok, "break_at": None,
-                    "total_hops": total,
-                    "text": f"路径完整、未发现明确断点（共{total}跳）{tail}"}
-
-        last_part = (f"最后可达 第{last_ok['hop']}跳 {last_ok['ip']}"
-                     if last_ok and last_ok.get("ip")
-                     else "首跳即不可达")
-        bip  = break_at.get("ip")
-        berr = break_at.get("error")
-        if bip and berr:
-            # Router replied with ICMP unreachable — show both IP and reason.
-            break_part = f"第{break_at['hop']}跳起中断（断点 {bip}，{berr}）"
-        elif bip:
-            break_part = f"第{break_at['hop']}跳起中断（断点 {bip}）"
-        else:
-            break_part = f"第{break_at['hop']}跳起中断（断点无响应）"
-        return {"reached": False, "last_ok": last_ok, "break_at": break_at,
-                "total_hops": total,
-                "text": f"{last_part} → {break_part}（共{total}跳）"}
+        """Delegate to shared traceroute_summary (Excel / webhook / UI)."""
+        from src.traceroute_summary import summarize_break as _summarize_break
+        return _summarize_break(hops)
 
     # ── ICMP diagnostic history (Phase 3) ─────────────────────────────
 

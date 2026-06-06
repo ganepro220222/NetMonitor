@@ -40,10 +40,22 @@ _SECTIONS = [
         # performance degradation at ORANGE — latency never escalates to RED.
     ]),
     ("告警与通知", [
-        # sound is handled by AlertManager, stored separately
-        # For now we expose it as a pseudo-bool that gets forwarded
         ("webhook_url", "Webhook 推送地址", "str", None, None,
          "故障时自动推送到企业微信/钉钉/飞书/自定义接口。留空不推送。"),
+        ("webhook_reminder_enabled", "红色未恢复重复提醒", "bool", None, None,
+         "仅针对红色可用性故障；短故障在下次提醒前恢复则不会重复推送。"),
+        ("webhook_reminder_interval_min", "重复提醒间隔 (分钟)", "int", 1, 1440, ""),
+        ("webhook_reminder_max_count", "最多提醒次数", "int", 0, 999,
+         "0 = 不限制次数"),
+        ("webhook_reminder_aggregate_enabled", "多节点汇总重复提醒", "bool", None, None,
+         "未恢复 red 数达到阈值时合并为一条 reminder，避免群消息风暴。"),
+        ("webhook_reminder_aggregate_threshold", "汇总提醒阈值 (节点数)", "int", 2, 99,
+         "当前仍有 ≥ 此数量的 red 节点时发送汇总 reminder。"),
+        ("webhook_include_trace", "Webhook 附带 traceroute 摘要", "bool", None, None,
+         "traceroute 为疑似定位，不代表绝对故障点（tracert -d / traceroute -n）。"),
+        ("webhook_trace_update_enabled", "traceroute 变化时发送诊断更新", "bool", None, None, ""),
+        ("webhook_trace_refresh_interval_min", "诊断刷新间隔 (分钟)", "int", 5, 1440, ""),
+        ("webhook_trace_change_only", "仅故障点变化时推送诊断", "bool", None, None, ""),
     ]),
     ("Web 服务", [
         ("web_port",             "监控端口号",              "int",  1024, 65535, "更改后需重启 Web 服务生效"),
@@ -100,7 +112,7 @@ class SettingsDialog(ctk.CTkToplevel):
     def __init__(self, parent, config_manager, alert_manager, on_save):
         super().__init__(parent)
         self.title("⚙ 全局设置")
-        self.geometry("480x620")
+        self.geometry("520x720")
         self.resizable(False, True)
         self.transient(parent)
         self.grab_set()

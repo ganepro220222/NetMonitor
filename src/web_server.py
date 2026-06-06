@@ -109,6 +109,7 @@ class _TracerouteScheduler:
         self.interval   = interval
         self.max_hops   = 30   # configurable via WebServer.set_traceroute_max_hops()
         self._push_fn   = push_fn
+        self._result_callback = None
         self._data_store = None   # injected via set_data_store(); persists scheduled runs
         self._prev_route_changed: dict[str, bool] = {}  # Rule B: require 2 consecutive changes
         self._targets: dict[str, str] = {}
@@ -176,6 +177,10 @@ class _TracerouteScheduler:
                                        "label": v.get("label", tid),
                                        "probe_ports": v.get("probe_ports", [80, 443])}
             self._targets = normalized
+
+    def set_result_callback(self, cb):
+        """Non-blocking hook after a traceroute result is committed."""
+        self._result_callback = cb
 
     def request_now(self, tid: str):
         """Queue an urgent traceroute (red alert / manual). Deduped by tid."""
@@ -416,6 +421,28 @@ class _TracerouteScheduler:
                     }))
                 except Exception:
                     pass   # never crash the scheduler thread over a push failure
+
+        if committed and self._result_callback:
+            label = (target_info.get("label", tid)
+                     if isinstance(target_info, dict) else tid)
+            payload = {
+                "tid": tid,
+                "label": label,
+                "ip": ip,
+                "ts": entry["updated_ts"],
+                "hops": hops,
+                "route_changed": route_changed,
+                "resolve_ip": resolve,
+                "tcp_checks": tcp_checks,
+            }
+            cb = self._result_callback
+            try:
+                threading.Thread(
+                    target=cb, args=(payload,),
+                    daemon=True, name=f"trace-cb-{tid}",
+                ).start()
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -5974,6 +6001,7 @@ class WebServer:
             cache=self._tracer_cache, cache_lock=self._tracer_lock,
             push_fn=self._broadcaster.push)
         self._data_store   = None   # set via set_data_store()
+        self._alert_ack_fn = None   # set via set_alert_ack_callback()
         # Concurrency guard for /api/traceroute/quick — each request spawns a
         # subprocess; 3 concurrent is more than enough for a single-operator tool.
         self._quick_trace_sem = threading.BoundedSemaphore(3)
@@ -6120,6 +6148,16 @@ class WebServer:
 
     def set_traceroute_max_hops(self, hops: int):
         self._scheduler.max_hops = max(5, min(64, int(hops)))
+
+    def set_traceroute_result_callback(self, cb):
+        self._scheduler.set_result_callback(cb)
+
+    def request_traceroute_now(self, tid: str):
+        self._scheduler.request_now(tid)
+
+    def set_alert_ack_callback(self, cb):
+        """Bind AlertManager.acknowledge_incident for /api/alerts/ack."""
+        self._alert_ack_fn = cb
 
     def _build_scheduler_snapshot(self) -> dict:
         """
@@ -6841,6 +6879,29 @@ class WebServer:
         def api_status():
             with self._lock: data = list(self._targets.values())
             return json.dumps(data), 200, {"Content-Type": "application/json"}
+
+        @app.route("/api/alerts/ack", methods=["POST"])
+        def api_alerts_ack():
+            """ACK one open webhook incident (stop repeat reminders)."""
+            fn = self._alert_ack_fn
+            if fn is None:
+                return json.dumps({"ok": False, "error": "not_configured"}), 503, {
+                    "Content-Type": "application/json"}
+            try:
+                body = request.get_json(silent=True) or {}
+            except Exception:
+                body = {}
+            tid = _body_str(body, "tid")
+            if not tid:
+                return json.dumps({"ok": False, "error": "tid_required"}), 400, {
+                    "Content-Type": "application/json"}
+            try:
+                ok = bool(fn(tid))
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)}), 500, {
+                    "Content-Type": "application/json"}
+            return json.dumps({"ok": ok}), 200, {
+                "Content-Type": "application/json"}
 
         # ── Quick-tracert window (Feature B) ─────────────────────────────
         # Accepts either:
