@@ -14,6 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALERT_MANAGER = os.path.join(ROOT, "src", "alert_manager.py")
 WEB_SERVER = os.path.join(ROOT, "src", "web_server.py")
 SETTINGS_DIALOG = os.path.join(ROOT, "src", "ui", "settings_dialog.py")
+_HOOK_URL = "http://127.0.0.1:9/hook"
 
 
 class _Cfg:
@@ -97,7 +98,8 @@ def test_reminder_not_before_interval():
 
 def test_reminder_after_interval():
     a = _alerter(webhook_reminder_enabled=True,
-                 webhook_reminder_interval_min=1)
+                 webhook_reminder_interval_min=1,
+                 webhook_url=_HOOK_URL)
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     a._webhook_incidents["t1"].last_reminder_at = 0
     calls = []
@@ -221,6 +223,7 @@ def test_trace_refresh_requested_on_reminder():
     a = _alerter(
         webhook_reminder_enabled=True,
         webhook_reminder_interval_min=1,
+        webhook_url=_HOOK_URL,
         webhook_include_trace=True,
         webhook_trace_update_enabled=True,
         webhook_trace_refresh_interval_min=5,
@@ -304,7 +307,8 @@ def test_recovery_extra_has_duration():
 
 def test_sound_disabled_webhook_reminder_still_works():
     a = _alerter(enabled=False, webhook_reminder_enabled=True,
-                 webhook_reminder_interval_min=1)
+                 webhook_reminder_interval_min=1,
+                 webhook_url=_HOOK_URL)
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     a._webhook_incidents["t1"].last_reminder_at = 0
     calls = []

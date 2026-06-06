@@ -102,6 +102,7 @@ def test_reseed_reminder_after_interval():
         "webhook_reminder_enabled": True,
         "webhook_reminder_interval_min": 1,
         "webhook_reminder_max_count": 0,
+        "webhook_url": "http://127.0.0.1:9/hook",
         "webhook_include_trace": False,
         "webhook_trace_update_enabled": False,
     }.get(k)})())
@@ -125,6 +126,7 @@ def test_ack_stops_reminder_recovery_still_possible():
         "webhook_reminder_enabled": True,
         "webhook_reminder_interval_min": 1,
         "webhook_reminder_max_count": 0,
+        "webhook_url": "http://127.0.0.1:9/hook",
         "webhook_include_trace": False,
         "webhook_trace_update_enabled": False,
     }.get(k)})())

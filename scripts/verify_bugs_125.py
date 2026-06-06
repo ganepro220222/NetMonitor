@@ -243,17 +243,16 @@ def test_engine_add_target_after_bad_window_size():
     return ok
 
 
-def test_bad_webhook_events_list_sanitized():
-    with tempfile.TemporaryDirectory() as td:
-        payload = {
-            "settings": {
-                "webhook_events": "not-a-list",
-            },
-            "targets": [],
-        }
-        cm = _init_with_payload(payload, td)
-        ok = cm.get_setting("webhook_events") == DEFAULT_CONFIG["settings"]["webhook_events"]
-    print(f"Bug125 bad webhook_events falls back to default -> {ok}")
+def test_legacy_webhook_events_dropped_on_sanitize():
+    from src.config_manager import _sanitize_settings
+    out = _sanitize_settings({"webhook_events": ["red", "green"]})
+    bad = _sanitize_settings({"webhook_events": "not-a-list"})
+    ok = (
+        "webhook_events" not in out
+        and "webhook_events" not in bad
+        and "webhook_events" not in DEFAULT_CONFIG["settings"]
+    )
+    print(f"Bug125 legacy webhook_events dropped -> {ok}")
     return ok
 
 
@@ -370,7 +369,7 @@ def main():
         ("engine_window", test_engine_add_target_after_bad_window_size()),
         ("window_geometry", test_window_geometry_preserved_on_load()),
         ("bad_window_geometry", test_bad_window_geometry_dropped()),
-        ("bad_webhook_events", test_bad_webhook_events_list_sanitized()),
+        ("legacy_webhook_events", test_legacy_webhook_events_dropped_on_sanitize()),
         ("valid_settings", test_valid_settings_override_preserved()),
         ("settings_sanitize", test_source_has_settings_sanitization()),
         ("bad_thresholds", test_bad_thresholds_type_sanitized()),

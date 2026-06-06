@@ -240,7 +240,9 @@ class _TracerouteScheduler:
     def _run_one(self, tid: str, target_info):
         """
         Run traceroute + TCP checks for one target and store in cache.
-        target_info: {"ip": "...", "probe_ports": [...]} or plain ip string.
+        target_info: {"ip": "...", "label": "...", "probe_ports": [...]}
+        or a plain ip string (legacy).  label is forwarded to traceroute_logs
+        and the traceroute result callback.
         TCP checks are included so the "ICMP blocked but service up" detection
         works correctly even when the background scheduler updates the cache.
         """
@@ -791,6 +793,12 @@ body.theme-dark{
 .b-loss{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.4);color:#f87171}
 .b-ok{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#4ade80}
 .b-warn{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fbbf24}
+.ack-btn{font-size:11px;padding:3px 10px;border-radius:20px;margin-top:8px;margin-right:6px;
+  display:inline-block;cursor:pointer;border:1px solid rgba(34,197,94,.45);
+  background:rgba(34,197,94,.12);color:#4ade80;font-weight:600}
+.ack-btn:hover{background:rgba(34,197,94,.22)}
+.ack-done{font-size:11px;padding:3px 10px;border-radius:20px;margin-top:8px;margin-right:6px;
+  display:inline-block;color:var(--dim);border:1px solid var(--border)}
 .hist-section{flex-shrink:0;background:var(--surface);border-top:1px solid var(--border)}
 .hist-toggle{width:100%;background:none;border:none;cursor:pointer;
   display:flex;align-items:center;gap:8px;padding:10px 20px;
@@ -1674,6 +1682,34 @@ function formatFailure(r){
   return '请求失败';
 }
 
+const acknowledgedTids=new Set();
+
+async function ackTarget(tid,btn){
+  if(!tid)return;
+  if(btn){btn.disabled=true;btn.textContent='…';}
+  try{
+    const r=await fetch('/api/alerts/ack',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tid}),
+    });
+    const j=await r.json();
+    if(j&&j.ok){
+      acknowledgedTids.add(tid);
+      const t=targets[tid];
+      if(t)patchCard(t);
+    }else if(btn){btn.disabled=false;btn.textContent='✓ 已知晓';}
+  }catch(e){
+    if(btn){btn.disabled=false;btn.textContent='✓ 已知晓';}
+  }
+}
+
+function buildAckBtnHtml(t){
+  if(t.status!=='red')return '';
+  if(acknowledgedTids.has(t.tid))return '<span class="ack-done">✓ 已知晓</span>';
+  return `<button type="button" class="ack-btn" data-ack-tid="${esc(t.tid)}">✓ 已知晓</button>`;
+}
+
 function renderCards(){
   const grid=document.getElementById('grid');
   const items=Object.values(targets).filter(t=>isVisible(t.tid));
@@ -1724,13 +1760,19 @@ function renderCards(){
           <span class="ctype">${typeLabel}</span></div></div>
       <div id="lat-${t.tid}">${latHtml}</div>
       <div id="sub-${t.tid}">${jit}</div>
-      <div id="badges-${t.tid}">${loss}${ok}${warn}</div>
+      <div id="badges-${t.tid}">${buildAckBtnHtml(t)}${loss}${ok}${warn}</div>
       <div id="ports-${t.tid}">${buildPortsHtml(t)}</div>
     </div>`;}).join('');
   // One delegated click listener per render; idempotent guard via
   // dataset.bound so we don't stack handlers on every SSE update.
   if(!grid.dataset.bound){
     grid.addEventListener('click',ev=>{
+      const ackBtn=ev.target.closest('[data-ack-tid]');
+      if(ackBtn){
+        ev.stopPropagation();
+        ackTarget(ackBtn.dataset.ackTid,ackBtn);
+        return;
+      }
       const card=ev.target.closest('[data-tid][data-clickable]');
       if(!card)return;
       const tid=card.dataset.tid;
@@ -1766,6 +1808,7 @@ function buildSubHtml(t){
 }
 function buildBadgesHtml(t){
   if(t.status==='paused')return'';
+  const ack=buildAckBtnHtml(t);
   const loss=t.loss_rate>0.01?`<div class="cbadge b-loss">丢包 ${(t.loss_rate*100).toFixed(0)}%</div>`:'';
   const ok=!loss&&t.status==='green'?'<div class="cbadge b-ok">连通</div>':'';
   const warn=!loss&&t.status==='orange'&&t.alert_category==='availability'?'<div class="cbadge b-warn">质量劣化</div>':'';
@@ -1775,7 +1818,7 @@ function buildBadgesHtml(t){
     else if(t.cert_days_left<=15)cert=`<div class="cbadge b-loss">🔒 证书${t.cert_days_left}天</div>`;
     else if(t.cert_days_left<=30)cert=`<div class="cbadge b-warn">🔒 证书${t.cert_days_left}天</div>`;
   }
-  return loss+ok+warn+cert;
+  return ack+loss+ok+warn+cert;
 }
 function buildPortsHtml(t){
   const ps=portStatus[t.tid];
@@ -1801,6 +1844,7 @@ function buildPortsHtml(t){
 // on every SSE update — which restarted CSS animations and lost in-flight
 // click events every second.
 function patchCard(t){
+  if(t.status!=='red')acknowledgedTids.delete(t.tid);
   const el=document.getElementById('card-'+t.tid);
   if(!el){renderCards();return;}
   const s=st(t.status);

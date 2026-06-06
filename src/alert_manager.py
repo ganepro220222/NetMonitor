@@ -155,7 +155,6 @@ class WebhookIncident:
     last_trace_request_at: float = 0.0
     last_trace_summary: dict | None = None
     last_trace_signature: tuple | None = None
-    last_trace_update_sent_at: float = 0.0
     acknowledged: bool = False
 
 
@@ -605,6 +604,11 @@ class AlertManager:
         except (TypeError, ValueError):
             return default
 
+    def _webhook_configured(self) -> bool:
+        if self._config is None:
+            return False
+        return bool((self._config.get_setting("webhook_url") or "").strip())
+
     def _build_trace_extra(self, snap: dict, *, pending: bool = False) -> dict:
         if pending:
             return {
@@ -688,6 +692,7 @@ class AlertManager:
         max_count = self._cfg_int("webhook_reminder_max_count", 0)
         aggregate_on = self._cfg_bool("webhook_reminder_aggregate_enabled", False)
         aggregate_threshold = self._cfg_int("webhook_reminder_aggregate_threshold", 3)
+        url_ok = self._webhook_configured()
         now = time.time()
         open_red: list[dict] = []
         due: list[dict] = []
@@ -700,22 +705,16 @@ class AlertManager:
                     continue
                 if max_count and inc.reminder_count >= max_count:
                     continue
-                # Bump reminder_count BEFORE snapshotting a due incident so
-                # the emitted reminder carries the correct ordinal: the first
-                # repeat reads "提醒次数：1", not 0.  Snapshotting first (the
-                # old order) shipped a pre-increment count to both the text
-                # webhook and the custom-JSON payload (incident.reminder_count
-                # and every aggregate node), i.e. a reminder that claimed zero
-                # reminders had been sent.  Non-due incidents are snapshotted
-                # as-is — their count already reflects reminders actually sent
-                # — so the aggregate node listing stays accurate for them too.
                 is_due = now - inc.last_reminder_at >= interval_sec
-                if is_due:
+                # Only advance reminder counters when a webhook can actually
+                # be sent — otherwise max_count / last_reminder_at are
+                # silently consumed with no external effect.
+                if is_due and url_ok:
                     inc.last_reminder_at = now
                     inc.reminder_count += 1
                 snap = self._snapshot_incident(inc)
                 open_red.append(snap)
-                if is_due:
+                if is_due and url_ok:
                     due.append(snap)
 
         if not due:
@@ -860,6 +859,8 @@ class AlertManager:
             inc.last_trace_signature = signature
 
             if inc.acknowledged:
+                should_send = False
+            elif not self._cfg_bool("webhook_include_trace", True):
                 should_send = False
             elif self._cfg_bool("webhook_trace_update_enabled", True):
                 change_only = self._cfg_bool("webhook_trace_change_only", True)

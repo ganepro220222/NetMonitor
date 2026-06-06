@@ -276,13 +276,8 @@ def _sanitize_settings(raw: dict) -> dict:
                 if geo and _WINDOW_GEOMETRY_RE.fullmatch(geo):
                     out[key] = geo
             continue
-        if key == "webhook_events":
-            if isinstance(val, list):
-                events = [e.strip() for e in val
-                          if isinstance(e, str) and e.strip()]
-                if events:
-                    out[key] = events
-            continue
+        # webhook_events: legacy key — no longer read at runtime; drop on
+        # sanitize so new saves don't perpetuate a dead setting.
         if key in _SETTINGS_STRING_KEYS:
             if isinstance(val, str):
                 out[key] = val.strip()
@@ -374,7 +369,6 @@ DEFAULT_CONFIG = {
         "db_traceroute_retention_days": 30,
         "db_diag_retention_days": 180,
         "webhook_url":    "",
-        "webhook_events": ["red", "green"],
         "webhook_reminder_enabled": False,
         "webhook_reminder_interval_min": 30,
         "webhook_reminder_max_count": 0,
