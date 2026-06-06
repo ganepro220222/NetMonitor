@@ -12,8 +12,6 @@ from src.traceroute_summary import summarize_break, trace_signature
 
 # ── failure layer classification ─────────────────────────────────────
 
-_ICMP_NETWORK = frozenset()  # any non-empty ICMP fail is network-layer
-
 _TCP_ENDPOINT = frozenset({
     "tcp_timeout", "connection_refused", "invalid_port",
 })
@@ -68,12 +66,12 @@ def failure_layer(ping_type: str | None,
             return "endpoint"
 
     if pt == "icmp":
-        return "network" if fr else "network"
+        return "network"
 
     if pt == "tcp":
         if fr.startswith("dns_failed:"):
             return "endpoint"
-        return "endpoint" if fr else "endpoint"
+        return "endpoint"
 
     if pt in ("http", "https"):
         return "endpoint"
@@ -81,7 +79,7 @@ def failure_layer(ping_type: str | None,
     if pt == "dns":
         return "endpoint"
 
-    return "network" if pt == "icmp" else "endpoint"
+    return "endpoint"
 
 
 def should_request_traceroute(ping_type: str | None,
