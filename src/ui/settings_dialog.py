@@ -56,7 +56,9 @@ _SECTIONS = [
          "控制 reminder/recovery 诊断摘要及 diagnostic_update 推送；关闭后不发诊断更新。"
          " traceroute 为疑似定位（tracert -d / traceroute -n）。"),
         ("webhook_trace_update_enabled", "traceroute 变化时发送诊断更新", "bool", None, None, ""),
-        ("webhook_trace_refresh_interval_min", "诊断刷新间隔 (分钟)", "int", 5, 120, ""),
+        ("webhook_trace_refresh_interval_min", "诊断刷新间隔 (分钟)", "int", 5, 120,
+         "长故障期间，重复提醒到期时多久可再发起 traceroute 以更新诊断（默认 15）。"
+         "独立于重复提醒间隔；tracert 较重，建议 ≥ 提醒间隔的 2–3 倍。"),
         ("webhook_trace_change_only", "仅故障点变化时推送诊断", "bool", None, None, ""),
     ]),
     ("Web 服务", [

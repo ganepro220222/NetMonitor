@@ -820,7 +820,7 @@ class AlertManager:
         if not self._cfg_bool("webhook_trace_update_enabled", True):
             return
         interval_sec = (
-            self._cfg_int("webhook_trace_refresh_interval_min", 30) * 60)
+            self._cfg_int("webhook_trace_refresh_interval_min", 15) * 60)
         tid = snap["tid"]
         with self._webhook_incident_lock:
             inc = self._webhook_incidents.get(tid)

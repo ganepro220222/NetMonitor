@@ -376,7 +376,7 @@ DEFAULT_CONFIG = {
         "webhook_reminder_aggregate_threshold": 3,
         "webhook_include_trace": True,
         "webhook_trace_update_enabled": True,
-        "webhook_trace_refresh_interval_min": 30,
+        "webhook_trace_refresh_interval_min": 15,
         "webhook_trace_change_only": True,
 
         # 系统托盘
