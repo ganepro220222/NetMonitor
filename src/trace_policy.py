@@ -19,8 +19,18 @@ _TCP_ENDPOINT = frozenset({
 _HTTP_ENDPOINT_EXACT = frozenset({
     "http_timeout", "too_many_redirects", "invalid_url",
     "keyword_not_found", "keyword_found", "connection_refused",
-    "tcp_timeout",
+    "tcp_timeout", "bad_response", "body_incomplete", "body_recv_timeout",
+    "chunked_premature_eof", "header_incomplete", "recv_closed",
+    "recv_timeout", "tcp_failed", "tls_timeout",
 })
+
+PING_TYPE_LABELS = {
+    "icmp": "ICMP",
+    "tcp": "TCP",
+    "http": "HTTP",
+    "https": "HTTPS",
+    "dns": "DNS",
+}
 
 _DNS_ENDPOINT_EXACT = frozenset({
     "dns_timeout", "dns_bad_response", "dns_no_a_record", "dns_no_domain",
@@ -121,7 +131,8 @@ def trace_skip_summary(ping_type: str | None,
     }
 
 
-def _describe_failure(fr: str) -> str:
+def describe_failure(fr: str | None) -> str:
+    """Translate machine failure codes into short Chinese labels."""
     if not fr:
         return ""
     mapping = {
@@ -129,8 +140,20 @@ def _describe_failure(fr: str) -> str:
         "timeout": "ICMP 超时",
         "tcp_timeout": "TCP 连接超时",
         "connection_refused": "TCP 连接被拒绝",
+        "tcp_failed": "TCP 连接失败",
         "http_timeout": "HTTP 请求超时",
+        "too_many_redirects": "HTTP 重定向过多",
+        "invalid_url": "URL 无效",
+        "bad_response": "HTTP 响应异常",
+        "body_incomplete": "HTTP 响应体不完整",
+        "body_recv_timeout": "HTTP 响应体接收超时",
+        "chunked_premature_eof": "分块传输提前结束",
+        "header_incomplete": "HTTP 响应头不完整",
+        "recv_timeout": "接收超时",
+        "recv_closed": "连接被对端关闭",
+        "tls_timeout": "TLS 握手超时",
         "dns_timeout": "DNS 查询超时",
+        "dns_bad_response": "DNS 响应异常",
         "nxdomain": "域名不存在 (NXDOMAIN)",
         "dns_no_a_record": "DNS 无 A 记录",
         "dns_no_domain": "未配置查询域名",
@@ -150,7 +173,28 @@ def _describe_failure(fr: str) -> str:
         return "DNS 解析失败"
     if fr.startswith("tcp_failed:"):
         return "TCP 连接失败"
+    if fr.startswith("dns_rcode_"):
+        return f"DNS 错误码 {fr[10:]}"
+    if fr.startswith("dns_error:"):
+        return "DNS 查询错误"
+    if fr.startswith("url_parse:"):
+        return "URL 解析失败"
+    if fr.startswith("send_failed:"):
+        return "HTTP 发送失败"
+    if fr.startswith("unexpected:"):
+        return "HTTP 请求异常"
+    if fr.startswith("error:"):
+        return f"探测错误 ({fr[6:]})"
     return fr.split(":", 1)[0]
+
+
+def ping_type_label(ping_type: str | None) -> str:
+    pt = (ping_type or "icmp").strip().lower()
+    return PING_TYPE_LABELS.get(pt, pt.upper() or "ICMP")
+
+
+# Back-compat alias for existing imports / tests
+_describe_failure = describe_failure
 
 
 def _hops_have_break(hops: list) -> bool:

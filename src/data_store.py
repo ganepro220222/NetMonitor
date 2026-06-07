@@ -291,6 +291,7 @@ class DataStore:
     def record_alert(self, *, target_id: str, label: str, ip: str,
                      ts: float, old_status: str, new_status: str,
                      category: str, failure_reason: str = "",
+                     ping_type: str = "",
                      captured_generation: Optional[int] = None):
         """记录状态变化事件（含故障原因，自动分配 incident_id）。
 
@@ -313,11 +314,12 @@ class DataStore:
             "ts": float(ts), "old_status": old_status,
             "new_status": new_status, "category": category,
             "failure_reason": failure_reason or "",
+            "ping_type": (ping_type or "").strip().lower() or "icmp",
             "captured_generation": captured_generation,
         }))
 
     def on_target_removed(self, *, target_id: str, label: str, ip: str,
-                          old_status: str):
+                          old_status: str, ping_type: str = ""):
         """Close any open incident and drop in-memory state when a node is deleted."""
         # Bump generation BEFORE queuing the removal so any in-flight
         # diag task captured the OLD generation; its persist call will
@@ -328,6 +330,7 @@ class DataStore:
             "label": label,
             "ip": ip,
             "old_status": old_status,
+            "ping_type": (ping_type or "").strip().lower() or "icmp",
             "ts": int(time.time()),
         }))
 
@@ -1114,14 +1117,16 @@ class DataStore:
             if target_id:
                 rows = conn.execute(
                     "SELECT id, target_id, label, ip, ts, old_status, "
-                    "new_status, category, incident_id FROM alert_events "
+                    "new_status, category, failure_reason, incident_id, "
+                    "ping_type FROM alert_events "
                     "WHERE target_id=? AND ts>=? "
                     "ORDER BY ts DESC, id DESC LIMIT ?",
                     (target_id, start_ts, limit)).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT id, target_id, label, ip, ts, old_status, "
-                    "new_status, category, incident_id FROM alert_events "
+                    "new_status, category, failure_reason, incident_id, "
+                    "ping_type FROM alert_events "
                     "WHERE ts>=? ORDER BY ts DESC, id DESC LIMIT ?",
                     (start_ts, limit)).fetchall()
             # id + ORDER BY ts DESC, id DESC: export_excel re-sorts by
@@ -1134,7 +1139,9 @@ class DataStore:
             return [{"id": r[0], "target_id": r[1], "label": r[2], "ip": r[3],
                      "ts": r[4], "old_status": r[5],
                      "new_status": r[6], "category": r[7],
-                     "incident_id": r[8]}
+                     "failure_reason": r[8] if len(r) > 8 else "",
+                     "incident_id": r[9] if len(r) > 9 else None,
+                     "ping_type": r[10] if len(r) > 10 else ""}
                     for r in rows]
         except Exception:
             return []
@@ -1145,7 +1152,8 @@ class DataStore:
         return {"id": row[0], "target_id": row[1], "label": row[2], "ip": row[3],
                 "ts": row[4], "old_status": row[5], "new_status": row[6],
                 "category": row[7], "failure_reason": row[8] if len(row) > 8 else "",
-                "incident_id": row[9] if len(row) > 9 else None}
+                "incident_id": row[9] if len(row) > 9 else None,
+                "ping_type": row[10] if len(row) > 10 else ""}
 
     def _get_export_alert_events(self, conn, target_id: str,
                                  start_ts: int, end_ts: int) -> list:
@@ -1157,7 +1165,7 @@ class DataStore:
         """
         boundary = conn.execute(
             "SELECT id, target_id, label, ip, ts, old_status, new_status, "
-            "category, failure_reason, incident_id FROM alert_events "
+            "category, failure_reason, incident_id, ping_type FROM alert_events "
             "WHERE target_id=? "
             "AND (new_status IN ('red','orange') OR old_status IN ('red','orange')) "
             "AND ts < ? "
@@ -1165,7 +1173,7 @@ class DataStore:
             (target_id, start_ts)).fetchone()
         window_rows = conn.execute(
             "SELECT id, target_id, label, ip, ts, old_status, new_status, "
-            "category, failure_reason, incident_id FROM alert_events "
+            "category, failure_reason, incident_id, ping_type FROM alert_events "
             "WHERE target_id=? AND ts >= ? AND ts <= ? "
             "ORDER BY ts ASC, id ASC",
             (target_id, start_ts, end_ts)).fetchall()
@@ -1195,6 +1203,8 @@ class DataStore:
             from openpyxl.styles import Font, PatternFill, Alignment
         except ImportError:
             raise RuntimeError("openpyxl 未安装，请运行 pip install openpyxl")
+
+        from src.trace_policy import describe_failure, ping_type_label
 
         if targets_meta is None:
             targets_meta = self.get_targets_meta()
@@ -1329,9 +1339,11 @@ class DataStore:
                     # The hourly-sheet path above (~line 478) already uses
                     # `is not None`; match that semantic here.
                     lat = r["latency_ms"]
+                    fr = r.get("failure_reason") or ""
                     ws.append([dt, r["status"],
                                round(lat, 1) if lat is not None else "",
-                               loss, r["status_code"] or "", r["failure_reason"] or ""])
+                               loss, r["status_code"] or "",
+                               describe_failure(fr) if fr else ""])
 
             ws.column_dimensions["A"].width = 20
 
@@ -1359,10 +1371,10 @@ class DataStore:
         ws_al = wb.create_sheet("告警时间线")
 
         # Column layout
-        # A: 序号/类型  B: 节点  C: IP  D: 事件时间  E: 状态变化
-        # F: 分类  G: 原因/详情  H: 距上次事件
-        COL_W = {"A": 6, "B": 18, "C": 16, "D": 20, "E": 16,
-                 "F": 12, "G": 38, "H": 14}
+        # A: 序号  B: 节点  C: IP  D: 探测类型  E: 事件时间  F: 状态变化
+        # G: 分类  H: 原因/详情  I: 距上次事件
+        COL_W = {"A": 6, "B": 18, "C": 16, "D": 10, "E": 20, "F": 16,
+                 "G": 12, "H": 38, "I": 14}
         for col, w in COL_W.items():
             ws_al.column_dimensions[col].width = w
 
@@ -1408,38 +1420,17 @@ class DataStore:
         def _st_label(s):
             return STATUS_LABEL.get(s, s or '未知')
 
-        def _cat_label(cat, fr=""):
-            """Return human-readable category + failure reason."""
+        def _cat_label(cat):
+            """Return human-readable alert category."""
             cat_map = {
                 'availability': '可用性告警',
                 'performance':  '性能告警',
                 'ok':           '恢复正常',
                 'paused':       '手动暂停',
                 'resumed':      '手动恢复',
+                'deleted':      '节点已删除',
             }
-            base = cat_map.get(cat, cat or '—')
-            reason_map = {
-                'timeout':           'ICMP 超时',
-                'tcp_timeout':       'TCP 连接超时',
-                'tcp_refused':       'TCP 连接被拒绝',
-                'http_timeout':      'HTTP 请求超时',
-                'dns_timeout':       'DNS 查询超时',
-                'dns_bad_response':  'DNS 响应异常',
-                'dns_hijack':        'DNS 解析结果与预期不符',
-                'dns_no_a_record':   'DNS 无解析结果',
-                'too_many_redirects':'HTTP 重定向过多',
-                'ssl_error':         'SSL 证书错误',
-                'keyword_not_found': '页面关键词不存在',
-                'keyword_found':     '页面存在禁止关键词',
-            }
-            if fr:
-                # strip "status_XXX" prefix
-                if fr.startswith("status_"):
-                    reason_desc = f"HTTP {fr[7:]}"
-                else:
-                    reason_desc = reason_map.get(fr, fr)
-                return f"{base}  ({reason_desc})"
-            return base
+            return cat_map.get(cat, cat or '—')
 
         def _write_row(ws, row_num, values, fill=None, bold=False,
                        font_color="000000", merge_to=None, align="left"):
@@ -1451,7 +1442,7 @@ class DataStore:
                 c.font = Font(bold=bold, color=font_color,
                               name="微软雅黑", size=9)
                 c.alignment = Alignment(horizontal=align, vertical="center",
-                                        wrap_text=(col == 7))
+                                        wrap_text=(col == 8))
             if merge_to:
                 ws.merge_cells(
                     start_row=row_num, start_column=1,
@@ -1517,7 +1508,7 @@ class DataStore:
         row_al = 1
         # Sheet-level header
         _write_row(ws_al, row_al,
-                   ["", "节点", "IP", "事件时间", "状态变化",
+                   ["", "节点", "IP", "探测类型", "事件时间", "状态变化",
                     "分类", "原因/详情", "距上次事件"],
                    fill=HDR_FILL, bold=True, font_color="FFFFFF")
         row_al += 1
@@ -1577,9 +1568,9 @@ class DataStore:
                 # "=cmd|...".  Same reasoning applies to the per-row
                 # cells below.
                 _write_row(ws_al, row_al,
-                           [excel_safe_text(hdr_text)] + [""] * 7,
+                           [excel_safe_text(hdr_text)] + [""] * 8,
                            fill=INCIDENT_HDR_FILL, bold=True,
-                           font_color="FFFFFF", merge_to=8)
+                           font_color="FFFFFF", merge_to=9)
                 ws_al.row_dimensions[row_al].height = 18
                 row_al += 1
 
@@ -1630,9 +1621,9 @@ class DataStore:
                             diag_text = (
                                 "🔬 故障时自动追踪：（无追踪记录，"
                                 "可能保留期已过或追踪未及执行）")
-                    _write_row(ws_al, row_al, [diag_text] + [""] * 7,
+                    _write_row(ws_al, row_al, [diag_text] + [""] * 8,
                                fill=_fill("E1F5FE"), bold=False,
-                               font_color="01579B", merge_to=8)
+                               font_color="01579B", merge_to=9)
                     row_al += 1
 
                 # Event rows
@@ -1643,6 +1634,7 @@ class DataStore:
                     os_  = ev.get('old_status', '')
                     cat  = ev.get('category', '')
                     fr   = ev.get('failure_reason', '')
+                    ev_pt = (ev.get('ping_type') or meta.get("ping_type", "icmp"))
 
                     # Keep pre-window transitions that belong to this incident;
                     # only drop rows far after the export window.
@@ -1652,28 +1644,30 @@ class DataStore:
                     gap = _fmt_dur(ts - prev_ts) if prev_ts else "—"
                     prev_ts = ts
 
+                    fr_text = describe_failure(fr) if fr else "—"
                     row_fill = STATUS_FILL.get(ns, WHITE_FILL)
                     _write_row(ws_al, row_al, [
                         "  ↳",
                         excel_safe_text(label),
                         excel_safe_text(ip),
+                        ping_type_label(ev_pt),
                         _fmt_ts(ts),
                         f"{_st_label(os_)} → {_st_label(ns)}",
-                        _cat_label(cat, ""),
-                        excel_safe_text(fr) if fr else "—",
+                        _cat_label(cat),
+                        excel_safe_text(fr_text),
                         gap,
                     ], fill=row_fill)
                     row_al += 1
 
                 # Blank separator row between incidents
-                for col in range(1, 9):
+                for col in range(1, 10):
                     ws_al.cell(row_al, col, "").fill = WHITE_FILL
                 row_al += 1
 
         if incident_seq == 0:
             _write_row(ws_al, row_al,
-                       ["（查询时段内无故障事件记录）"] + [""] * 7,
-                       fill=GREEN_FILL, merge_to=8)
+                       ["（查询时段内无故障事件记录）"] + [""] * 8,
+                       fill=GREEN_FILL, merge_to=9)
             row_al += 1
 
         ws_al.freeze_panes = "B2"
@@ -1819,6 +1813,7 @@ class DataStore:
                                     "new_status": "green",
                                     "category": "deleted",
                                     "failure_reason": "",
+                                    "ping_type": data.get("ping_type", "icmp"),
                                 })
                                 if self._flush(conn, ping_buf, alert_buf):
                                     ping_buf.clear(); alert_buf.clear()
@@ -2126,7 +2121,8 @@ class DataStore:
                     new_status     TEXT,
                     category       TEXT,
                     failure_reason TEXT,
-                    incident_id    TEXT
+                    incident_id    TEXT,
+                    ping_type      TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_alert_target_ts
                     ON alert_events(target_id, ts);
@@ -2420,6 +2416,17 @@ class DataStore:
             self._rebuild_cum_stats_from_raw(conn)
             conn.execute("PRAGMA user_version = 11")
             conn.commit()
+            ver = 11
+
+        # v11 → v12: alert_events.ping_type for per-event probe context.
+        if ver == 11:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(alert_events)").fetchall()}
+            if "ping_type" not in cols:
+                conn.execute(
+                    "ALTER TABLE alert_events ADD COLUMN ping_type TEXT")
+            conn.execute("PRAGMA user_version = 12")
+            conn.commit()
 
         # Restore in-memory active-incident state from DB
         self._restore_active_incidents(conn)
@@ -2571,10 +2578,10 @@ class DataStore:
                     conn.executemany(
                         "INSERT INTO alert_events "
                         "(target_id,label,ip,ts,old_status,new_status,"
-                        " category,failure_reason,incident_id) "
+                        " category,failure_reason,incident_id,ping_type) "
                         "VALUES(:target_id,:label,:ip,:ts,"
                         ":old_status,:new_status,:category,"
-                        ":failure_reason,:incident_id)",
+                        ":failure_reason,:incident_id,:ping_type)",
                         alert_buf)
             return True
         except Exception as e:

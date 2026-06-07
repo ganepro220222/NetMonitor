@@ -610,6 +610,22 @@ class AlertManager:
             "last_trace_at": inc.last_trace_at,
             "last_trace_summary": copy.deepcopy(inc.last_trace_summary),
             "last_trace_signature": inc.last_trace_signature,
+            "ping_type": inc.ping_type,
+            "failure_reason": inc.failure_reason,
+            "trace_applicable": inc.trace_applicable,
+        }
+
+    @staticmethod
+    def _incident_probe_fields(snap: dict) -> dict:
+        from src.trace_policy import describe_failure, ping_type_label
+        fr = snap.get("failure_reason") or ""
+        pt = snap.get("ping_type") or "icmp"
+        return {
+            "ping_type": pt,
+            "ping_type_label": ping_type_label(pt),
+            "failure_reason": fr,
+            "failure_reason_text": describe_failure(fr),
+            "trace_applicable": bool(snap.get("trace_applicable", True)),
         }
 
     @staticmethod
@@ -685,6 +701,7 @@ class AlertManager:
                 "reminder_count": snap["reminder_count"],
                 "recovered": False,
                 "recovered_at": None,
+                **self._incident_probe_fields(snap),
             },
             "trace": self._build_trace_extra(snap, pending=pending_trace),
         }
@@ -708,6 +725,7 @@ class AlertManager:
                 "duration_text": self._format_duration(duration),
                 "reminder_count": closed["reminder_count"],
                 "recovered": True,
+                **self._incident_probe_fields(closed),
             },
             "trace": trace_extra,
         }
@@ -814,6 +832,7 @@ class AlertManager:
                 "duration_text": self._format_duration(dur_s),
                 "reminder_count": snap["reminder_count"],
                 "trace_summary": trace.get("summary"),
+                **self._incident_probe_fields(snap),
             })
         return {
             "aggregate": {
@@ -836,6 +855,7 @@ class AlertManager:
                 "reminder_count": snap["reminder_count"],
                 "recovered": False,
                 "recovered_at": None,
+                **self._incident_probe_fields(snap),
             },
             "trace": self._build_trace_extra(snap, pending=False),
         }
@@ -1027,6 +1047,11 @@ class AlertManager:
         ]
         inc = (extra or {}).get("incident") or {}
         trace = (extra or {}).get("trace") or {}
+        if inc.get("ping_type_label"):
+            lines.append(f"探测类型：{inc['ping_type_label']}")
+        fr_text = inc.get("failure_reason_text") or ""
+        if fr_text:
+            lines.append(f"失败原因：{fr_text}")
         if inc.get("duration_text"):
             lines.append(f"已持续：{inc['duration_text']}")
         if inc.get("reminder_count") is not None and event == "alert_reminder":
@@ -1054,9 +1079,18 @@ class AlertManager:
         ]
         listed = nodes[:_AGGREGATE_LIST_MAX]
         for i, n in enumerate(listed, 1):
+            pt = n.get("ping_type_label") or ""
+            fr = n.get("failure_reason_text") or ""
+            ctx = ""
+            if pt and fr:
+                ctx = f"，{pt}/{fr}"
+            elif pt:
+                ctx = f"，{pt}"
+            elif fr:
+                ctx = f"，{fr}"
             lines.append(
                 f"{i}. {n.get('target', '?')} {n.get('ip', '')}，"
-                f"持续 {n.get('duration_text', '?')}")
+                f"持续 {n.get('duration_text', '?')}{ctx}")
         omitted = len(nodes) - len(listed)
         if omitted > 0:
             lines.append(f"其余 {omitted} 个节点请查看 Web Dashboard。")
