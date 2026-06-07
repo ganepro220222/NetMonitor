@@ -296,25 +296,18 @@ class IPCard(ctk.CTkFrame):
     @staticmethod
     def _format_failure(reason: str | None) -> str:
         """Translate machine failure codes into short Chinese labels."""
+        from src.trace_policy import describe_failure
         if not reason:
             return "超时"
-        r = reason.lower()   # normalise once; handles old uppercase data + new lowercase
-        if r.startswith("dns_hijack:"):
+        text = describe_failure(reason)
+        if not text:
+            return "请求失败"
+        if reason.lower().startswith("dns_hijack:"):
             resolved = reason.split(":", 1)[1]
             return f"⚠ DNS劫持 {resolved}"
-        if r == "nxdomain":            return "域名不存在"
-        if r == "dns_no_a_record":     return "无 A 记录"
-        if r.startswith("dns_rcode_"): return f"DNS错误码{r[10:]}"
-        if r == "dns_timeout":         return "DNS 超时"
-        if "dns" in r:    return "DNS 失败"
-        if "tls" in r:    return "TLS 失败"
-        if "ssl" in r:    return "SSL 失败"
-        if "tcp" in r:    return "TCP 失败"
-        if "timeout" in r: return "超时"
-        if r.startswith("status_"):
-            return f"HTTP {r.split('_', 1)[1]}"
-        if "refused" in r: return "连接拒绝"
-        return "请求失败"
+        if reason.lower() in ("keyword_not_found", "keyword_found"):
+            return f"⚠ {text}"
+        return text
 
     def update_info(self, label, ip):
         self.label_text.configure(text=label)

@@ -35,11 +35,11 @@ def _incident_headers(ws):
 
 
 def _status_changes(ws):
-    """Collect 'old → new' labels from column E for event rows."""
+    """Collect 'old → new' labels from the status-change column (F)."""
     out = []
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if row and len(row) > 4 and row[4]:
-            chg = str(row[4])
+        if row and len(row) > 5 and row[5]:
+            chg = str(row[5])
             if "→" in chg or "->" in chg:
                 out.append(chg)
     return out

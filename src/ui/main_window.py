@@ -838,7 +838,8 @@ class MainWindow(ctk.CTk):
                 ts=_t.time(),
                 old_status=old_status,
                 new_status="paused",
-                category="paused")
+                category="paused",
+                ping_type=self._target_ping_types.get(target_id, "icmp"))
 
     def _on_target_resume(self, target_id: str):
         """
@@ -866,7 +867,8 @@ class MainWindow(ctk.CTk):
                 ts=_t.time(),
                 old_status="paused",
                 new_status="gray",
-                category="resumed")
+                category="resumed",
+                ping_type=self._target_ping_types.get(target_id, "icmp"))
         # Keep in-memory baseline aligned with the DB event above so the
         # first real probe records gray→green/orange/red, not paused→….
         _lst = self.__dict__.get("_last_statuses", {})
@@ -1126,6 +1128,7 @@ class MainWindow(ctk.CTk):
                         new_status=state.status,
                         category=cat,
                         failure_reason=state.failure_reason or "",
+                        ping_type=self._target_ping_types.get(tid, "icmp"),
                         # Same probe-start generation snapshot record_ping
                         # forwards just above -- a stale red->green that
                         # snuck through _state_is_current would otherwise
@@ -2171,6 +2174,7 @@ class MainWindow(ctk.CTk):
                 label=label,
                 ip=target.get("ip", ""),
                 old_status=old,
+                ping_type=target.get("ping_type", "icmp"),
             )
         self.engine.remove_target(target_id)
         self.alerter.on_target_removed(target_id)

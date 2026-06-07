@@ -1666,18 +1666,36 @@ function measuredFailMs(t){
 function formatFailure(r){
   if(!r)return '请求超时';
   const l=String(r).toLowerCase();
+  const exact={
+    no_reply:'ICMP 无响应',timeout:'ICMP 超时',tcp_timeout:'TCP 连接超时',
+    connection_refused:'TCP 连接被拒绝',tcp_failed:'TCP 连接失败',
+    http_timeout:'HTTP 请求超时',too_many_redirects:'HTTP 重定向过多',
+    invalid_url:'URL 无效',bad_response:'HTTP 响应异常',
+    body_incomplete:'HTTP 响应体不完整',body_recv_timeout:'HTTP 响应体接收超时',
+    chunked_premature_eof:'分块传输提前结束',header_incomplete:'HTTP 响应头不完整',
+    recv_timeout:'接收超时',recv_closed:'连接被对端关闭',tls_timeout:'TLS 握手超时',
+    dns_timeout:'DNS 查询超时',dns_bad_response:'DNS 响应异常',
+    nxdomain:'域名不存在 (NXDOMAIN)',dns_no_a_record:'DNS 无 A 记录',
+    dns_no_domain:'未配置查询域名',invalid_port:'端口配置无效',
+    keyword_not_found:'页面关键词缺失',keyword_found:'页面含禁止关键词',
+  };
+  if(exact[l])return exact[l];
   if(l==='keyword_not_found')return '⚠ 关键字未匹配（内容异常）';
   if(l==='keyword_found')    return '⚠ 关键字命中（排除模式：内容含异常标志）';
   if(l.startsWith('dns_hijack:'))return '⚠ DNS劫持:'+l.split(':')[1];
-  if(l==='nxdomain')return '域名不存在';
-  if(l==='dns_no_a_record')return '无 A 记录';
-  if(l==='dns_no_domain')return '未配置查询域名';
+  if(l.startsWith('status_'))return `HTTP ${l.split('_',2)[1]}`;
+  if(l.startsWith('dns_rcode_'))return `DNS 错误码 ${l.slice(10)}`;
+  if(l.startsWith('tls_failed:'))return 'TLS 握手失败';
+  if(l.startsWith('dns_failed:'))return 'DNS 解析失败';
+  if(l.startsWith('tcp_failed:'))return 'TCP 连接失败';
+  if(l.startsWith('url_parse:'))return 'URL 解析失败';
+  if(l.startsWith('send_failed:'))return 'HTTP 发送失败';
+  if(l.startsWith('unexpected:'))return 'HTTP 请求异常';
+  if(l.startsWith('error:'))return `探测错误 (${l.slice(6)})`;
   if(l.includes('dns'))return 'DNS 失败';
-  if(l.includes('tls'))return 'TLS 失败';
-  if(l.includes('tcp_timeout')||l.includes('recv_timeout'))return '超时';
+  if(l.includes('tls')||l.includes('ssl'))return 'TLS 失败';
   if(l.includes('tcp'))return 'TCP 失败';
   if(l.includes('timeout'))return '超时';
-  if(l.startsWith('status_'))return `HTTP ${l.split('_',2)[1]}`;
   if(l.includes('refused'))return '连接拒绝';
   return '请求失败';
 }
