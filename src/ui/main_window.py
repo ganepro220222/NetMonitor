@@ -1791,20 +1791,23 @@ class MainWindow(ctk.CTk):
 
         btns = ctk.CTkFrame(win, fg_color="transparent")
         btns.pack(pady=(4, 16), padx=18, fill="x")
+        _btn_font = F(12)
         # Safe default first / leftmost.
-        ctk.CTkButton(btns, text="服务迁移\n(保留历史)",
+        ctk.CTkButton(btns, text="服务迁移（保留历史）",
                       command=lambda: pick("keep"),
-                      width=150, height=48).pack(side="left", padx=4, expand=True, fill="x")
+                      width=150, height=36, font=_btn_font).pack(
+            side="left", padx=4, expand=True, fill="x")
         # Destructive option visually distinct.
-        ctk.CTkButton(btns, text="更换监控对象\n(清空历史)",
+        ctk.CTkButton(btns, text="更换监控对象（清空历史）",
                       command=lambda: pick("wipe"),
-                      width=150, height=48,
-                      fg_color="#b91c1c", hover_color="#7f1d1d").pack(side="left", padx=4, expand=True, fill="x")
+                      width=150, height=36, font=_btn_font,
+                      fg_color="#b91c1c", hover_color="#7f1d1d").pack(
+            side="left", padx=4, expand=True, fill="x")
         ctk.CTkButton(btns, text="取消编辑",
                       command=lambda: pick("cancel"),
-                      width=100, height=48,
-                      fg_color=("gray60", "gray35"),
-                      hover_color=("gray50", "gray25")).pack(side="left", padx=4, expand=True, fill="x")
+                      width=100, height=36, font=_btn_font,
+                      fg_color="gray30", hover_color="gray40").pack(
+            side="left", padx=4, expand=True, fill="x")
 
         # X-close defaults to cancel (NOT to "keep" -- silently keeping is
         # safer than silently wiping, but cancel makes the operator's
