@@ -639,6 +639,41 @@ class AlertManager:
         mins = (s % 3600) // 60
         return f"{hours} 小时 {mins} 分钟" if mins else f"{hours} 小时"
 
+    @staticmethod
+    def _webhook_failure_line(event: str, inc: dict) -> str | None:
+        fr_text = inc.get("failure_reason_text") or ""
+        if not fr_text:
+            return None
+        label = "故障原因" if event == "recovery" else "失败原因"
+        return f"{label}：{fr_text}"
+
+    @staticmethod
+    def _webhook_timing_lines(event: str, inc: dict) -> list[str]:
+        """Event-aware duration labels — avoid '0 秒' on new alerts."""
+        dur_text = inc.get("duration_text") or ""
+        dur_sec = inc.get("duration_seconds")
+        started = inc.get("started_at")
+        lines: list[str] = []
+
+        if event == "recovery":
+            if dur_text:
+                lines.append(f"故障历时：{dur_text}")
+            if inc.get("recovered_at"):
+                lines.append(f"恢复时间：{inc['recovered_at']}")
+            return lines
+
+        if event == "alert_red":
+            if dur_sec is not None and dur_sec < 1:
+                if started:
+                    lines.append(f"开始时间：{started}")
+            elif dur_text:
+                lines.append(f"已持续：{dur_text}")
+            return lines
+
+        if dur_text:
+            lines.append(f"已持续：{dur_text}")
+        return lines
+
     def _cfg_bool(self, key: str, default: bool = False) -> bool:
         if self._config is None:
             return default
@@ -1049,11 +1084,10 @@ class AlertManager:
         trace = (extra or {}).get("trace") or {}
         if inc.get("ping_type_label"):
             lines.append(f"探测类型：{inc['ping_type_label']}")
-        fr_text = inc.get("failure_reason_text") or ""
-        if fr_text:
-            lines.append(f"失败原因：{fr_text}")
-        if inc.get("duration_text"):
-            lines.append(f"已持续：{inc['duration_text']}")
+        fail_line = AlertManager._webhook_failure_line(event, inc)
+        if fail_line:
+            lines.append(fail_line)
+        lines.extend(AlertManager._webhook_timing_lines(event, inc))
         if inc.get("reminder_count") is not None and event == "alert_reminder":
             lines.append(f"提醒次数：{inc['reminder_count']}")
         lines.append(f"详情：{message}")
@@ -1063,8 +1097,6 @@ class AlertManager:
             lines.append("诊断：已触发 traceroute，等待结果")
         if trace.get("trace_time"):
             lines.append(f"追踪时间：{trace['trace_time']}")
-        if event == "recovery" and inc.get("recovered_at"):
-            lines.append(f"恢复时间：{inc['recovered_at']}")
         lines.append(f"时间：{ts_str}")
         return "\n".join(lines)
 
