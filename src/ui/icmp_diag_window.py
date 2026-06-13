@@ -14,6 +14,7 @@ import customtkinter as ctk
 from typing import Optional
 
 from src.ui.fonts import make as F
+from src.ui.window_utils import bind_tool_window_parent, raise_tool_window
 from src.icmp_diag import (
     IcmpDiagRequest, IcmpDiagResult, IcmpProbeSample,
     DiagTask, run_icmp_diag_async, run_pmtu_async,
@@ -62,6 +63,7 @@ class IcmpDiagWindow(ctk.CTkToplevel):
         instances — features just gracefully no-op.
         """
         super().__init__(parent)
+        bind_tool_window_parent(self, parent)
         self._label    = target_label
         self._host     = host
         self._task: Optional[DiagTask] = None
@@ -84,8 +86,7 @@ class IcmpDiagWindow(ctk.CTkToplevel):
         # built window would layer a second set of widgets on top of
         # the first, leak the originals, and double-bind every
         # callback.
-        self.lift()
-        self.focus_force()
+        raise_tool_window(self, parent)
         self._build_ui()
 
     def update_host(self, target_label: str, host: str) -> None:
@@ -651,15 +652,16 @@ class IcmpDiagWindow(ctk.CTkToplevel):
         if existing is not None:
             try:
                 if existing.winfo_exists():
-                    existing.lift(); existing.focus_force(); return
+                    raise_tool_window(existing, self); return
             except Exception:
                 pass
 
         win = ctk.CTkToplevel(self)
+        bind_tool_window_parent(win, self)
         win.title(f"诊断历史 — {self._label}")
         win.geometry("760x440")
         win.minsize(620, 320)
-        win.lift(); win.focus_force()
+        raise_tool_window(win, self)
         self._history_win = win
 
         win.grid_columnconfigure(0, weight=1)

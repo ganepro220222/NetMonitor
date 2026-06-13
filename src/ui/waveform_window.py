@@ -23,6 +23,7 @@ from matplotlib.figure import Figure
 from typing import Optional, Callable
 
 from src.ui.fonts import make as F
+from src.ui.window_utils import bind_tool_window_parent, raise_tool_window
 
 # ── colour helpers (match ChartPanel) ──────────────────────────────────
 _DARK_PALETTE  = {"line": "#60a5fa", "fill": "#2563eb", "loss": "#f87171",
@@ -72,6 +73,7 @@ class WaveformDetailWindow(ctk.CTkToplevel):
                  get_history: Callable,        # () -> TargetHistory
                  data_store=None):
         super().__init__(parent)
+        bind_tool_window_parent(self, parent)
         self.target_id   = target_id
         self._label      = label
         self._ip         = ip
@@ -138,9 +140,8 @@ class WaveformDetailWindow(ctk.CTkToplevel):
         except Exception:
             self.geometry("780x480")   # fallback to safe default
 
-        # Bring window to front
-        self.lift()
-        self.focus_force()
+        # Bring window to front (deferred — see window_utils).
+        raise_tool_window(self, self.master)
 
         self._build_ui()
         self._start_refresh()

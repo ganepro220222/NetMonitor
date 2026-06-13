@@ -20,6 +20,7 @@ from src.ui.dialogs import AddTargetDialog, EditTargetDialog
 from src.ui.history_panel import HistoryPanel
 from src.ui.settings_dialog import SettingsDialog
 from src.ui.fonts import make as F
+from src.ui.window_utils import raise_tool_window
 
 # Capacity policy (MAX_TARGETS / WARN_TARGETS /
 # RECOMMENDED_LARGE_TARGET_INTERVAL_S / target_limit_state) lives in
@@ -1608,7 +1609,7 @@ class MainWindow(ctk.CTk):
                                 existing.update_host(new_label, new_host)
                             except Exception:
                                 pass
-                    existing.lift(); existing.focus_force(); return
+                    raise_tool_window(existing, self); return
             except Exception:
                 pass
         if not target:
@@ -1664,7 +1665,7 @@ class MainWindow(ctk.CTk):
                                 existing.update_target(new_label, new_host)
                             except Exception:
                                 pass
-                    existing.lift(); existing.focus_force(); return
+                    raise_tool_window(existing, self); return
             except Exception:
                 pass
         if not target:
@@ -1711,8 +1712,7 @@ class MainWindow(ctk.CTk):
                                 existing.update_target(new_label, new_ip)
                             except Exception:
                                 pass
-                    existing.lift()
-                    existing.focus_force()
+                    raise_tool_window(existing, self)
                     return
             except Exception:
                 pass
@@ -1814,6 +1814,7 @@ class MainWindow(ctk.CTk):
         # intent explicit by forcing them to re-open Edit if they meant to
         # change anything).
         win.protocol("WM_DELETE_WINDOW", lambda: pick("cancel"))
+        raise_tool_window(win, self)
         win.wait_window()
         return result["choice"]
 

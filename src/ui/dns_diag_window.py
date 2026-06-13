@@ -36,6 +36,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from src.ui.fonts import make as F
+from src.ui.window_utils import bind_tool_window_parent, raise_tool_window
 from src.ui.traceroute_result_window import TracerouteResultWindow
 from src.dns_diag import (
     DnsDiagRequest, DnsDiagResult, DnsCompareResult, DnsCompareSide,
@@ -142,6 +143,7 @@ class DnsDiagWindow(ctk.CTkToplevel):
         features just gracefully no-op.
         """
         super().__init__(parent)
+        bind_tool_window_parent(self, parent)
         self._label        = target_label
         self._host         = host or ""
         self._target_id    = target_id
@@ -166,8 +168,7 @@ class DnsDiagWindow(ctk.CTkToplevel):
         # rows once we added 3-resolver compare.
         self.minsize(760, 580)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.lift()
-        self.focus_force()
+        raise_tool_window(self, parent)
 
         self._build_ui()
 
@@ -3310,15 +3311,16 @@ class DnsDiagWindow(ctk.CTkToplevel):
         if existing is not None:
             try:
                 if existing.winfo_exists():
-                    existing.lift(); existing.focus_force(); return
+                    raise_tool_window(existing, self); return
             except Exception:
                 pass
 
         win = ctk.CTkToplevel(self)
+        bind_tool_window_parent(win, self)
         win.title(f"DNS 诊断历史 — {self._label}")
         win.geometry("780x460")
         win.minsize(620, 320)
-        win.lift(); win.focus_force()
+        raise_tool_window(win, self)
         self._history_win = win
 
         win.grid_columnconfigure(0, weight=1)

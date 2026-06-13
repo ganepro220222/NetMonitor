@@ -24,6 +24,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from src.ui.fonts import make as F
+from src.ui.window_utils import bind_tool_window_parent, raise_tool_window
 from src.diag_sem import DIAG_TASK_SEM
 from src.traceroute_util import run_traceroute
 
@@ -36,6 +37,7 @@ class TracerouteResultWindow(ctk.CTkToplevel):
     def __init__(self, parent, ip: str, max_hops: int = 30,
                  on_close_callback=None):
         super().__init__(parent)
+        bind_tool_window_parent(self, parent)
         self._ip       = ip
         self._max_hops = max_hops
         self._on_close_cb = on_close_callback
@@ -53,8 +55,7 @@ class TracerouteResultWindow(ctk.CTkToplevel):
         self._restore_geometry()
         self.minsize(520, 360)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.lift()
-        self.focus_force()
+        raise_tool_window(self, parent)
 
         self._build_ui()
         # Auto-start: opening this window implies "start tracing now".
