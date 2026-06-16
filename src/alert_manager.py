@@ -627,6 +627,25 @@ class AlertManager:
             inc.label = label
             inc.ip = ip
             inc.current_status = status
+            probe_changed = (
+                inc.ping_type != ping_type
+                or inc.failure_reason != failure_reason
+                or inc.trace_applicable != trace_applicable
+            )
+            inc.ping_type = ping_type
+            inc.failure_reason = failure_reason
+            inc.trace_applicable = trace_applicable
+            if probe_changed:
+                if not trace_applicable:
+                    skip = trace_skip_summary(ping_type, failure_reason)
+                    inc.last_trace_summary = skip
+                    inc.last_trace_signature = trace_signature_from_summary(skip)
+                else:
+                    # Probe context changed — discard stale skip/ICMP
+                    # summary until a fresh traceroute lands.
+                    inc.last_trace_summary = None
+                    inc.last_trace_signature = None
+                    inc.last_trace_at = 0.0
             return self._snapshot_incident(inc), False
 
     def _update_webhook_incident_status(self, tid: str, status: str) -> None:
