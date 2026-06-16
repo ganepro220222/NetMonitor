@@ -1367,6 +1367,18 @@ class AlertManager:
             {"event_ts": recovery_payload.get("event_ts") or now},
         )
 
+    def outbox_row_gate_ok(self, row: dict) -> bool:
+        """Re-check persisted outbox gate before/after network send."""
+        import json as _json
+        try:
+            payload = _json.loads(row.get("payload_json") or "{}")
+        except Exception:
+            return False
+        gate = payload.get("gate")
+        if gate is None:
+            return True
+        return self._webhook_gate_ok(tuple(gate))
+
     def prepare_outbox_delivery(self, row: dict, now: float):
         """Resolve a persisted outbox row into a send-ready payload."""
         import json as _json

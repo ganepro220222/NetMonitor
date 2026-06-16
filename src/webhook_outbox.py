@@ -84,7 +84,13 @@ class WebhookOutboxDispatcher:
         if prepared is None:
             ds.finish_webhook_outbox(
                 delivery_id, state="dropped_stale", error="gate_or_rebuild",
-                now=now)
+                now=now, only_if_sending=True)
+            return
+
+        if not self._am.outbox_row_gate_ok(row):
+            ds.finish_webhook_outbox(
+                delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                now=now, only_if_sending=True)
             return
 
         event, target, ip, status, message, extra, meta = prepared
@@ -105,8 +111,15 @@ class WebhookOutboxDispatcher:
             self._handle_failure(row, now, str(e))
             return
 
+        if not self._am.outbox_row_gate_ok(row):
+            ds.finish_webhook_outbox(
+                delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                now=now, only_if_sending=True)
+            return
+
         ds.finish_webhook_outbox(
-            delivery_id, state="delivered", error="", now=now)
+            delivery_id, state="delivered", error="", now=now,
+            only_if_sending=True)
 
     def _handle_failure(self, row: dict, now: float, err: str) -> None:
         ds = self._am._data_store
@@ -121,17 +134,19 @@ class WebhookOutboxDispatcher:
             )
             age = now - float(row.get("first_queued_ts") or now)
             if recovery and age >= CLOSED_SUMMARY_DELAY_SEC:
-                ds.finish_webhook_outbox(
-                    delivery_id, state="dropped_stale",
-                    error="superseded_by_closed_summary", now=now)
-                self.wake()
+                if ds.finish_webhook_outbox(
+                        delivery_id, state="dropped_stale",
+                        error="superseded_by_closed_summary", now=now,
+                        only_if_sending=True):
+                    self.wake()
                 return
         if max_a and attempt >= max_a:
             ds.finish_webhook_outbox(
                 delivery_id, state="failed_permanent", error=err, now=now,
-                attempt_count=attempt)
+                attempt_count=attempt, only_if_sending=True)
             return
         next_ts = compute_next_attempt_ts(attempt, now)
         ds.finish_webhook_outbox(
             delivery_id, state="pending", error=err, now=now,
-            attempt_count=attempt, next_attempt_ts=next_ts)
+            attempt_count=attempt, next_attempt_ts=next_ts,
+            only_if_sending=True)

@@ -688,7 +688,9 @@ class DataStore:
     def finish_webhook_outbox(
             self, delivery_id: str, *, state: str, error: str = "",
             now: float | None = None, attempt_count: int | None = None,
-            next_attempt_ts: float | None = None) -> None:
+            next_attempt_ts: float | None = None,
+            only_if_sending: bool = False) -> bool:
+        """Update outbox row; return True if a row was updated."""
         now = float(now or time.time())
         with self._outbox_lock:
             conn = self._outbox_write_conn()
@@ -696,29 +698,34 @@ class DataStore:
                 "SELECT attempt_count FROM webhook_outbox WHERE delivery_id=?",
                 (delivery_id,)).fetchone()
             if row is None:
-                return
+                return False
             attempts = int(attempt_count if attempt_count is not None
                            else row[0])
+            sending_clause = " AND delivery_state='sending'" if only_if_sending else ""
             if state == "delivered":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE webhook_outbox SET delivery_state='delivered', "
                     "delivered_ts=?, last_attempt_ts=?, attempt_count=?, "
-                    "last_error='', updated_at=? WHERE delivery_id=?",
+                    "last_error='', updated_at=? WHERE delivery_id=?"
+                    + sending_clause,
                     (now, now, attempts, now, delivery_id))
             elif state == "pending":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE webhook_outbox SET delivery_state='pending', "
                     "last_attempt_ts=?, attempt_count=?, last_error=?, "
-                    "next_attempt_ts=?, updated_at=? WHERE delivery_id=?",
+                    "next_attempt_ts=?, updated_at=? WHERE delivery_id=?"
+                    + sending_clause,
                     (now, attempts, error or "", float(next_attempt_ts or now),
                      now, delivery_id))
             else:
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE webhook_outbox SET delivery_state=?, "
                     "last_attempt_ts=?, attempt_count=?, last_error=?, "
-                    "updated_at=? WHERE delivery_id=?",
+                    "updated_at=? WHERE delivery_id=?"
+                    + sending_clause,
                     (state, now, attempts, error or "", now, delivery_id))
             conn.commit()
+            return cur.rowcount == 1
 
     def find_undelivered_alert_red(
             self, order_key: str, incident_id: str,

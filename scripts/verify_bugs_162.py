@@ -111,7 +111,10 @@ def test_old_recovery_does_not_drop_new_red():
             (red_ts, now, new_red_id))
         conn.commit()
     row = ds.get_webhook_deliveries(incident_id="INC_B", limit=1)[0]
+    row = dict(row)
+    row["payload_json"] = json.dumps(row.pop("payload", {}), ensure_ascii=False)
     disp = WebhookOutboxDispatcher(a)
+    assert ds.claim_webhook_outbox(new_red_id, now)
     disp._handle_failure(row, now, "simulated failure")
     updated = ds.get_webhook_deliveries(incident_id="INC_B", limit=1)[0]
     ok = (
