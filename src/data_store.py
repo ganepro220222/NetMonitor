@@ -599,6 +599,67 @@ class DataStore:
         except Exception:
             return []
 
+    def drop_red_blocked_closed_summary(self, now: float,
+                                        delay_sec: float) -> int:
+        """Drop head alert_red rows blocking due recovery past closed-summary delay.
+
+        When alert_red is in long backoff (next_attempt_ts in the future) it
+        still occupies head-of-line, preventing recovery from being fetched.
+        If the red has been pending longer than delay_sec and a matching
+        recovery row is due, drop the red so closed-summary can proceed.
+        """
+        now = float(now)
+        delay_sec = float(delay_sec)
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            blockers = conn.execute(
+                """
+                WITH head AS (
+                    SELECT order_key, MIN(id) AS min_id
+                    FROM webhook_outbox
+                    WHERE delivery_state IN ('pending', 'sending')
+                    GROUP BY order_key
+                )
+                SELECT o.delivery_id, o.order_key, o.incident_id
+                FROM webhook_outbox o
+                JOIN head h ON o.order_key = h.order_key AND o.id = h.min_id
+                WHERE o.event = 'alert_red'
+                  AND o.delivery_state = 'pending'
+                  AND o.next_attempt_ts > ?
+                  AND (? - o.first_queued_ts) >= ?
+                """,
+                (now, now, delay_sec),
+            ).fetchall()
+            dropped = 0
+            for delivery_id, order_key, incident_id in blockers:
+                due_recovery = conn.execute(
+                    "SELECT 1 FROM webhook_outbox "
+                    "WHERE event='recovery' AND order_key=? "
+                    "AND incident_id=? AND delivery_state='pending' "
+                    "LIMIT 1",
+                    (order_key, incident_id or ""),
+                ).fetchone()
+                if not due_recovery:
+                    continue
+                cur = conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                    "last_error='superseded_by_closed_summary', updated_at=? "
+                    "WHERE delivery_id=? AND delivery_state='pending'",
+                    (now, delivery_id),
+                )
+                if cur.rowcount:
+                    conn.execute(
+                        "UPDATE webhook_outbox SET next_attempt_ts=?, "
+                        "updated_at=? "
+                        "WHERE event='recovery' AND order_key=? "
+                        "AND incident_id=? AND delivery_state='pending' "
+                        "AND next_attempt_ts > ?",
+                        (now, now, order_key, incident_id or "", now),
+                    )
+                dropped += cur.rowcount
+            conn.commit()
+            return dropped
+
     @staticmethod
     def _outbox_row_to_dict(row) -> dict:
         cols = (

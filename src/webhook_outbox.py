@@ -69,6 +69,7 @@ class WebhookOutboxDispatcher:
         if ds is None or not am._webhook_configured():
             return
         now = time.time()
+        ds.drop_red_blocked_closed_summary(now, CLOSED_SUMMARY_DELAY_SEC)
         rows = ds.fetch_deliverable_webhook_outbox(now, limit=50)
         for row in rows:
             self._deliver_one(row, now)
