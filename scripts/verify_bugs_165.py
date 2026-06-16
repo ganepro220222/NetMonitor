@@ -1,4 +1,4 @@
-"""Regression: ACK/pause must win race over in-flight gated reminder delivery."""
+"""Regression: ACK/pause/remove must abort gated reminder before network send."""
 import json
 import os
 import sys
@@ -19,26 +19,25 @@ def _outbox_row(ds, delivery_id: str) -> dict:
 
 
 def _race_scenario(*, action: str, delivery_id: str):
-    """Dispatcher passes gate and blocks in _send_webhook; main thread ACK/pause."""
+    """Dispatcher enters _send_webhook; main thread ACK/pause/remove during block."""
     a, disp, ds = make_alerter()
     sent = []
-    gate = threading.Event()
+    entered = threading.Event()
     release = threading.Event()
+    rem_gate = None
 
-    def _send(*_a, **_k):
-        gate.set()
+    def _send(url, event, target, ip, status, message, ts_str,
+              extra=None, *, event_ts=None, queued_ts=None, sent_ts=None,
+              attempt=1, delivery_id="", gate=None):
+        entered.set()
         release.wait(timeout=5)
-        inc = a._webhook_incidents.get("race")
-        sent.append({
-            "event": _a[1],
-            "delivery_id": _k.get("delivery_id"),
-            "acked": bool(inc and inc.acknowledged),
-            "incident_exists": inc is not None,
-        })
+        a.assert_outbox_webhook_send_allowed(delivery_id=delivery_id, gate=gate)
+        sent.append((event, delivery_id))
 
-    a._send_webhook = staticmethod(_send)
+    a._send_webhook = _send
     a.on_status_change("race", "GW", "10.0.0.1", "red")
     inc = a._webhook_incidents["race"]
+    rem_gate = ("reminder", "race", inc.push_seq)
     with ds._outbox_lock:
         conn = ds._outbox_write_conn()
         conn.execute(
@@ -61,7 +60,7 @@ def _race_scenario(*, action: str, delivery_id: str):
             "status": "red",
             "message": "连接仍未恢复",
             "extra": a._build_reminder_extra(a._snapshot_incident(inc)),
-            "gate": ["reminder", "race", inc.push_seq],
+            "gate": list(rem_gate),
             "event_ts": time.time(),
         },
         event_ts=time.time(),
@@ -72,13 +71,17 @@ def _race_scenario(*, action: str, delivery_id: str):
     t = threading.Thread(
         target=disp._deliver_one, args=(row, time.time()), daemon=True)
     t.start()
-    assert gate.wait(timeout=5), "dispatcher did not reach _send_webhook"
+    assert entered.wait(timeout=5), "dispatcher did not reach _send_webhook"
 
     if action == "ack":
-        ok = a.acknowledge_incident("race")
-        assert ok
-    else:
+        assert a.acknowledge_incident("race")
+        expected_error = "acknowledged"
+    elif action == "pause":
         a.on_target_paused("race")
+        expected_error = "target_paused"
+    else:
+        a.on_target_removed("race")
+        expected_error = "target_removed"
 
     release.set()
     t.join(timeout=5)
@@ -88,35 +91,40 @@ def _race_scenario(*, action: str, delivery_id: str):
         "action": action,
         "sent": sent,
         "rows": [(rem["delivery_id"], rem["delivery_state"], rem["last_error"])],
+        "expected_error": expected_error,
     }
 
 
-def test_ack_race():
-    r = _race_scenario(action="ack", delivery_id="ack-rem")
+def _check_during_send(r):
     ok = (
-        r["rows"] == [("ack-rem", "dropped_stale", "acknowledged")]
-        or (r["rows"][0][1] == "dropped_stale" and r["rows"][0][2] in (
-            "acknowledged", "gate_or_rebuild"))
+        r["sent"] == []
+        and r["rows"][0][1] == "dropped_stale"
+        and r["rows"][0][2] == r["expected_error"]
     )
-    print(f"Bug165 ACK race -> {ok} {r}")
+    print(f"Bug165 {r['action']} during _send_webhook -> {ok} {r}")
     return ok
 
 
-def test_pause_race():
-    r = _race_scenario(action="pause", delivery_id="pause-rem")
-    ok = (
-        r["rows"] == [("pause-rem", "dropped_stale", "target_paused")]
-        or (r["rows"][0][1] == "dropped_stale" and r["rows"][0][2] in (
-            "target_paused", "gate_or_rebuild"))
-    )
-    print(f"Bug165 pause race -> {ok} {r}")
-    return ok
+def test_ack_during_send():
+    return _check_during_send(
+        _race_scenario(action="ack", delivery_id="ack-during_send"))
+
+
+def test_pause_during_send():
+    return _check_during_send(
+        _race_scenario(action="pause", delivery_id="pause-during_send"))
+
+
+def test_remove_during_send():
+    return _check_during_send(
+        _race_scenario(action="remove", delivery_id="remove-during_send"))
 
 
 def main():
     results = [
-        ("ack_race", test_ack_race()),
-        ("pause_race", test_pause_race()),
+        ("ack_during_send", test_ack_during_send()),
+        ("pause_during_send", test_pause_during_send()),
+        ("remove_during_send", test_remove_during_send()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:

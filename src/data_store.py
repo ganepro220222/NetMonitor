@@ -727,6 +727,18 @@ class DataStore:
             conn.commit()
             return cur.rowcount == 1
 
+    def get_webhook_outbox_delivery_state(self, delivery_id: str) -> str | None:
+        if not delivery_id:
+            return None
+        conn = self._read_conn()
+        try:
+            row = conn.execute(
+                "SELECT delivery_state FROM webhook_outbox WHERE delivery_id=?",
+                (delivery_id,)).fetchone()
+            return row[0] if row else None
+        except Exception:
+            return None
+
     def find_undelivered_alert_red(
             self, order_key: str, incident_id: str,
             exclude_id: str = "") -> dict | None:

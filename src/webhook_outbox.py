@@ -15,6 +15,10 @@ REMINDER_MAX_ATTEMPTS = 12
 DIAGNOSTIC_MAX_ATTEMPTS = 8
 
 
+class WebhookDeliveryAborted(Exception):
+    """Outbox delivery cancelled by ACK/pause/remove or gate before network send."""
+
+
 def compute_next_attempt_ts(attempt_count: int, now: float | None = None) -> float:
     """Return the next retry timestamp after a failed attempt."""
     now = now or time.time()
@@ -96,6 +100,7 @@ class WebhookOutboxDispatcher:
         event, target, ip, status, message, extra, meta = prepared
         url = (self._am._config.get_setting("webhook_url") or "").strip()
         attempt = int(row.get("attempt_count") or 0) + 1
+        gate = self._am.outbox_row_gate(row)
         try:
             self._am._send_webhook(
                 url, event, target, ip, status, message,
@@ -106,7 +111,13 @@ class WebhookOutboxDispatcher:
                 sent_ts=now,
                 attempt=attempt,
                 delivery_id=delivery_id,
+                gate=gate,
             )
+        except WebhookDeliveryAborted:
+            ds.finish_webhook_outbox(
+                delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                now=now, only_if_sending=True)
+            return
         except Exception as e:
             self._handle_failure(row, now, str(e))
             return

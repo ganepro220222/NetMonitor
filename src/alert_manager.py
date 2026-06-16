@@ -44,7 +44,11 @@ from src.trace_policy import (
     trace_skip_summary,
     trace_signature_from_summary,
 )
-from src.webhook_outbox import CLOSED_SUMMARY_DELAY_SEC, max_attempts_for_event
+from src.webhook_outbox import (
+    CLOSED_SUMMARY_DELAY_SEC,
+    WebhookDeliveryAborted,
+    max_attempts_for_event,
+)
 
 try:
     import winsound
@@ -1369,15 +1373,33 @@ class AlertManager:
 
     def outbox_row_gate_ok(self, row: dict) -> bool:
         """Re-check persisted outbox gate before/after network send."""
+        gate = self.outbox_row_gate(row)
+        if gate is None:
+            return True
+        return self._webhook_gate_ok(gate)
+
+    def outbox_row_gate(self, row: dict):
+        """Return persisted gate tuple from an outbox row, or None."""
         import json as _json
         try:
             payload = _json.loads(row.get("payload_json") or "{}")
         except Exception:
-            return False
+            return None
         gate = payload.get("gate")
         if gate is None:
-            return True
-        return self._webhook_gate_ok(tuple(gate))
+            return None
+        return tuple(gate)
+
+    def assert_outbox_webhook_send_allowed(
+            self, *, delivery_id: str = "", gate=None) -> None:
+        """Raise WebhookDeliveryAborted if delivery must not proceed."""
+        if gate is not None and not self._webhook_gate_ok(tuple(gate)):
+            raise WebhookDeliveryAborted("gate")
+        if delivery_id and self._data_store is not None:
+            state = self._data_store.get_webhook_outbox_delivery_state(
+                delivery_id)
+            if state != "sending":
+                raise WebhookDeliveryAborted(state or "missing")
 
     def prepare_outbox_delivery(self, row: dict, now: float):
         """Resolve a persisted outbox row into a send-ready payload."""
@@ -1489,13 +1511,15 @@ class AlertManager:
         if self._outbox_dispatcher is not None:
             self._outbox_dispatcher.wake()
 
-    @staticmethod
-    def _send_webhook(url, event, target, ip, status, message, ts_str,
+    def _send_webhook(self, url, event, target, ip, status, message, ts_str,
                       extra=None, *, event_ts=None, queued_ts=None,
-                      sent_ts=None, attempt=1, delivery_id=""):
+                      sent_ts=None, attempt=1, delivery_id="", gate=None):
         """Build platform-aware payload and POST it. Raises on failure."""
         import json
         import urllib.request
+
+        self.assert_outbox_webhook_send_allowed(
+            delivery_id=delivery_id, gate=gate)
 
         icons = {
             "alert_red": "🔴",
