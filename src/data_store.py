@@ -3495,9 +3495,14 @@ class DataStore:
             ts falls in [red_ts - window_before, red_ts + window_after].
             The auto-tracert is request_now()'d the instant a node turns red
             and runs within ~5s, so the first row after red_ts is it.
-            This fallback also covers historical rows written before the
-            incident_id column existed, and the rare brief-outage race where
-            the node recovered (incident popped) before the tracert INSERT.
+            When Level 2 is active and an ``incident_id`` was supplied but
+            exact match missed, fallback only considers rows whose
+            ``incident_id IS NULL`` — legacy rows from before the column
+            existed, or the rare brief-outage race where tracert INSERT ran
+            after the incident was already popped.  Rows already bound to
+            another incident_id are never borrowed across incidents.
+            When no ``incident_id`` is supplied (Level-1-only schema), the
+            time window is unrestricted as before.
 
         `red_ts` MUST be the timestamp of the *first red transition* of the
         incident — auto-tracert only fires on red, never on orange-only
@@ -3521,12 +3526,22 @@ class DataStore:
 
             # ── Level 1: time-window fallback ──────────────────────────────
             if row is None:
-                row = conn.execute(
-                    "SELECT ts, hops FROM traceroute_logs "
-                    "WHERE target_id=? AND ts BETWEEN ? AND ? "
-                    "ORDER BY ts ASC LIMIT 1",
-                    (target_id, red_ts - window_before,
-                     red_ts + window_after)).fetchone()
+                lo = red_ts - window_before
+                hi = red_ts + window_after
+                if incident_id and self._traceroute_has_incident_col(conn):
+                    # Never borrow another incident's bound row (Bug 153).
+                    row = conn.execute(
+                        "SELECT ts, hops FROM traceroute_logs "
+                        "WHERE target_id=? AND ts BETWEEN ? AND ? "
+                        "AND (incident_id IS NULL OR incident_id = '') "
+                        "ORDER BY ts ASC LIMIT 1",
+                        (target_id, lo, hi)).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT ts, hops FROM traceroute_logs "
+                        "WHERE target_id=? AND ts BETWEEN ? AND ? "
+                        "ORDER BY ts ASC LIMIT 1",
+                        (target_id, lo, hi)).fetchone()
 
             if row is None:
                 return None
