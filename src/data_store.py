@@ -1491,7 +1491,11 @@ class DataStore:
                 if current_events is None:
                     if ns in ('orange', 'red'):
                         current_events = [ev]
-                        start_truncated = False
+                        # Boundary events from _get_export_alert_events()
+                        # carry ts < start_ts — mark so the header and
+                        # duration reflect the query window, not the full
+                        # pre-window fault span.
+                        start_truncated = ev['ts'] < start_ts
                     elif os_ in ('orange', 'red') and ns == 'green':
                         # Recovery with no fault-start in this window
                         current_events = [ev]
@@ -1557,7 +1561,10 @@ class DataStore:
                 # Calculate incident metrics
                 fault_start = evts[0]['ts']
                 fault_end   = evts[-1]['ts'] if closed else None
-                total_secs  = (fault_end - fault_start) if fault_end else None
+                effective_start = (
+                    max(fault_start, start_ts) if truncated else fault_start)
+                total_secs  = (
+                    (fault_end - effective_start) if fault_end else None)
                 max_sev     = max(
                     (SEVERITY.get(e.get('new_status', ''), 0) for e in evts),
                     default=0)
