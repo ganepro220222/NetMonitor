@@ -6955,6 +6955,8 @@ class WebServer:
                 body = request.get_json(silent=True) or {}
             except Exception:
                 body = {}
+            if not isinstance(body, dict):
+                body = {}
             tid = _body_str(body, "tid")
             if not tid:
                 return json.dumps({"ok": False, "error": "tid_required"}), 400, {
