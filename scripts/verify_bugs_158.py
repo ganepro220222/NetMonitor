@@ -34,20 +34,33 @@ def _alerter(**cfg_kw):
     return a
 
 
-def _install_push_capture(a, calls):
-    def _capture(**kw):
-        entry = {k: v for k, v in kw.items() if k != "rebuild"}
-        rebuild = kw.get("rebuild")
-        if rebuild is not None:
-            rebuilt = rebuild()
-            if rebuilt is None:
-                return
-            extra, message, target = rebuilt
-            entry["extra"] = extra
-            entry["message"] = message
-            entry["target"] = target
+def _alerter_with_outbox(ds=None, **cfg_kw):
+    from scripts.webhook_test_util import make_alerter
+    a, disp, ds = make_alerter(ds=ds, **cfg_kw)
+    return a, disp
+
+
+def _install_push_capture(a, calls, disp=None):
+    def _send(url, event, target, ip, status, message, ts_str,
+              extra=None, **kw):
+        entry = {
+            "event": event, "target": target, "message": message,
+            "extra": extra, **kw,
+        }
         calls.append(entry)
-    a._push_webhook = _capture
+
+    a._send_webhook = staticmethod(_send)
+
+    def _flush(n=5):
+        if disp is None:
+            from src.webhook_outbox import WebhookOutboxDispatcher
+            d = WebhookOutboxDispatcher(a)
+        else:
+            d = disp
+        for _ in range(n):
+            d._tick()
+
+    return _flush
 
 
 def test_individual_gate_blocks_after_ack():
@@ -84,7 +97,7 @@ def test_deferred_individual_reminder_dropped_after_ack():
 
 
 def test_aggregate_payload_excludes_acked_node():
-    a = _alerter(webhook_reminder_aggregate_threshold=1)
+    a, disp = _alerter_with_outbox(webhook_reminder_aggregate_threshold=1)
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     a.on_status_change("t2", "GW2", "10.0.0.2", "red")
     snaps = [
@@ -93,17 +106,19 @@ def test_aggregate_payload_excludes_acked_node():
     ]
     a.acknowledge_incident("t1")
     sent = []
-    _install_push_capture(a, sent)
+    flush = _install_push_capture(a, sent, disp)
     a._push_aggregate_reminder(snaps, time.time())
-    nodes = sent[0]["extra"]["aggregate"]["nodes"] if sent else []
+    flush()
+    agg = [s for s in sent if s["event"] == "alert_reminder_aggregate"]
+    nodes = agg[0]["extra"]["aggregate"]["nodes"] if agg else []
     tids = [n["tid"] for n in nodes]
-    ok = sent and "t1" not in tids and "t2" in tids and len(tids) == 1
+    ok = agg and "t1" not in tids and "t2" in tids and len(tids) == 1
     print(f"Bug158 aggregate excludes ACK node -> {ok} tids={tids}")
     return ok
 
 
 def test_aggregate_payload_excludes_recovered_node():
-    a = _alerter(webhook_reminder_aggregate_threshold=1)
+    a, disp = _alerter_with_outbox(webhook_reminder_aggregate_threshold=1)
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     a.on_status_change("t2", "GW2", "10.0.0.2", "red")
     snaps = [
@@ -112,11 +127,13 @@ def test_aggregate_payload_excludes_recovered_node():
     ]
     a.on_status_change("t1", "GW", "10.0.0.1", "green")
     sent = []
-    _install_push_capture(a, sent)
+    flush = _install_push_capture(a, sent, disp)
     a._push_aggregate_reminder(snaps, time.time())
-    nodes = sent[0]["extra"]["aggregate"]["nodes"] if sent else []
+    flush()
+    agg = [s for s in sent if s["event"] == "alert_reminder_aggregate"]
+    nodes = agg[0]["extra"]["aggregate"]["nodes"] if agg else []
     tids = [n["tid"] for n in nodes]
-    ok = sent and "t1" not in tids and "t2" in tids
+    ok = agg and "t1" not in tids and "t2" in tids
     print(f"Bug158 aggregate excludes recovered node -> {ok} tids={tids}")
     return ok
 
@@ -162,7 +179,7 @@ def test_source_gate_and_aggregate_rebuild():
         and 'kind == "reminder"' in gate
         and "current_status == \"red\"" in gate
         and "_eligible_red_reminder_snaps" in am
-        and "rebuild=rebuild" in agg
+        and "rebuild_spec" in agg
         and "incident_acknowledged" in ws
         and "set_incident_ack_status_fn" in ws
     )

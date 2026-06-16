@@ -26,12 +26,14 @@ WAV 文件来源：
 """
 
 import copy
+import json
 import math
 import os
 import queue
 import struct
 import threading
 import time
+import uuid
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +44,7 @@ from src.trace_policy import (
     trace_skip_summary,
     trace_signature_from_summary,
 )
+from src.webhook_outbox import CLOSED_SUMMARY_DELAY_SEC, max_attempts_for_event
 
 try:
     import winsound
@@ -212,6 +215,7 @@ class AlertManager:
         self._last_aggregate_reminder_at = 0.0
         self._reminder_stop = threading.Event()
         self._trace_request_callback = None
+        self._outbox_dispatcher = None
         threading.Thread(
             target=self._webhook_reminder_loop,
             daemon=True, name="webhook-reminder",
@@ -341,6 +345,9 @@ class AlertManager:
             self._last_alert_status.pop(target_id, None)
             self._red_targets.discard(target_id)
         self._drop_webhook_incident(target_id)
+        if self._data_store is not None:
+            self._data_store.drop_pending_webhook_for_target(
+                target_id, "target_removed")
         # Permanent deletion: also reclaim the per-target delivery worker and
         # seq entry that _drop_webhook_incident (shared with pause) leaves in
         # place, so a removed target doesn't leak a queue + daemon thread +
@@ -362,12 +369,18 @@ class AlertManager:
             self._last_alert_status.pop(target_id, None)
             self._red_targets.discard(target_id)
         self._drop_webhook_incident(target_id)
+        if self._data_store is not None:
+            self._data_store.drop_pending_webhook_for_target(
+                target_id, "target_paused")
         # Do NOT call _stop_red_alarm() here — evaluate_alarm() in MainWindow
         # will do a fresh scan and decide.  This prevents pausing any node
         # (even a green one) from accidentally silencing alarms on other nodes.
 
     def set_data_store(self, ds) -> None:
         self._data_store = ds
+
+    def set_outbox_dispatcher(self, dispatcher) -> None:
+        self._outbox_dispatcher = dispatcher
 
     def set_config(self, config) -> None:
         self._config = config
@@ -498,6 +511,12 @@ class AlertManager:
                 return False
             inc.acknowledged = True
         self._persist_incident_ack(inc)
+        if self._data_store is not None:
+            self._data_store.drop_pending_webhook_events(
+                target_id,
+                ("alert_reminder", "diagnostic_update",
+                 "alert_reminder_aggregate"),
+                "acknowledged")
         return True
 
     def acknowledge_all_incidents(self) -> int:
@@ -804,9 +823,11 @@ class AlertManager:
         if event == "alert_red":
             if dur_sec is not None and dur_sec < 1:
                 if started:
-                    lines.append(f"开始时间：{started}")
+                    lines.append(f"故障开始：{started}")
             elif dur_text:
                 lines.append(f"已持续：{dur_text}")
+                if started:
+                    lines.append(f"故障开始：{started}")
             return lines
 
         if dur_text:
@@ -991,25 +1012,11 @@ class AlertManager:
         """Queue aggregate reminder; payload rebuilt at delivery from live state."""
         tid_seq_pairs = [(s["tid"], s["push_seq"]) for s in open_snaps]
         threshold = self._cfg_int("webhook_reminder_aggregate_threshold", 3)
-
-        def rebuild():
-            eligible = self._eligible_red_reminder_snaps(tid_seq_pairs)
-            if len(eligible) < threshold:
-                return None
-            now2 = time.time()
-            sorted_snaps = sorted(
-                eligible,
-                key=lambda s: now2 - s["started_at"],
-                reverse=True,
-            )
-            extra = self._build_aggregate_reminder_extra(sorted_snaps, now2)
-            count = extra["aggregate"]["count"]
-            max_dur = extra["aggregate"]["max_duration_text"]
-            message = (
-                f"当前仍有 {count} 个节点 red，最长已持续 {max_dur}"
-            )
-            return extra, message, f"汇总({count}节点)"
-
+        rebuild_spec = {
+            "type": "aggregate",
+            "tid_seq_pairs": tid_seq_pairs,
+            "threshold": threshold,
+        }
         self._push_webhook(
             event="alert_reminder_aggregate",
             target="汇总",
@@ -1017,7 +1024,7 @@ class AlertManager:
             status="red",
             message="",
             order_key="_aggregate_",
-            rebuild=rebuild,
+            rebuild_spec=rebuild_spec,
         )
 
     def _build_aggregate_reminder_extra(self, snaps: list[dict],
@@ -1200,9 +1207,17 @@ class AlertManager:
                 return inc.current_status in ("red", "orange")
             if kind == "alert_red":
                 # Allow delivery after close if still the current generation
-                # (queued before recovery on a short flap).
+                # (queued before recovery on a short flap).  When the
+                # incident is no longer in memory (recovery / restart),
+                # allow if the queued seq is still >= the valid seq baseline.
                 tid, seq = gate[1], gate[2]
-                return self._webhook_valid_seq.get(tid) == seq
+                cur = self._webhook_valid_seq.get(tid, 0)
+                if cur == seq:
+                    return True
+                inc = self._webhook_incidents.get(tid)
+                if inc is None and cur <= seq:
+                    return True
+                return False
             if kind == "aggregate":
                 # Legacy gate path — aggregate reminders now rebuild at
                 # delivery and no longer enqueue through _push_webhook.
@@ -1280,52 +1295,193 @@ class AlertManager:
         if q is not None:
             q.put(None)
 
+    def _make_delivery_id(self) -> str:
+        return f"WH-{uuid.uuid4().hex[:16].upper()}"
+
+    def _resolve_outbox_incident(self, tid: str | None) -> tuple[str, int | None]:
+        if not tid:
+            return "", None
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            if inc is None:
+                return "", None
+            return self._resolve_incident_id(inc), inc.push_seq
+
+    def _rebuild_aggregate_payload(self, rebuild_spec: dict):
+        tid_seq_pairs = rebuild_spec.get("tid_seq_pairs") or []
+        threshold = int(rebuild_spec.get("threshold") or 2)
+        eligible = self._eligible_red_reminder_snaps(tid_seq_pairs)
+        if len(eligible) < threshold:
+            return None
+        now2 = time.time()
+        sorted_snaps = sorted(
+            eligible,
+            key=lambda s: now2 - s["started_at"],
+            reverse=True,
+        )
+        extra = self._build_aggregate_reminder_extra(sorted_snaps, now2)
+        count = extra["aggregate"]["count"]
+        max_dur = extra["aggregate"]["max_duration_text"]
+        message = f"当前仍有 {count} 个节点 red，最长已持续 {max_dur}"
+        return extra, message, f"汇总({count}节点)"
+
+    def _build_closed_summary_delivery(
+            self, recovery_payload: dict, red_row: dict | None, now: float):
+        extra = dict(recovery_payload.get("extra") or {})
+        inc = dict(extra.get("incident") or {})
+        red_payload = {}
+        if red_row:
+            try:
+                red_payload = json.loads(red_row.get("payload_json") or "{}")
+            except Exception:
+                red_payload = {}
+        red_extra = red_payload.get("extra") or {}
+        red_inc = red_extra.get("incident") or {}
+        last_err = (red_row or {}).get("last_error") or "delivery_failed"
+        trace = extra.get("trace") or red_extra.get("trace") or {}
+        closed = {
+            "incident": {
+                **inc,
+                "started_at": inc.get("started_at") or red_inc.get("started_at"),
+                "recovered_at": inc.get("recovered_at"),
+                "duration_text": inc.get("duration_text", ""),
+                "closed_summary": True,
+                "red_never_delivered": True,
+                "last_delivery_error": last_err,
+                **self._incident_probe_fields(inc if inc else red_inc),
+            },
+            "trace": trace,
+        }
+        target = recovery_payload.get("target") or red_payload.get("target") or "?"
+        ip = recovery_payload.get("ip") or red_payload.get("ip") or ""
+        message = (
+            "该故障曾发生但首次告警推送失败，现补发闭环信息"
+        )
+        return (
+            "incident_closed_summary",
+            target,
+            ip,
+            "green",
+            message,
+            closed,
+            {"event_ts": recovery_payload.get("event_ts") or now},
+        )
+
+    def prepare_outbox_delivery(self, row: dict, now: float):
+        """Resolve a persisted outbox row into a send-ready payload."""
+        import json as _json
+        ds = self._data_store
+        try:
+            payload = _json.loads(row.get("payload_json") or "{}")
+        except Exception:
+            return None
+
+        event = payload.get("event") or row.get("event") or ""
+        gate = payload.get("gate")
+        if gate is not None:
+            gate_t = tuple(gate)
+            if not self._webhook_gate_ok(gate_t):
+                return None
+
+        rebuild_spec = payload.get("rebuild_spec")
+        if rebuild_spec and rebuild_spec.get("type") == "aggregate":
+            rebuilt = self._rebuild_aggregate_payload(rebuild_spec)
+            if rebuilt is None:
+                return None
+            extra, message, target = rebuilt
+            payload = {**payload, "extra": extra, "message": message,
+                       "target": target}
+
+        if event == "recovery" and ds is not None:
+            red = ds.find_undelivered_alert_red(
+                row.get("order_key") or "",
+                row.get("incident_id") or "",
+                exclude_id=row.get("delivery_id") or "",
+            )
+            if red and red.get("delivery_state") != "delivered":
+                age = now - float(red.get("first_queued_ts") or now)
+                superseded = (
+                    red.get("last_error") == "superseded_by_closed_summary"
+                    or red.get("delivery_state") == "dropped_stale"
+                )
+                if age >= CLOSED_SUMMARY_DELAY_SEC or superseded:
+                    if red.get("delivery_state") not in (
+                            "dropped_stale", "delivered"):
+                        ds.finish_webhook_outbox(
+                            red["delivery_id"],
+                            state="dropped_stale",
+                            error="superseded_by_closed_summary",
+                            now=now,
+                        )
+                    return self._build_closed_summary_delivery(
+                        payload, red, now)
+
+        event_ts = float(payload.get("event_ts") or row.get("event_ts") or now)
+        event_ts_str = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(event_ts))
+        meta = {"event_ts": event_ts, "event_ts_str": event_ts_str}
+        return (
+            payload.get("event") or event,
+            payload.get("target") or "",
+            payload.get("ip") or "",
+            payload.get("status") or "",
+            payload.get("message") or "",
+            payload.get("extra"),
+            meta,
+        )
+
     def _push_webhook(self, *, event: str, target: str, ip: str,
                       status: str, message: str,
                       extra: dict | None = None,
                       order_key: str | None = None,
                       gate=None,
-                      rebuild=None) -> None:
-        """Queue webhook delivery; per-target ordering when order_key set.
-
-        rebuild: optional callable returning (extra, message, target) at
-        delivery time, or None to drop.  Used by aggregate reminders so
-        deferred jobs reflect current ACK/recovery state, not enqueue-time
-        snapshots.
-        """
-        if self._config is None:
+                      rebuild_spec: dict | None = None) -> None:
+        """Persist webhook to outbox; background dispatcher delivers."""
+        if self._config is None or self._data_store is None:
             return
         url = (self._config.get_setting("webhook_url") or "").strip()
         if not url:
             return
-        ts_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
-        def _deliver():
-            send_extra = extra
-            send_message = message
-            send_target = target
-            if rebuild is not None:
-                rebuilt = rebuild()
-                if rebuilt is None:
-                    return
-                send_extra, send_message, send_target = rebuilt
-            if gate is not None and not self._webhook_gate_ok(gate):
-                return
-            self._send_webhook(
-                url, event, send_target, ip, status, send_message, ts_str,
-                send_extra)
-
-        if order_key:
-            self._ensure_webhook_worker(order_key).put(_deliver)
-        else:
-            threading.Thread(
-                target=_deliver, daemon=True, name="webhook",
-            ).start()
+        tid = order_key if order_key and order_key != "_aggregate_" else ""
+        incident_id, incident_seq = self._resolve_outbox_incident(tid or None)
+        event_ts = time.time()
+        payload = {
+            "event": event,
+            "target": target,
+            "ip": ip,
+            "status": status,
+            "message": message,
+            "extra": extra or {},
+            "gate": list(gate) if gate else None,
+            "rebuild_spec": rebuild_spec,
+            "event_ts": event_ts,
+        }
+        delivery_id = self._make_delivery_id()
+        ok = order_key or tid or "_broadcast_"
+        try:
+            self._data_store.enqueue_webhook_outbox(
+                delivery_id=delivery_id,
+                target_id=tid,
+                incident_id=incident_id,
+                incident_seq=incident_seq,
+                event=event,
+                order_key=ok,
+                payload=payload,
+                event_ts=event_ts,
+                max_attempts=max_attempts_for_event(event),
+            )
+        except Exception as e:
+            print(f"[Webhook] outbox enqueue failed: {e}")
+            return
+        if self._outbox_dispatcher is not None:
+            self._outbox_dispatcher.wake()
 
     @staticmethod
     def _send_webhook(url, event, target, ip, status, message, ts_str,
-                      extra=None):
-        """Build platform-aware payload and POST it. Errors are logged only."""
+                      extra=None, *, event_ts=None, queued_ts=None,
+                      sent_ts=None, attempt=1, delivery_id=""):
+        """Build platform-aware payload and POST it. Raises on failure."""
         import json
         import urllib.request
 
@@ -1335,6 +1491,7 @@ class AlertManager:
             "alert_reminder": "🔴",
             "alert_reminder_aggregate": "🔴",
             "diagnostic_update": "🧭",
+            "incident_closed_summary": "🟢",
         }
         titles = {
             "alert_red": "网络监控告警",
@@ -1342,11 +1499,16 @@ class AlertManager:
             "alert_reminder": "告警仍未恢复",
             "alert_reminder_aggregate": "告警仍未恢复汇总",
             "diagnostic_update": "故障诊断更新",
+            "incident_closed_summary": "网络故障已恢复",
         }
         icon = icons.get(event, "🟠")
         title = titles.get(event, "网络监控告警")
+        if event == "incident_closed_summary":
+            title = "网络故障已恢复｜补发闭环"
         text = AlertManager._format_webhook_text(
-            icon, title, event, target, ip, status, message, ts_str, extra)
+            icon, title, event, target, ip, status, message, ts_str, extra,
+            event_ts=event_ts, queued_ts=queued_ts, sent_ts=sent_ts,
+            attempt=attempt)
 
         url_l = url.lower()
         if "feishu" in url_l or "larkoffice" in url_l:
@@ -1359,26 +1521,64 @@ class AlertManager:
                 "event": event, "target": target, "ip": ip,
                 "status": status, "message": message,
                 "timestamp": ts_str,
+                "delivery_id": delivery_id,
+                "attempt": attempt,
             }
             if extra:
                 payload.update(extra)
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+
+    @staticmethod
+    def _format_ts(ts_val) -> str:
+        if ts_val is None:
+            return ""
         try:
-            body = json.dumps(payload, ensure_ascii=False).encode()
-            req = urllib.request.Request(
-                url, data=body,
-                headers={"Content-Type": "application/json; charset=utf-8"},
-                method="POST")
-            with urllib.request.urlopen(req, timeout=10):
-                pass
-        except Exception as e:
-            print(f"[Webhook] push failed: {e}")
+            return time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(float(ts_val)))
+        except (TypeError, ValueError, OSError):
+            return str(ts_val)
 
     @staticmethod
     def _format_webhook_text(icon, title, event, target, ip, status,
-                             message, ts_str, extra):
+                             message, ts_str, extra, *,
+                             event_ts=None, queued_ts=None, sent_ts=None,
+                             attempt=1):
         if event == "alert_reminder_aggregate":
             return AlertManager._format_aggregate_webhook_text(
-                icon, title, message, ts_str, extra)
+                icon, title, message, ts_str, extra,
+                event_ts=event_ts, queued_ts=queued_ts, sent_ts=sent_ts,
+                attempt=attempt)
+
+        if event == "incident_closed_summary":
+            inc = (extra or {}).get("incident") or {}
+            trace = (extra or {}).get("trace") or {}
+            lines = [
+                f"{icon}【{title}】",
+                f"节点：{target}",
+                f"IP：{ip}",
+            ]
+            if inc.get("started_at"):
+                lines.append(f"故障开始：{inc['started_at']}")
+            if inc.get("recovered_at"):
+                lines.append(f"恢复时间：{inc['recovered_at']}")
+            if inc.get("duration_text"):
+                lines.append(f"故障历时：{inc['duration_text']}")
+            lines.append(
+                "说明：故障期间 webhook 首次告警投递失败，现补发完整闭环信息。")
+            if inc.get("last_delivery_error"):
+                lines.append(f"最后错误：{inc['last_delivery_error']}")
+            lines.append(f"详情：{message}")
+            if trace.get("summary"):
+                lines.append(f"诊断：{trace['summary']}")
+            AlertManager._append_delivery_timing_lines(
+                lines, event_ts, queued_ts, sent_ts, attempt)
+            return "\n".join(lines)
 
         lines = [
             f"{icon}【{title}】",
@@ -1403,11 +1603,26 @@ class AlertManager:
             lines.append("诊断：已触发 traceroute，等待结果")
         if trace.get("trace_time"):
             lines.append(f"追踪时间：{trace['trace_time']}")
-        lines.append(f"时间：{ts_str}")
+        AlertManager._append_delivery_timing_lines(
+            lines, event_ts, queued_ts, sent_ts, attempt)
         return "\n".join(lines)
 
     @staticmethod
-    def _format_aggregate_webhook_text(icon, title, message, ts_str, extra):
+    def _append_delivery_timing_lines(lines, event_ts, queued_ts, sent_ts,
+                                      attempt):
+        if event_ts is not None:
+            lines.append(f"消息生成：{AlertManager._format_ts(event_ts)}")
+        if queued_ts is not None:
+            lines.append(f"入队时间：{AlertManager._format_ts(queued_ts)}")
+        if sent_ts is not None:
+            lines.append(f"发送时间：{AlertManager._format_ts(sent_ts)}")
+        if attempt and int(attempt) > 1:
+            lines.append(f"投递状态：第 {int(attempt)} 次尝试成功")
+
+    @staticmethod
+    def _format_aggregate_webhook_text(icon, title, message, ts_str, extra, *,
+                                      event_ts=None, queued_ts=None,
+                                      sent_ts=None, attempt=1):
         agg = (extra or {}).get("aggregate") or {}
         nodes = agg.get("nodes") or []
         lines = [
@@ -1444,7 +1659,8 @@ class AlertManager:
                 trace_lines.append(f"- {n.get('target', '?')}：{summary}")
             lines.extend(trace_lines)
 
-        lines.append(f"时间：{ts_str}")
+        AlertManager._append_delivery_timing_lines(
+            lines, event_ts, queued_ts, sent_ts, attempt)
         return "\n".join(lines)
 
     def acknowledge_alarm(self):

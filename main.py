@@ -157,6 +157,10 @@ def main():
     alerter.set_data_store(data_store)
     alerter.set_config(config)
     alerter.set_trace_request_callback(web.request_traceroute_now)
+    from src.webhook_outbox import WebhookOutboxDispatcher
+    webhook_dispatcher = WebhookOutboxDispatcher(alerter)
+    alerter.set_outbox_dispatcher(webhook_dispatcher)
+    webhook_dispatcher.start()
     web.set_traceroute_result_callback(alerter.on_traceroute_result)
     web.set_alert_ack_callback(alerter.acknowledge_incident)
     web.set_incident_ack_status_fn(alerter.is_incident_acknowledged)
@@ -232,6 +236,10 @@ def main():
     # _on_close() 里已调 flush()（同步等待数据写入），但没有调 conn.close()。
     # shutdown() 补上 conn.close() + WAL checkpoint，并让写线程干净退出。
     # 此时写线程仍活着（daemon 线程在进程退出才被杀），可以正常处理消息。
+    try:
+        webhook_dispatcher.stop()
+    except Exception:
+        pass
     try:
         data_store.shutdown()
     except Exception:

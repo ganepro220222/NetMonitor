@@ -35,13 +35,16 @@ class _Cfg:
 
 
 def _alerter(**cfg_kw):
-    a = AlertManager(enabled=False, assets_dir=os.path.join(ROOT, "assets"))
-    # webhook_url is mandatory post-hygiene-refactor: _tick_webhook_reminders
-    # skips counter advance + send when no URL is configured (url_ok gate).
+    from scripts.webhook_test_util import make_alerter
     cfg = dict(webhook_url=_HOOK_URL)
     cfg.update(cfg_kw)
-    a.set_config(_Cfg(**cfg))
-    return a
+    a, disp, ds = make_alerter(**cfg)
+    return a, disp
+
+
+def _install_push_capture(a, calls, disp=None):
+    from scripts.webhook_test_util import install_push_capture
+    return install_push_capture(a, calls, disp)
 
 
 def _open_red(a, tid, label, ip):
@@ -50,24 +53,8 @@ def _open_red(a, tid, label, ip):
         a._webhook_incidents[tid].last_reminder_at = 0
 
 
-def _install_push_capture(a, calls):
-    def _capture(**kw):
-        entry = {k: v for k, v in kw.items() if k != "rebuild"}
-        rebuild = kw.get("rebuild")
-        if rebuild is not None:
-            rebuilt = rebuild()
-            if rebuilt is None:
-                return
-            extra, message, target = rebuilt
-            entry["extra"] = extra
-            entry["message"] = message
-            entry["target"] = target
-        calls.append(entry)
-    a._push_webhook = _capture
-
-
 def test_individual_first_reminder_count_is_one():
-    a = _alerter(
+    a, disp = _alerter(
         webhook_reminder_enabled=True,
         webhook_reminder_interval_min=1,
         webhook_include_trace=False,
@@ -75,8 +62,9 @@ def test_individual_first_reminder_count_is_one():
     )
     _open_red(a, "t1", "GW", "10.0.0.1")
     calls = []
-    _install_push_capture(a, calls)
+    flush = _install_push_capture(a, calls, disp)
     a._tick_webhook_reminders()
+    flush()
     rem = [c for c in calls if c["event"] == "alert_reminder"]
     ok = len(rem) == 1 and rem[0]["extra"]["incident"]["reminder_count"] == 1
     got = rem[0]["extra"]["incident"]["reminder_count"] if rem else None
@@ -85,19 +73,24 @@ def test_individual_first_reminder_count_is_one():
 
 
 def test_individual_reminder_count_increments():
-    a = _alerter(
+    a, disp = _alerter(
         webhook_reminder_enabled=True,
         webhook_reminder_interval_min=1,
         webhook_include_trace=False,
         webhook_trace_update_enabled=False,
     )
     _open_red(a, "t1", "GW", "10.0.0.1")
-    counts = []
-    a._push_webhook = lambda **kw: counts.append(
-        kw["extra"]["incident"]["reminder_count"])
-    a._tick_webhook_reminders()                       # 1st reminder
-    a._webhook_incidents["t1"].last_reminder_at = 0   # force due again
-    a._tick_webhook_reminders()                       # 2nd reminder
+    captured = []
+    flush = _install_push_capture(a, captured, disp)
+    a._tick_webhook_reminders()
+    flush()
+    counts = [c["extra"]["incident"]["reminder_count"]
+              for c in captured if c.get("event") == "alert_reminder"]
+    a._webhook_incidents["t1"].last_reminder_at = 0
+    a._tick_webhook_reminders()
+    flush()
+    counts = [c["extra"]["incident"]["reminder_count"]
+              for c in captured if c.get("event") == "alert_reminder"]
     ok = counts == [1, 2]
     print(f"Bug137 individual reminder count 1 then 2 -> {ok} ({counts})")
     return ok
@@ -105,7 +98,7 @@ def test_individual_reminder_count_increments():
 
 def test_reminder_count_in_text_payload():
     """企业微信/钉钉/飞书 text path: '提醒次数：1' on the first reminder."""
-    a = _alerter(
+    a, disp = _alerter(
         webhook_reminder_enabled=True,
         webhook_reminder_interval_min=1,
         webhook_include_trace=False,
@@ -114,22 +107,19 @@ def test_reminder_count_in_text_payload():
     _open_red(a, "t1", "GW", "10.0.0.1")
     captured = {}
 
-    def _fake_push(**kw):
-        extra = kw.get("extra")
-        message = kw["message"]
-        target = kw["target"]
-        rebuild = kw.get("rebuild")
-        if rebuild is not None:
-            rebuilt = rebuild()
-            if rebuilt is None:
-                return
-            extra, message, target = rebuilt
+    def _send(url, event, target, ip, status, message, ts_str,
+              extra=None, **kw):
         captured["text"] = AlertManager._format_webhook_text(
-            "🔴", "告警仍未恢复", kw["event"], target, kw["ip"],
-            kw["status"], message, "2026-01-01 00:00:00", extra)
+            "🔴", "告警仍未恢复", event, target, ip,
+            status, message, "2026-01-01 00:00:00", extra,
+            event_ts=kw.get("event_ts"), queued_ts=kw.get("queued_ts"),
+            sent_ts=kw.get("sent_ts"), attempt=kw.get("attempt", 1))
 
-    a._push_webhook = _fake_push
+    a._send_webhook = staticmethod(_send)
     a._tick_webhook_reminders()
+    for _ in range(8):
+        disp._tick()
+        time.sleep(0.02)
     text = captured.get("text", "")
     ok = "提醒次数：1" in text and "提醒次数：0" not in text
     print(f"Bug137 text payload shows 提醒次数：1 -> {ok}")
@@ -137,7 +127,7 @@ def test_reminder_count_in_text_payload():
 
 
 def test_aggregate_nodes_reminder_count_is_one():
-    a = _alerter(
+    a, disp = _alerter(
         webhook_reminder_enabled=True,
         webhook_reminder_interval_min=1,
         webhook_reminder_aggregate_enabled=True,
@@ -148,8 +138,9 @@ def test_aggregate_nodes_reminder_count_is_one():
     for i in range(3):
         _open_red(a, f"t{i}", f"N{i}", f"10.0.0.{i+1}")
     calls = []
-    _install_push_capture(a, calls)
+    flush = _install_push_capture(a, calls, disp)
     a._tick_webhook_reminders()
+    flush()
     agg = [c for c in calls if c["event"] == "alert_reminder_aggregate"]
     ok = (
         len(agg) == 1
@@ -166,7 +157,7 @@ def test_non_due_node_keeps_actual_count_in_aggregate():
     """A node reminded once, then not yet due again, must still report its
     real count (1) when listed in an aggregate triggered by other nodes —
     not get spuriously bumped, and not snapshot a stale pre-increment 0."""
-    a = _alerter(
+    a, disp = _alerter(
         webhook_reminder_enabled=True,
         webhook_reminder_interval_min=30,
         webhook_reminder_aggregate_enabled=True,
@@ -183,8 +174,9 @@ def test_non_due_node_keeps_actual_count_in_aggregate():
     a._webhook_incidents["t1"].last_reminder_at = 0        # due
     a._webhook_incidents["t2"].last_reminder_at = 0        # due
     calls = []
-    _install_push_capture(a, calls)
+    flush = _install_push_capture(a, calls, disp)
     a._tick_webhook_reminders()
+    flush()
     agg = [c for c in calls if c["event"] == "alert_reminder_aggregate"]
     nodes = ({n["tid"]: n["reminder_count"]
               for n in agg[0]["extra"]["aggregate"]["nodes"]} if agg else {})

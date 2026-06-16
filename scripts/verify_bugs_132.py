@@ -67,16 +67,13 @@ def test_reseed_sends_catchup_alert_red():
     ds, _ = _mk_store()
     started = time.time() - 1800
     _insert_open_red(ds, started=started)
-    a = _alerter(ds)
-    a.set_config(type("C", (), {"get_setting": lambda _s, k: {
-        "webhook_url": "http://127.0.0.1:9/hook",
-    }.get(k)})())
+    from scripts.webhook_test_util import make_alerter, install_push_capture
+    a, disp, _ds = make_alerter(ds=ds)
     calls = []
-    a._send_webhook = staticmethod(
-        lambda *args, **kw: calls.append({"event": args[1], "message": args[5]}))
+    flush = install_push_capture(a, calls, disp)
     n = a.reseed_webhook_incidents(
         [{"id": "t1", "label": "GW", "ip": "10.0.0.1"}], set())
-    a._webhook_queues["t1"].join()
+    flush()
     inc = a._webhook_incidents.get("t1")
     ok = (
         n == 1

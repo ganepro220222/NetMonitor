@@ -217,6 +217,8 @@ class DataStore:
         # job commits (so WebServer can notify browsers only after DB rows
         # are actually deleted, not when the wipe is merely enqueued).
         self._wipe_complete_callback = None
+        self._outbox_lock = threading.Lock()
+        self._outbox_conn = None
 
         threading.Thread(
             target=self._maybe_vacuum, daemon=True,
@@ -517,6 +519,262 @@ class DataStore:
             return row is not None
         except Exception:
             return False
+
+    # ── Webhook outbox (reliable delivery) ───────────────────────────
+
+    def _outbox_write_conn(self) -> sqlite3.Connection:
+        conn = getattr(self, "_outbox_conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._outbox_conn = conn
+        return conn
+
+    def enqueue_webhook_outbox(
+            self, *, delivery_id: str, target_id: str, incident_id: str,
+            incident_seq: int | None, event: str, order_key: str,
+            payload: dict, event_ts: float, max_attempts: int = 0) -> str:
+        """Insert a pending webhook delivery row (synchronous, durable)."""
+        import json as _json
+        now = time.time()
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            if event in ("alert_reminder", "diagnostic_update"):
+                conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                    "last_error='coalesced', updated_at=? "
+                    "WHERE delivery_state='pending' AND event=? "
+                    "AND order_key=? AND incident_id=? AND delivery_id!=?",
+                    (now, event, order_key, incident_id or "", delivery_id))
+            conn.execute(
+                "INSERT INTO webhook_outbox "
+                "(delivery_id, target_id, incident_id, incident_seq, event, "
+                " order_key, payload_json, event_ts, first_queued_ts, "
+                " next_attempt_ts, attempt_count, max_attempts, delivery_state, "
+                " last_error, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,0,?, 'pending', '', ?, ?)",
+                (
+                    delivery_id,
+                    target_id or "",
+                    incident_id or "",
+                    incident_seq,
+                    event,
+                    order_key,
+                    _json.dumps(payload, ensure_ascii=False),
+                    float(event_ts),
+                    now,
+                    now,
+                    int(max_attempts or 0),
+                    now,
+                    now,
+                ))
+            conn.commit()
+        return delivery_id
+
+    def fetch_deliverable_webhook_outbox(self, now: float,
+                                         limit: int = 50) -> list[dict]:
+        """Head-of-line due messages: one per order_key."""
+        conn = self._read_conn()
+        try:
+            rows = conn.execute(
+                """
+                WITH head AS (
+                    SELECT order_key, MIN(id) AS min_id
+                    FROM webhook_outbox
+                    WHERE delivery_state IN ('pending', 'sending')
+                    GROUP BY order_key
+                )
+                SELECT o.*
+                FROM webhook_outbox o
+                JOIN head h ON o.order_key = h.order_key AND o.id = h.min_id
+                WHERE o.delivery_state = 'pending'
+                  AND o.next_attempt_ts <= ?
+                ORDER BY o.first_queued_ts, o.id
+                LIMIT ?
+                """,
+                (float(now), int(limit)),
+            ).fetchall()
+            return [self._outbox_row_to_dict(r) for r in rows]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _outbox_row_to_dict(row) -> dict:
+        cols = (
+            "id", "delivery_id", "target_id", "incident_id", "incident_seq",
+            "event", "order_key", "payload_json", "event_ts",
+            "first_queued_ts", "next_attempt_ts", "last_attempt_ts",
+            "delivered_ts", "attempt_count", "max_attempts", "delivery_state",
+            "last_error", "created_at", "updated_at",
+        )
+        return dict(zip(cols, row))
+
+    def claim_webhook_outbox(self, delivery_id: str, now: float) -> bool:
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            cur = conn.execute(
+                "UPDATE webhook_outbox SET delivery_state='sending', "
+                "last_attempt_ts=?, updated_at=? "
+                "WHERE delivery_id=? AND delivery_state='pending'",
+                (float(now), float(now), delivery_id))
+            conn.commit()
+            return cur.rowcount == 1
+
+    def finish_webhook_outbox(
+            self, delivery_id: str, *, state: str, error: str = "",
+            now: float | None = None, attempt_count: int | None = None,
+            next_attempt_ts: float | None = None) -> None:
+        now = float(now or time.time())
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            row = conn.execute(
+                "SELECT attempt_count FROM webhook_outbox WHERE delivery_id=?",
+                (delivery_id,)).fetchone()
+            if row is None:
+                return
+            attempts = int(attempt_count if attempt_count is not None
+                           else row[0])
+            if state == "delivered":
+                conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='delivered', "
+                    "delivered_ts=?, last_attempt_ts=?, attempt_count=?, "
+                    "last_error='', updated_at=? WHERE delivery_id=?",
+                    (now, now, attempts, now, delivery_id))
+            elif state == "pending":
+                conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='pending', "
+                    "last_attempt_ts=?, attempt_count=?, last_error=?, "
+                    "next_attempt_ts=?, updated_at=? WHERE delivery_id=?",
+                    (now, attempts, error or "", float(next_attempt_ts or now),
+                     now, delivery_id))
+            else:
+                conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state=?, "
+                    "last_attempt_ts=?, attempt_count=?, last_error=?, "
+                    "updated_at=? WHERE delivery_id=?",
+                    (state, now, attempts, error or "", now, delivery_id))
+            conn.commit()
+
+    def find_undelivered_alert_red(
+            self, order_key: str, incident_id: str,
+            exclude_id: str = "") -> dict | None:
+        conn = self._read_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM webhook_outbox "
+                "WHERE event='alert_red' AND order_key=? "
+                "AND delivery_id!=? AND delivered_ts IS NULL "
+                "AND delivery_state != 'delivered' "
+                "ORDER BY id LIMIT 1",
+                (order_key, exclude_id or ""),
+            ).fetchone()
+            return self._outbox_row_to_dict(row) if row else None
+        except Exception:
+            return None
+
+    def drop_pending_webhook_for_target(self, target_id: str, reason: str) -> None:
+        if not target_id:
+            return
+        now = time.time()
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            conn.execute(
+                "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                "last_error=?, updated_at=? "
+                "WHERE target_id=? AND delivery_state IN ('pending', 'sending')",
+                (reason or "target_removed", now, target_id))
+            conn.commit()
+
+    def get_webhook_deliveries(
+            self, *, incident_id: str | None = None,
+            target_id: str | None = None, limit: int = 100) -> list[dict]:
+        import json as _json
+        conn = self._read_conn()
+        clauses = ["1=1"]
+        params: list = []
+        if incident_id:
+            clauses.append("incident_id=?")
+            params.append(incident_id)
+        if target_id:
+            clauses.append("target_id=?")
+            params.append(target_id)
+        params.append(int(limit))
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM webhook_outbox WHERE {' AND '.join(clauses)} "
+                f"ORDER BY id DESC LIMIT ?",
+                params).fetchall()
+            out = []
+            for row in rows:
+                d = self._outbox_row_to_dict(row)
+                try:
+                    d["payload"] = _json.loads(d.pop("payload_json") or "{}")
+                except Exception:
+                    d["payload"] = {}
+                out.append(d)
+            return out
+        except Exception:
+            return []
+
+    def get_webhook_delivery_stats(self) -> dict:
+        conn = self._read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT delivery_state, COUNT(*) FROM webhook_outbox "
+                "GROUP BY delivery_state").fetchall()
+            return {st: cnt for st, cnt in rows}
+        except Exception:
+            return {}
+
+    def get_last_webhook_failures(self, limit: int = 5) -> list[dict]:
+        conn = self._read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT delivery_id, target_id, event, delivery_state, "
+                "last_error, updated_at FROM webhook_outbox "
+                "WHERE delivery_state IN ('failed_permanent', 'pending') "
+                "AND last_error!='' "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (int(limit),)).fetchall()
+            return [
+                {"delivery_id": r[0], "target_id": r[1], "event": r[2],
+                 "state": r[3], "error": r[4], "updated_at": r[5]}
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    def drop_pending_webhook_events(
+            self, target_id: str, events: tuple[str, ...],
+            reason: str) -> None:
+        if not target_id or not events:
+            return
+        now = time.time()
+        placeholders = ",".join("?" * len(events))
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            conn.execute(
+                f"UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                f"last_error=?, updated_at=? "
+                f"WHERE target_id=? AND delivery_state IN ('pending','sending') "
+                f"AND event IN ({placeholders})",
+                (reason or "dropped", now, target_id, *events))
+            conn.commit()
+
+    def find_pending_recovery(
+            self, order_key: str, incident_id: str = "") -> dict | None:
+        conn = self._read_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM webhook_outbox "
+                "WHERE event='recovery' AND order_key=? "
+                "AND delivery_state='pending' "
+                "ORDER BY id LIMIT 1",
+                (order_key,)).fetchone()
+            return self._outbox_row_to_dict(row) if row else None
+        except Exception:
+            return None
 
     def get_last_known_statuses(self) -> dict:
         """
@@ -2530,6 +2788,43 @@ class DataStore:
             conn.execute("PRAGMA user_version = 14")
             conn.commit()
             ver = 14
+
+        # v14 → v15: reliable webhook outbox (persistent delivery queue).
+        if ver == 14:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS webhook_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    delivery_id TEXT UNIQUE NOT NULL,
+                    target_id TEXT,
+                    incident_id TEXT,
+                    incident_seq INTEGER,
+                    event TEXT NOT NULL,
+                    order_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    event_ts REAL NOT NULL,
+                    first_queued_ts REAL NOT NULL,
+                    next_attempt_ts REAL NOT NULL,
+                    last_attempt_ts REAL,
+                    delivered_ts REAL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 0,
+                    delivery_state TEXT NOT NULL,
+                    last_error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_webhook_outbox_due
+                    ON webhook_outbox(delivery_state, next_attempt_ts);
+                CREATE INDEX IF NOT EXISTS idx_webhook_outbox_order
+                    ON webhook_outbox(order_key, first_queued_ts, id);
+                CREATE INDEX IF NOT EXISTS idx_webhook_outbox_incident
+                    ON webhook_outbox(incident_id);
+                CREATE INDEX IF NOT EXISTS idx_webhook_outbox_target
+                    ON webhook_outbox(target_id);
+            """)
+            conn.execute("PRAGMA user_version = 15")
+            conn.commit()
+            ver = 15
 
         # Restore in-memory active-incident state from DB
         self._restore_active_incidents(conn)

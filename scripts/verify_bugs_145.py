@@ -31,11 +31,15 @@ def _cfg():
 
 
 def _alerter(ds=None):
-    a = AlertManager(enabled=False, assets_dir=os.path.join(ROOT, "assets"))
-    a.set_config(_cfg())
-    if ds:
-        a.set_data_store(ds)
-    return a
+    from scripts.webhook_test_util import make_alerter
+    a, disp, ds = make_alerter(ds=ds)
+    return a, disp
+
+
+def _flush_outbox(a, disp, n=8, delay=0.02):
+    for _ in range(n):
+        disp._tick()
+        time.sleep(delay)
 
 
 def _insert_open_red(ds, *, tid="t1", started=None, fr="no_reply", pt="icmp"):
@@ -52,13 +56,13 @@ def test_reseed_sends_catchup_alert_red():
     ds, _ = _mk_store()
     started = time.time() - 1800
     _insert_open_red(ds, started=started, fr="no_reply")
-    a = _alerter(ds)
+    a, disp = _alerter(ds)
     delivered = []
     a._send_webhook = staticmethod(
         lambda *a, **k: delivered.append({"event": a[1], "message": a[5]}))
     n = a.reseed_webhook_incidents(
         [{"id": "t1", "label": "GW", "ip": "10.0.0.1"}], set())
-    a._webhook_queues["t1"].join()
+    _flush_outbox(a, disp)
     ok = (
         n == 1
         and any(d["event"] == "alert_red" for d in delivered)
@@ -76,7 +80,7 @@ def test_reseed_restores_probe_fields():
         open_inc["t1"].get("failure_reason") == "no_reply"
         and open_inc["t1"].get("ping_type") == "icmp"
     )
-    a = _alerter(ds)
+    a, disp = _alerter(ds)
     a.reseed_webhook_incidents([{"id": "t1", "label": "GW", "ip": "10.0.0.1"}], set())
     inc = a._webhook_incidents["t1"]
     ok = ok and inc.failure_reason == "no_reply" and inc.ping_type == "icmp"
@@ -85,7 +89,7 @@ def test_reseed_restores_probe_fields():
 
 
 def test_stale_alert_red_dropped_after_new_incident():
-    a = _alerter()
+    a, _disp = _alerter()
     order = []
     a._send_webhook = staticmethod(
         lambda *args, **kw: order.append(args[1]))
@@ -102,11 +106,11 @@ def test_stale_alert_red_dropped_after_new_incident():
 
 
 def test_delivery_order_red_before_recovery():
-    a = _alerter()
+    a, disp = _alerter()
     order = []
     barrier = threading.Event()
 
-    def slow_send(url, event, target, ip, status, message, ts_str, extra=None):
+    def slow_send(url, event, target, ip, status, message, ts_str, extra=None, **kw):
         if event == "alert_red":
             barrier.wait(timeout=2)
         order.append(event)
@@ -115,14 +119,14 @@ def test_delivery_order_red_before_recovery():
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     a.on_status_change("t1", "GW", "10.0.0.1", "green")
     barrier.set()
-    a._webhook_queues["t1"].join()
+    _flush_outbox(a, disp, n=12)
     ok = order == ["alert_red", "recovery"]
     print(f"Bug145 per-target queue order -> {ok} ({order})")
     return ok
 
 
 def test_short_flap_alert_red_still_delivers():
-    a = _alerter()
+    a, disp = _alerter()
     delivered = []
     a._send_webhook = staticmethod(
         lambda *args, **kw: delivered.append(args[1]))
@@ -130,7 +134,7 @@ def test_short_flap_alert_red_still_delivers():
     seq = a._webhook_incidents["t1"].push_seq
     a.on_status_change("t1", "GW", "10.0.0.1", "green")
     ok_gate = a._webhook_gate_ok(("alert_red", "t1", seq))
-    a._webhook_queues["t1"].join()
+    _flush_outbox(a, disp, n=12)
     ok = ok_gate and "alert_red" in delivered and "recovery" in delivered
     print(f"Bug145 short flap alert_red + recovery -> {ok}")
     return ok

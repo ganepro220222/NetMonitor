@@ -117,11 +117,22 @@ def test_recovery_clears_ack_for_new_incident():
         iid1 = a._webhook_incidents["t1"].incident_id
         a.seed_status_tracking({"t1": "red"})
         a.on_status_change("t1", "GW", "10.0.0.1", "green")
+        ds.record_alert(
+            target_id="t1", label="GW", ip="10.0.0.1",
+            ts=time.time(), old_status="red", new_status="green",
+            category="recovery", ping_type="icmp", failure_reason="",
+        )
         ds.flush()
-        time.sleep(0.2)
+        time.sleep(0.3)
         a.on_status_change("t1", "GW", "10.0.0.1", "red")
+        ds.record_alert(
+            target_id="t1", label="GW", ip="10.0.0.1",
+            ts=time.time(), old_status="green", new_status="red",
+            category="availability", ping_type="icmp",
+            failure_reason="no_reply",
+        )
         ds.flush()
-        time.sleep(0.2)
+        time.sleep(0.3)
         inc2 = a._webhook_incidents.get("t1")
         conn = sqlite3.connect(path)
         row = conn.execute(
@@ -163,8 +174,8 @@ def test_db_row_written_on_ack():
         ver = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
         ds.shutdown()
-        ok = row is not None and row[0] == "t1" and ver == 14
-        print(f"Bug156 webhook_ack row + schema v14 -> {ok}")
+        ok = row is not None and row[0] == "t1" and ver >= 14
+        print(f"Bug156 webhook_ack row + schema v14 -> {ok} (ver={ver})")
         return ok
     finally:
         try:

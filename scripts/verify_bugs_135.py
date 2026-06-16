@@ -41,8 +41,8 @@ class _Cfg:
 
 
 def _alerter(**cfg_kw):
-    a = AlertManager(enabled=False, assets_dir=os.path.join(ROOT, "assets"))
-    a.set_config(_Cfg(
+    from scripts.webhook_test_util import make_alerter
+    a, disp, ds = make_alerter(
         webhook_reminder_enabled=True,
         webhook_reminder_interval_min=INTERVAL_MIN,
         webhook_reminder_aggregate_enabled=True,
@@ -50,8 +50,13 @@ def _alerter(**cfg_kw):
         webhook_url=_HOOK_URL,
         webhook_include_trace=False,
         webhook_trace_update_enabled=False,
-        **cfg_kw))
-    return a
+        **cfg_kw)
+    return a, disp
+
+
+def _install_push_capture(a, calls, disp=None):
+    from scripts.webhook_test_util import install_push_capture
+    return install_push_capture(a, calls, disp)
 
 
 def _open(a, n):
@@ -59,28 +64,12 @@ def _open(a, n):
         a.on_status_change(f"t{i}", f"N{i}", f"10.0.0.{i+1}", "red")
 
 
-def _install_push_capture(a, calls):
-    def _capture(**kw):
-        entry = {k: v for k, v in kw.items() if k != "rebuild"}
-        rebuild = kw.get("rebuild")
-        if rebuild is not None:
-            rebuilt = rebuild()
-            if rebuilt is None:
-                return
-            extra, message, target = rebuilt
-            entry["extra"] = extra
-            entry["message"] = message
-            entry["target"] = target
-        calls.append(entry)
-    a._push_webhook = _capture
-
-
 def _count_agg(calls):
     return sum(1 for c in calls if c["event"] == "alert_reminder_aggregate")
 
 
 def test_staggered_due_single_aggregate_per_interval():
-    a = _alerter()
+    a, disp = _alerter()
     _open(a, 3)
     now = time.time()
     # Only t0 is overdue right now; t1/t2 came red recently (not due).
@@ -89,15 +78,18 @@ def test_staggered_due_single_aggregate_per_interval():
     a._webhook_incidents["t2"].last_reminder_at = now - 60
     a._last_aggregate_reminder_at = now - INTERVAL_SEC - 5
     calls = []
-    _install_push_capture(a, calls)
+    flush = _install_push_capture(a, calls, disp)
 
-    a._tick_webhook_reminders()                     # tick A: t0 due
+    a._tick_webhook_reminders()
+    flush()
     agg_a = _count_agg(calls)
-    a._webhook_incidents["t1"].last_reminder_at = 0  # tick B: t1 now due
+    a._webhook_incidents["t1"].last_reminder_at = 0
     a._tick_webhook_reminders()
+    flush()
     agg_b = _count_agg(calls) - agg_a
-    a._webhook_incidents["t2"].last_reminder_at = 0  # tick C: t2 now due
+    a._webhook_incidents["t2"].last_reminder_at = 0
     a._tick_webhook_reminders()
+    flush()
     agg_c = _count_agg(calls) - agg_a - agg_b
 
     ok = agg_a == 1 and agg_b == 0 and agg_c == 0
@@ -107,27 +99,28 @@ def test_staggered_due_single_aggregate_per_interval():
 
 
 def test_aggregate_rearms_after_interval():
-    a = _alerter()
+    a, disp = _alerter()
     _open(a, 3)
     now = time.time()
     for i in range(3):
         a._webhook_incidents[f"t{i}"].last_reminder_at = 0
     a._last_aggregate_reminder_at = now - INTERVAL_SEC - 5  # last agg long ago
     calls = []
-    _install_push_capture(a, calls)
+    flush = _install_push_capture(a, calls, disp)
 
-    a._tick_webhook_reminders()                     # fires (re-armed)
+    a._tick_webhook_reminders()
+    flush()
     first = _count_agg(calls)
-    # Immediately tick again with all due: throttled (no time elapsed).
     for i in range(3):
         a._webhook_incidents[f"t{i}"].last_reminder_at = 0
     a._tick_webhook_reminders()
+    flush()
     second = _count_agg(calls) - first
-    # Simulate a full interval passing: re-arm and force due again.
     a._last_aggregate_reminder_at = time.time() - INTERVAL_SEC - 5
     for i in range(3):
         a._webhook_incidents[f"t{i}"].last_reminder_at = 0
     a._tick_webhook_reminders()
+    flush()
     third = _count_agg(calls) - first - second
 
     ok = first == 1 and second == 0 and third == 1
@@ -139,13 +132,14 @@ def test_aggregate_rearms_after_interval():
 def test_simultaneous_outage_still_single_aggregate():
     """Sanity: the common correlated-failure case (all due together) stays
     a single aggregate — the throttle does not change it."""
-    a = _alerter()
+    a, disp = _alerter()
     _open(a, 4)
     for i in range(4):
         a._webhook_incidents[f"t{i}"].last_reminder_at = 0
     calls = []
-    _install_push_capture(a, calls)
+    flush = _install_push_capture(a, calls, disp)
     a._tick_webhook_reminders()
+    flush()
     agg = [c for c in calls if c["event"] == "alert_reminder_aggregate"]
     ok = len(agg) == 1 and agg[0]["extra"]["aggregate"]["count"] == 4
     print(f"Bug135 simultaneous outage single aggregate -> {ok}")

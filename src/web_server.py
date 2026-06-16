@@ -1218,6 +1218,7 @@ body.theme-dark{
       </div>
     </div>
     <span id="conn-pill">● 已连接</span>
+    <span id="webhook-fail-pill" style="display:none;font-size:11px;padding:3px 11px;border-radius:20px;background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#f87171" title="Webhook 投递失败"></span>
   </div>
 </header>
 <div class="tabs">
@@ -5808,6 +5809,23 @@ function connect(){
     es.close();es=null;retryTimer=setTimeout(connect,3000);};}
 initNotifications();
 connect();
+async function refreshWebhookFailBanner(){
+  try{
+    const r=await fetch('/api/webhook/stats');
+    const j=await r.json();
+    const pill=document.getElementById('webhook-fail-pill');
+    if(!pill)return;
+    const fails=(j&&j.failures)||[];
+    const pending=(j&&j.stats&&j.stats.pending)||0;
+    if(!fails.length&&!pending){pill.style.display='none';return;}
+    const top=fails[0];
+    const hint=top?`${top.event||'?'} ${top.error||''}`:`pending ${pending}`;
+    pill.textContent='⚠ Webhook '+hint.slice(0,48);
+    pill.style.display='inline-block';
+  }catch(e){}
+}
+setInterval(refreshWebhookFailBanner,30000);
+refreshWebhookFailBanner();
 
 // SLA Report
 let _slaData=[],_slaSortCol=1,_slaSortAsc=true;
@@ -7037,6 +7055,37 @@ class WebServer:
             if ok:
                 self.sync_target_ack_status(tid)
             return json.dumps({"ok": ok}), 200, {
+                "Content-Type": "application/json"}
+
+        @app.route("/api/webhook/deliveries")
+        def api_webhook_deliveries():
+            ds = self._data_store
+            if ds is None:
+                return json.dumps([]), 200, {
+                    "Content-Type": "application/json"}
+            incident_id = (request.args.get("incident_id") or "").strip()
+            target_id = (request.args.get("target_id") or "").strip()
+            try:
+                limit = int(request.args.get("limit") or 100)
+            except (TypeError, ValueError):
+                limit = 100
+            rows = ds.get_webhook_deliveries(
+                incident_id=incident_id or None,
+                target_id=target_id or None,
+                limit=max(1, min(limit, 500)))
+            return json.dumps(rows, ensure_ascii=False), 200, {
+                "Content-Type": "application/json"}
+
+        @app.route("/api/webhook/stats")
+        def api_webhook_stats():
+            ds = self._data_store
+            if ds is None:
+                return json.dumps({"stats": {}, "failures": []}), 200, {
+                    "Content-Type": "application/json"}
+            return json.dumps({
+                "stats": ds.get_webhook_delivery_stats(),
+                "failures": ds.get_last_webhook_failures(5),
+            }, ensure_ascii=False), 200, {
                 "Content-Type": "application/json"}
 
         # ── Quick-tracert window (Feature B) ─────────────────────────────
