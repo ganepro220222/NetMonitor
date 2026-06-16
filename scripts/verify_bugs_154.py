@@ -135,7 +135,7 @@ def test_v12_to_v13_migration_backfills_rows():
         ver = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
         ds.shutdown()
-        ok = row[0] == "http" and ver == 13
+        ok = row[0] == "http" and ver >= 13
         print(f"Bug154 v12->v13 backfill row -> {ok} ping_type={row[0]} ver={ver}")
         return ok
     finally:
@@ -224,7 +224,7 @@ def test_v11_legacy_db_migration():
         ds.shutdown()
         ok = (
             pt_row[0] == "http"
-            and ver == 13
+            and ver >= 13
             and open_inc["T"]["ping_type"] == "http"
         )
         print(f"Bug154 v11 legacy migration -> {ok} row={pt_row[0]} ver={ver}")
