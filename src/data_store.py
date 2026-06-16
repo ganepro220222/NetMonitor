@@ -2475,6 +2475,9 @@ class DataStore:
                 iid = active.get(tid)  # inherit incident if active
                 if iid:
                     updates.append((iid, rid))
+                # Pause terminates the open incident (operator silence).
+                if cat == 'paused' or ns == 'paused':
+                    active.pop(tid, None)
                 continue
 
             iid = active.get(tid)
@@ -2511,7 +2514,7 @@ class DataStore:
                 SELECT MAX(id) FROM alert_events GROUP BY target_id
             )
             AND incident_id IS NOT NULL
-            AND new_status NOT IN ('green')
+            AND new_status IN ('red', 'orange')
         """).fetchall()
         for tid, iid, _ in rows:
             self._active_incidents[tid] = iid
@@ -2625,7 +2628,11 @@ class DataStore:
         Rules:
         - orange / red  → start or continue an incident
         - green         → close an incident (recovery event gets same ID)
-        - paused / gray → transitional; inherit incident_id if in one
+        - paused        → tag the closing incident on the pause row, then
+                          drop the active pointer (operator silence ends the
+                          open incident for reseed / traceroute / duration)
+        - gray / resumed → transitional; inherit incident_id only if still
+                          active (normally None after pause)
 
         _active_incidents persists across flushes so incident continuity
         survives program restarts (restored from DB in _init_schema).
@@ -2667,7 +2674,12 @@ class DataStore:
                 else:
                     ev['incident_id'] = None          # normal green→green
 
-            elif ns in ('paused', 'gray') or cat in ('paused', 'resumed'):
+            elif ns == 'paused' or cat == 'paused':
+                ev['incident_id'] = iid              # tag pause to prior incident
+                if iid:
+                    del self._active_incidents[tid]
+
+            elif ns in ('gray',) or cat in ('resumed',):
                 ev['incident_id'] = iid              # None if not in incident
 
             else:
