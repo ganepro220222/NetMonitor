@@ -967,7 +967,7 @@ class AlertManager:
                 message="连接仍未恢复",
                 extra=self._build_reminder_extra(snap),
                 order_key=snap["tid"],
-                gate=("incident", snap["tid"], snap["push_seq"]),
+                gate=("reminder", snap["tid"], snap["push_seq"]),
             )
             self._maybe_request_trace_refresh(snap, now)
 
@@ -1178,6 +1178,16 @@ class AlertManager:
             return True
         kind = gate[0]
         with self._webhook_incident_lock:
+            if kind == "reminder":
+                tid, seq = gate[1], gate[2]
+                if self._webhook_valid_seq.get(tid) != seq:
+                    return False
+                inc = self._webhook_incidents.get(tid)
+                if inc is None or inc.push_seq != seq:
+                    return False
+                if inc.acknowledged:
+                    return False
+                return inc.current_status == "red"
             if kind == "incident":
                 tid, seq = gate[1], gate[2]
                 if self._webhook_valid_seq.get(tid) != seq:
@@ -1187,7 +1197,7 @@ class AlertManager:
                     return False
                 if inc.acknowledged:
                     return False
-                return True
+                return inc.current_status in ("red", "orange")
             if kind == "alert_red":
                 # Allow delivery after close if still the current generation
                 # (queued before recovery on a short flap).

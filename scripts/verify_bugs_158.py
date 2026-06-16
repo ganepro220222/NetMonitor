@@ -54,7 +54,7 @@ def test_individual_gate_blocks_after_ack():
     a = _alerter()
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     inc = a._webhook_incidents["t1"]
-    gate = ("incident", "t1", inc.push_seq)
+    gate = ("reminder", "t1", inc.push_seq)
     ok_before = a._webhook_gate_ok(gate)
     a.acknowledge_incident("t1")
     ok_after = a._webhook_gate_ok(gate)
@@ -67,7 +67,7 @@ def test_deferred_individual_reminder_dropped_after_ack():
     a = _alerter()
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     inc = a._webhook_incidents["t1"]
-    gate = ("incident", "t1", inc.push_seq)
+    gate = ("reminder", "t1", inc.push_seq)
     delivered = []
 
     def _deliver():
@@ -159,6 +159,8 @@ def test_source_gate_and_aggregate_rebuild():
         "def _build_aggregate_reminder_extra", 1)[0]
     ok = (
         "if inc.acknowledged:" in gate
+        and 'kind == "reminder"' in gate
+        and "current_status == \"red\"" in gate
         and "_eligible_red_reminder_snaps" in am
         and "rebuild=rebuild" in agg
         and "incident_acknowledged" in ws

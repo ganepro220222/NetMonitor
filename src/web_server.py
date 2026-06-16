@@ -6235,6 +6235,49 @@ class WebServer:
         except Exception:
             return False
 
+    def _live_incident_acknowledged(self, tid: str, status: str) -> bool:
+        return status == "red" and self._query_incident_acknowledged(tid)
+
+    def _live_targets_snapshot(self) -> list:
+        """Build client snapshots; caller must hold self._lock."""
+        return [
+            {
+                **t,
+                "incident_acknowledged": self._live_incident_acknowledged(
+                    tid, t.get("status", "")),
+            }
+            for tid, t in self._targets.items()
+        ]
+
+    def _targets_for_client(self) -> list:
+        """Return target snapshots with live incident_acknowledged values."""
+        with self._lock:
+            return self._live_targets_snapshot()
+
+    def sync_target_ack_status(self, tid: str) -> None:
+        """Refresh cached ACK flag and push SSE after server-side ACK."""
+        with self._lock:
+            t = self._targets.get(tid)
+            if t is None:
+                return
+            t["incident_acknowledged"] = self._live_incident_acknowledged(
+                tid, t.get("status", ""))
+            to_push = dict(t)
+        self._broadcaster.push(
+            json.dumps({"type": "update", "target": to_push}))
+
+    def sync_all_target_ack_status(self) -> None:
+        """Refresh ACK flags for all cached targets (desktop ACK-all path)."""
+        with self._lock:
+            snapshots = []
+            for tid, t in self._targets.items():
+                t["incident_acknowledged"] = self._live_incident_acknowledged(
+                    tid, t.get("status", ""))
+                snapshots.append(dict(t))
+        for t in snapshots:
+            self._broadcaster.push(
+                json.dumps({"type": "update", "target": t}))
+
     def _build_scheduler_snapshot(self) -> dict:
         """
         Build the active-target snapshot for the traceroute scheduler.
@@ -6367,9 +6410,9 @@ class WebServer:
                 "keyword_ok":       keyword_ok,
                 "probe_success":    probe_success,
                 "is_probe_result":  is_probe_result,
-                "incident_acknowledged": (
-                    status == "red" and self._query_incident_acknowledged(tid)
-                )}
+                "incident_acknowledged": self._live_incident_acknowledged(
+                    tid, status),
+            }
         # Single atomic lock section — paused check, write, history, and
         # building all_t all happen under one lock so there is no window
         # between the paused check and the _targets write.
@@ -6958,8 +7001,8 @@ class WebServer:
 
         @app.route("/api/status")
         def api_status():
-            with self._lock: data = list(self._targets.values())
-            return json.dumps(data), 200, {"Content-Type": "application/json"}
+            return json.dumps(self._targets_for_client()), 200, {
+                "Content-Type": "application/json"}
 
         @app.route("/api/alerts/ack", methods=["POST"])
         def api_alerts_ack():
@@ -6983,6 +7026,8 @@ class WebServer:
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)}), 500, {
                     "Content-Type": "application/json"}
+            if ok:
+                self.sync_target_ack_status(tid)
             return json.dumps({"ok": ok}), 200, {
                 "Content-Type": "application/json"}
 
@@ -8221,7 +8266,7 @@ class WebServer:
                     # (which previously risked RuntimeError: dictionary changed
                     # size during iteration, or partial-state init payloads).
                     with self._lock:
-                        init_data = list(self._targets.values())
+                        init_data = self._live_targets_snapshot()
                         init_hist = list(reversed(self._history))
                         # cum_stats may contain entries for deleted nodes;
                         # filtering here prevents "ghost" charts on the stats page.

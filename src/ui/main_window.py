@@ -2225,6 +2225,8 @@ class MainWindow(ctk.CTk):
         """ACK open webhook incidents (stop repeat reminders; recovery still sends)."""
         n = self.alerter.acknowledge_all_incidents()
         self._update_ack_btn()
+        if self.web_server.is_running:
+            self.web_server.sync_all_target_ack_status()
         if n:
             self.status_label.configure(
                 text=f"已确认 {n} 个未恢复告警（将停止重复 Webhook 提醒）")
