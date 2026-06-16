@@ -162,6 +162,7 @@ class WebhookIncident:
     last_trace_summary: dict | None = None
     last_trace_signature: tuple | None = None
     acknowledged: bool = False
+    incident_id: str = ""
     ping_type: str = "icmp"
     failure_reason: str = ""
     trace_applicable: bool = True
@@ -440,6 +441,13 @@ class AlertManager:
             except Exception:
                 pass
 
+            acked = False
+            if iid:
+                try:
+                    acked = self._data_store.is_webhook_acknowledged(iid)
+                except Exception:
+                    acked = False
+
             with self._webhook_incident_lock:
                 if tid in self._webhook_incidents:
                     continue
@@ -458,6 +466,8 @@ class AlertManager:
                     failure_reason=failure_reason,
                     trace_applicable=trace_ok,
                     push_seq=seq,
+                    incident_id=iid or "",
+                    acknowledged=acked,
                 )
                 if not trace_ok and summary is None:
                     skip = trace_skip_summary(ping_type, failure_reason)
@@ -487,17 +497,20 @@ class AlertManager:
             if inc is None:
                 return False
             inc.acknowledged = True
+        self._persist_incident_ack(inc)
         return True
 
     def acknowledge_all_incidents(self) -> int:
-        """ACK every open incident (in-memory only)."""
+        """ACK every open incident."""
+        acked: list[WebhookIncident] = []
         with self._webhook_incident_lock:
-            n = 0
             for inc in self._webhook_incidents.values():
                 if not inc.acknowledged:
                     inc.acknowledged = True
-                    n += 1
-        return n
+                    acked.append(inc)
+        for inc in acked:
+            self._persist_incident_ack(inc)
+        return len(acked)
 
     def count_pending_ack_incidents(self) -> int:
         """Un-ACK'd red incidents — matches webhook reminder eligibility."""
@@ -670,7 +683,44 @@ class AlertManager:
                 return None
         snap = self._snapshot_incident(inc)
         snap["closed_at"] = time.time()
+        self._clear_persisted_incident_ack(inc)
         return snap
+
+    def _resolve_incident_id(self, inc: WebhookIncident) -> str:
+        iid = (inc.incident_id or "").strip()
+        if iid:
+            return iid
+        if self._data_store is None:
+            return ""
+        try:
+            open_inc = self._data_store.get_open_incidents([inc.tid])
+            iid = (open_inc.get(inc.tid) or {}).get("incident_id") or ""
+            iid = str(iid).strip()
+            if iid:
+                inc.incident_id = iid
+            return iid
+        except Exception:
+            return ""
+
+    def _persist_incident_ack(self, inc: WebhookIncident) -> None:
+        if self._data_store is None:
+            return
+        iid = self._resolve_incident_id(inc)
+        if iid:
+            try:
+                self._data_store.record_webhook_ack(iid, inc.tid)
+            except Exception:
+                pass
+
+    def _clear_persisted_incident_ack(self, inc: WebhookIncident) -> None:
+        if self._data_store is None:
+            return
+        iid = (inc.incident_id or "").strip() or self._resolve_incident_id(inc)
+        if iid:
+            try:
+                self._data_store.clear_webhook_ack(iid)
+            except Exception:
+                pass
 
     def _drop_webhook_incident(self, tid: str) -> None:
         with self._webhook_incident_lock:

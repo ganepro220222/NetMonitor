@@ -481,6 +481,43 @@ class DataStore:
         except Exception:
             return {}
 
+    def record_webhook_ack(self, incident_id: str, target_id: str,
+                           ts: float | None = None) -> None:
+        """Persist operator ACK for one open incident (survives restart)."""
+        iid = (incident_id or "").strip()
+        if not iid or not target_id:
+            return
+        self._queue.put(("webhook_ack", {
+            "action": "set",
+            "incident_id": iid,
+            "target_id": target_id,
+            "ts": float(ts or time.time()),
+        }))
+
+    def clear_webhook_ack(self, incident_id: str) -> None:
+        """Drop persisted ACK when the incident closes."""
+        iid = (incident_id or "").strip()
+        if not iid:
+            return
+        self._queue.put(("webhook_ack", {
+            "action": "clear",
+            "incident_id": iid,
+        }))
+
+    def is_webhook_acknowledged(self, incident_id: str) -> bool:
+        """Whether operators ACK'd this incident_id (webhook reminder silence)."""
+        iid = (incident_id or "").strip()
+        if not iid:
+            return False
+        conn = self._read_conn()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM webhook_ack WHERE incident_id=? LIMIT 1",
+                (iid,)).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
     def get_last_known_statuses(self) -> dict:
         """
         Return {target_id: last_new_status} — the latest alert transition per
@@ -1823,6 +1860,22 @@ class DataStore:
                                     last_flush = time.time()
                                 # else: buffers preserved; next periodic flush retries
 
+                        elif kind == "webhook_ack":
+                            iid = data.get("incident_id")
+                            if iid:
+                                if data.get("action") == "clear":
+                                    conn.execute(
+                                        "DELETE FROM webhook_ack "
+                                        "WHERE incident_id=?",
+                                        (iid,))
+                                else:
+                                    conn.execute(
+                                        "INSERT OR REPLACE INTO webhook_ack "
+                                        "(incident_id, target_id, ack_ts) "
+                                        "VALUES (?,?,?)",
+                                        (iid, data["target_id"], data["ts"]))
+                                conn.commit()
+
                         elif kind == "target_removed":
                             tid = data["target_id"]
                             # Close an open incident in DB before popping memory
@@ -1943,7 +1996,7 @@ class DataStore:
                                           "alert_events", "traceroute_logs",
                                           "icmp_diagnostic_history",
                                           "dns_diagnostic_history",
-                                          "cum_stats"):
+                                          "cum_stats", "webhook_ack"):
                                 try:
                                     conn.execute(
                                         f"DELETE FROM {table} WHERE target_id=?",
@@ -2462,6 +2515,21 @@ class DataStore:
             conn.execute("PRAGMA user_version = 13")
             conn.commit()
             ver = 13
+
+        # v13 → v14: persist webhook incident ACK across restarts (Bug 156).
+        if ver == 13:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS webhook_ack (
+                    incident_id TEXT PRIMARY KEY,
+                    target_id   TEXT NOT NULL,
+                    ack_ts      REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_webhook_ack_target
+                    ON webhook_ack(target_id);
+            """)
+            conn.execute("PRAGMA user_version = 14")
+            conn.commit()
+            ver = 14
 
         # Restore in-memory active-incident state from DB
         self._restore_active_incidents(conn)
