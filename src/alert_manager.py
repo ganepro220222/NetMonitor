@@ -1060,6 +1060,7 @@ class AlertManager:
                 "reminder_count": snap["reminder_count"],
                 "recovered": False,
                 "recovered_at": None,
+                **self._incident_probe_fields(snap),
             },
             "trace": trace_extra,
         }
