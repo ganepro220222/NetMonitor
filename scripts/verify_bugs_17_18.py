@@ -43,9 +43,14 @@ def test_bug17_repro_a():
         ds = DataStore(path)
         time.sleep(0.3)
         tid = "t"
-        start_ts = 1780281000
-        end_ts = 1780372800
-        hour0 = (start_ts // 3600) * 3600
+        # Anchor relative to now into recent COMPLETE hours that are still
+        # inside raw retention, so _hourly_agg aggregates them and the reads
+        # take the recent (raw) path.  (Previously fixed absolute timestamps
+        # that aged past retention, flipping the result — time-flaky.)
+        now = int(time.time())
+        hour0 = ((now // 3600) - 48) * 3600
+        start_ts = hour0 + 1800
+        end_ts = start_ts + 91800
         hour1 = hour0 + 3600
         conn = __import__("sqlite3").connect(path)
         _insert_raw(conn, tid, start_ts + 120, 90.0)
@@ -77,9 +82,12 @@ def test_bug17_repro_b():
         ds = DataStore(path)
         time.sleep(0.3)
         tid = "t"
-        start_ts = 1780275600
-        end_ts = 1780367400
-        end_hour = (end_ts // 3600) * 3600
+        # Anchor relative to now (recent complete hour inside raw retention);
+        # see test_bug17_repro_a for why fixed timestamps were flaky.
+        now = int(time.time())
+        end_hour = ((now // 3600) - 24) * 3600
+        end_ts = end_hour + 1800
+        start_ts = end_ts - 91800
         conn = __import__("sqlite3").connect(path)
         _insert_raw(conn, tid, end_ts - 120, 10.0)
         _insert_raw(conn, tid, end_ts + 120, 90.0)

@@ -146,9 +146,13 @@ def test_bug21_empty_partial_slice():
         ds = DataStore(path)
         time.sleep(0.3)
         tid = "t"
-        hour_ts = 1780369200
-        start_ts = 1780371000
-        end_ts = 1780371900
+        # Recent COMPLETE hour, inside raw retention (mirrors the Bug21 case
+        # in verify_bugs_21).  Fixed absolute timestamps aged past retention
+        # and flipped the recent->old code path, making this flaky over time.
+        now = int(time.time())
+        hour_ts = ((now // 3600) - 2) * 3600
+        start_ts = hour_ts + 1800
+        end_ts = hour_ts + 2700
         conn = sqlite3.connect(path)
         _insert_raw(conn, tid, hour_ts + 300, lat=90.0)
         _insert_hourly(conn, tid, hour_ts, lat=90.0, n=1)

@@ -18,9 +18,13 @@ def test_recent_empty_partial_slice_does_not_fallback():
         ds = DataStore(path)
         time.sleep(0.3)
         tid = "t"
-        hour_ts = 1780369200
-        start_ts = 1780371000
-        end_ts = 1780371900
+        # Recent COMPLETE hour, inside raw retention, so the "raw exists in
+        # the hour" path is exercised (not the purged-raw fallback).  Fixed
+        # absolute timestamps aged past retention and flipped the result.
+        now = int(time.time())
+        hour_ts = ((now // 3600) - 2) * 3600
+        start_ts = hour_ts + 1800
+        end_ts = hour_ts + 2700
         conn = sqlite3.connect(path)
         conn.execute(
             "INSERT INTO pings_raw (target_id,ts,status,latency_ms,loss_rate,"
