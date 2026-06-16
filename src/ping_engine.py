@@ -2189,14 +2189,13 @@ class PingEngine:
             semantic_changed = any(
                 old_settings.get(k, _MISSING) != merged.get(k, _MISSING)
                 for k in m.PROBE_SEMANTIC_KEYS)
-            with m._commit_lock:
-                m.settings = merged
-                m.invalidate_stale_extended_caches(old_settings, merged)
-            # Window-size override may have changed — keep the deque in sync.
-            self._resize_window_if_needed(m, merged.get("window_size", 10))
-            # DataStore generation bump for semantic edits (replaces the
-            # version-only pre-bump that invalidate_target_settings used to
-            # provide from MainWindow — tied to the real settings swap).
+            # Bump DataStore generation BEFORE swapping monitor settings so
+            # in-flight traceroute/diag tasks (which do not use
+            # _settings_version) cannot queue or commit under the old
+            # captured_generation after the new semantics are live.
+            # Mirrors wipe_target_history's "bump synchronously before
+            # mutation" ordering.  _settings_version still bumps inside
+            # invalidate_stale_extended_caches after the swap (Bug95).
             if semantic_changed:
                 try:
                     _ds = getattr(self, "_data_store", None)
@@ -2204,6 +2203,11 @@ class PingEngine:
                         _ds.bump_target_generation(target_id)
                 except Exception:
                     pass
+            with m._commit_lock:
+                m.settings = merged
+                m.invalidate_stale_extended_caches(old_settings, merged)
+            # Window-size override may have changed — keep the deque in sync.
+            self._resize_window_if_needed(m, merged.get("window_size", 10))
 
     def pause_target(self, target_id):
         with self._monitors_lock:
@@ -2254,6 +2258,13 @@ class PingEngine:
             semantic_changed = any(
                 old_settings.get(k, _MISSING) != merged.get(k, _MISSING)
                 for k in m.PROBE_SEMANTIC_KEYS)
+            if semantic_changed:
+                try:
+                    _ds = getattr(self, "_data_store", None)
+                    if _ds is not None:
+                        _ds.bump_target_generation(m.target_id)
+                except Exception:
+                    pass
             with m._commit_lock:
                 m.settings = merged
                 m.invalidate_stale_extended_caches(old_settings, merged)
@@ -2265,13 +2276,6 @@ class PingEngine:
             # window until the next restart.
             if "window_size" in applied:
                 self._resize_window_if_needed(m, applied["window_size"])
-            if semantic_changed:
-                try:
-                    _ds = getattr(self, "_data_store", None)
-                    if _ds is not None:
-                        _ds.bump_target_generation(m.target_id)
-                except Exception:
-                    pass
 
     @staticmethod
     def _resize_window_if_needed(monitor, new_size):

@@ -3390,6 +3390,9 @@ class DataStore:
         import json
         # Encode route_changed flag into the hops JSON metadata so we don't
         # need a schema migration — the flag travels with the data.
+        if (captured_generation is not None and target_id is not None
+            and self.current_target_generation(target_id) != captured_generation):
+            return
         payload = {"hops": hops, "route_changed": bool(route_changed)}
         self._queue.put(("traceroute", ((
             target_id, label, ip, ts,

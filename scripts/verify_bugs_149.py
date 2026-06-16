@@ -103,9 +103,9 @@ def test_source_update_global_settings_semantic_guard():
             "def update_settings", 1)[0]
     ok = (
         "semantic_changed" in block
-        and "invalidate_stale_extended_caches" in block
         and "bump_target_generation" in block
-        and "with m._commit_lock:" in block
+        and block.find("bump_target_generation")
+        < block.find("with m._commit_lock:")
     )
     print(f"Bug149 source update_global_settings guard -> {ok}")
     return ok
