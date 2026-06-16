@@ -640,6 +640,8 @@ class AlertManager:
                     skip = trace_skip_summary(ping_type, failure_reason)
                     inc.last_trace_summary = skip
                     inc.last_trace_signature = trace_signature_from_summary(skip)
+                    inc.last_trace_at = 0.0
+                    inc.last_trace_request_at = 0.0
                 else:
                     # Probe context changed — discard stale skip/ICMP
                     # summary until a fresh traceroute lands.

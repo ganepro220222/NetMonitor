@@ -58,10 +58,46 @@ def test_probe_change_resets_stale_trace_skip():
     return ok
 
 
+def test_trace_not_applicable_clears_old_trace_at():
+    a = AlertManager(enabled=False, assets_dir=os.path.join(ROOT, "assets"))
+    a.on_status_change(
+        "t1", "GW", "10.0.0.1", "red",
+        ping_type="icmp", failure_reason="no_reply")
+    with a._webhook_incident_lock:
+        inc = a._webhook_incidents["t1"]
+        inc.last_trace_at = 1_700_000_000.0
+        inc.last_trace_request_at = 1_700_000_000.0
+        inc.last_trace_summary = {"text": "old hop summary", "reached": False}
+        inc.last_trace_signature = ("old",)
+    a.on_status_change("t1", "GW", "10.0.0.1", "orange")
+    a.on_status_change(
+        "t1", "GW", "10.0.0.1", "red",
+        ping_type="http", failure_reason="status_500")
+    inc = a._webhook_incidents["t1"]
+    snap = a._snapshot_incident(inc)
+    trace = a._build_trace_extra(snap, pending=False)
+    extra = a._build_reminder_extra(snap)
+    text = AlertManager._format_webhook_text(
+        "🔴", "告警仍未恢复", "alert_reminder",
+        "GW", "10.0.0.1", "red", "连接仍未恢复", "2026-01-01 00:00:00",
+        extra)
+    ok = (
+        inc.trace_applicable is False
+        and inc.last_trace_at == 0.0
+        and inc.last_trace_request_at == 0.0
+        and trace.get("trace_time") is None
+        and "未执行路径追踪" in (trace.get("summary") or "")
+        and "追踪时间" not in text
+    )
+    print(f"Bug148 skip summary without stale trace_time -> {ok}")
+    return ok
+
+
 def main():
     results = [
         ("failure_reason", test_orange_back_to_red_updates_failure_reason()),
         ("trace_reset", test_probe_change_resets_stale_trace_skip()),
+        ("trace_at_clear", test_trace_not_applicable_clears_old_trace_at()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:
