@@ -220,6 +220,9 @@ class AlertManager:
         self._reminder_stop = threading.Event()
         self._trace_request_callback = None
         self._outbox_dispatcher = None
+        self._webhook_outbox_send_lock = threading.Lock()
+        self._webhook_send_cancel_lock = threading.Lock()
+        self._webhook_send_cancelled: set[str] = set()
         threading.Thread(
             target=self._webhook_reminder_loop,
             daemon=True, name="webhook-reminder",
@@ -349,6 +352,7 @@ class AlertManager:
             self._last_alert_status.pop(target_id, None)
             self._red_targets.discard(target_id)
         self._drop_webhook_incident(target_id)
+        self._cancel_inflight_outbox_sends(target_id)
         if self._data_store is not None:
             self._data_store.drop_pending_webhook_for_target(
                 target_id, "target_removed")
@@ -373,6 +377,7 @@ class AlertManager:
             self._last_alert_status.pop(target_id, None)
             self._red_targets.discard(target_id)
         self._drop_webhook_incident(target_id)
+        self._cancel_inflight_outbox_sends(target_id)
         if self._data_store is not None:
             self._data_store.drop_pending_webhook_for_target(
                 target_id, "target_paused")
@@ -515,6 +520,10 @@ class AlertManager:
                 return False
             inc.acknowledged = True
         self._persist_incident_ack(inc)
+        self._cancel_inflight_outbox_sends(
+            target_id,
+            events=("alert_reminder", "diagnostic_update",
+                    "alert_reminder_aggregate"))
         if self._data_store is not None:
             self._data_store.drop_pending_webhook_events(
                 target_id,
@@ -1393,6 +1402,28 @@ class AlertManager:
     def assert_outbox_webhook_send_allowed(
             self, *, delivery_id: str = "", gate=None) -> None:
         """Raise WebhookDeliveryAborted if delivery must not proceed."""
+        self._raise_if_outbox_send_blocked(delivery_id=delivery_id, gate=gate)
+
+    def _cancel_inflight_outbox_sends(
+            self, target_id: str,
+            *, events: tuple[str, ...] | None = None) -> None:
+        """Mark in-flight outbox deliveries cancelled before DB drop."""
+        if not target_id or self._data_store is None:
+            return
+        delivery_ids = self._data_store.list_sending_webhook_delivery_ids(
+            target_id, events=events)
+        if not delivery_ids:
+            return
+        with self._webhook_send_cancel_lock:
+            self._webhook_send_cancelled.update(delivery_ids)
+
+    def _raise_if_outbox_send_blocked(
+            self, *, delivery_id: str = "", gate=None) -> None:
+        """Verify gate/state; read cancelled set under _webhook_send_cancel_lock."""
+        if delivery_id:
+            with self._webhook_send_cancel_lock:
+                if delivery_id in self._webhook_send_cancelled:
+                    raise WebhookDeliveryAborted("cancelled")
         if gate is not None and not self._webhook_gate_ok(tuple(gate)):
             raise WebhookDeliveryAborted("gate")
         if delivery_id and self._data_store is not None:
@@ -1400,6 +1431,30 @@ class AlertManager:
                 delivery_id)
             if state != "sending":
                 raise WebhookDeliveryAborted(state or "missing")
+
+    def _webhook_pre_http_send_hook(
+            self, *, delivery_id: str = "", gate=None) -> None:
+        """No-op hook for tests to simulate a pre-network race window."""
+
+    def _commit_outbox_webhook_http(
+            self, req, *, delivery_id: str = "", gate=None, timeout: int = 10):
+        """Atomically verify send permission and perform HTTP POST."""
+        import urllib.request
+
+        with self._webhook_outbox_send_lock:
+            self._raise_if_outbox_send_blocked(
+                delivery_id=delivery_id, gate=gate)
+        self._webhook_pre_http_send_hook(
+            delivery_id=delivery_id, gate=gate)
+        try:
+            with self._webhook_outbox_send_lock:
+                self._raise_if_outbox_send_blocked(
+                    delivery_id=delivery_id, gate=gate)
+                with urllib.request.urlopen(req, timeout=timeout):
+                    pass
+        finally:
+            with self._webhook_send_cancel_lock:
+                self._webhook_send_cancelled.discard(delivery_id)
 
     def prepare_outbox_delivery(self, row: dict, now: float):
         """Resolve a persisted outbox row into a send-ready payload."""
@@ -1567,10 +1622,12 @@ class AlertManager:
             url, data=body,
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST")
-        self.assert_outbox_webhook_send_allowed(
-            delivery_id=delivery_id, gate=gate)
-        with urllib.request.urlopen(req, timeout=10):
-            pass
+        if delivery_id:
+            self._commit_outbox_webhook_http(
+                req, delivery_id=delivery_id, gate=gate)
+        else:
+            with urllib.request.urlopen(req, timeout=10):
+                pass
 
     @staticmethod
     def _format_ts(ts_val) -> str:

@@ -739,6 +739,29 @@ class DataStore:
         except Exception:
             return None
 
+    def list_sending_webhook_delivery_ids(
+            self, target_id: str,
+            events: tuple[str, ...] | None = None) -> list[str]:
+        if not target_id:
+            return []
+        conn = self._read_conn()
+        try:
+            if events:
+                placeholders = ",".join("?" * len(events))
+                rows = conn.execute(
+                    f"SELECT delivery_id FROM webhook_outbox "
+                    f"WHERE target_id=? AND delivery_state='sending' "
+                    f"AND event IN ({placeholders})",
+                    (target_id, *events)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT delivery_id FROM webhook_outbox "
+                    "WHERE target_id=? AND delivery_state='sending'",
+                    (target_id,)).fetchall()
+            return [r[0] for r in rows if r and r[0]]
+        except Exception:
+            return []
+
     def find_undelivered_alert_red(
             self, order_key: str, incident_id: str,
             exclude_id: str = "") -> dict | None:
