@@ -1570,7 +1570,8 @@ class DataStore:
                     default=0)
                 sev_label   = {0: '正常', 1: '离线/暂停',
                                2: '⚠ 性能警告', 3: '🔴 严重告警'}[max_sev]
-                dur_str     = _fmt_dur(total_secs) if total_secs else "仍在持续"
+                dur_str     = (_fmt_dur(total_secs)
+                               if total_secs is not None else "仍在持续")
                 if truncated:
                     prefix = f"⚠ 故障事件 #{incident_seq}（开始于查询范围外）"
                 elif not closed:

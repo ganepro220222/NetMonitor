@@ -91,10 +91,38 @@ def test_in_window_fault_not_truncated():
             pass
 
 
+def test_recovery_at_window_start_shows_zero_not_ongoing():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        ds = DataStore(path)
+        ds._schema_ready.wait(timeout=5)
+        start_ts = 1_700_100_000
+        end_ts = start_ts + 86400
+        tid = "T3"
+        _alert(ds, tid, start_ts - 3600, "green", "red")
+        _alert(ds, tid, start_ts, "red", "green", cat="ok")
+        ds.flush()
+        headers = _export_headers(ds, tid, start_ts, end_ts)
+        ds.shutdown()
+        ok = len(headers) == 1
+        ok = ok and "开始于查询范围外" in headers[0]
+        ok = ok and "仍在持续" not in headers[0]
+        ok = ok and "0秒" in headers[0]
+        print(f"Bug147 recovery at window start -> {ok}")
+        return ok
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def main():
     results = [
         ("truncated", test_pre_window_start_truncated_label_and_duration()),
         ("in_window", test_in_window_fault_not_truncated()),
+        ("window_start_recovery", test_recovery_at_window_start_shows_zero_not_ongoing()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:
