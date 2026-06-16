@@ -88,54 +88,61 @@ class WebhookOutboxDispatcher:
         delivery_id = row["delivery_id"]
         if not ds.claim_webhook_outbox(delivery_id, now):
             return
-
-        prepared = self._am.prepare_outbox_delivery(row, now)
-        if prepared is None:
-            ds.finish_webhook_outbox(
-                delivery_id, state="dropped_stale", error="gate_or_rebuild",
-                now=now, only_if_sending=True)
-            return
-
-        if not self._am.outbox_row_gate_ok(row):
-            ds.finish_webhook_outbox(
-                delivery_id, state="dropped_stale", error="gate_or_rebuild",
-                now=now, only_if_sending=True)
-            return
-
-        event, target, ip, status, message, extra, meta = prepared
-        url = (self._am._config.get_setting("webhook_url") or "").strip()
-        attempt = int(row.get("attempt_count") or 0) + 1
-        gate = self._am.outbox_row_gate(row)
         try:
-            self._am._send_webhook(
-                url, event, target, ip, status, message,
-                meta.get("event_ts_str", ""),
-                extra,
-                event_ts=meta.get("event_ts"),
-                queued_ts=row.get("first_queued_ts"),
-                sent_ts=now,
-                attempt=attempt,
-                delivery_id=delivery_id,
-                gate=gate,
-            )
-        except WebhookDeliveryAborted:
-            ds.finish_webhook_outbox(
-                delivery_id, state="dropped_stale", error="gate_or_rebuild",
-                now=now, only_if_sending=True)
-            return
-        except Exception as e:
-            self._handle_failure(row, now, str(e))
-            return
+            prepared = self._am.prepare_outbox_delivery(row, now)
+            if prepared is None:
+                ds.finish_webhook_outbox(
+                    delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                    now=now, only_if_sending=True)
+                return
 
-        if not self._am.outbox_row_gate_ok(row):
-            ds.finish_webhook_outbox(
-                delivery_id, state="dropped_stale", error="gate_or_rebuild",
-                now=now, only_if_sending=True)
-            return
+            if not self._am.outbox_row_gate_ok(row):
+                ds.finish_webhook_outbox(
+                    delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                    now=now, only_if_sending=True)
+                return
 
-        ds.finish_webhook_outbox(
-            delivery_id, state="delivered", error="", now=now,
-            attempt_count=attempt, only_if_sending=True)
+            event, target, ip, status, message, extra, meta = prepared
+            url = (self._am._config.get_setting("webhook_url") or "").strip()
+            attempt = int(row.get("attempt_count") or 0) + 1
+            gate = self._am.outbox_row_gate(row)
+            try:
+                self._am._send_webhook(
+                    url, event, target, ip, status, message,
+                    meta.get("event_ts_str", ""),
+                    extra,
+                    event_ts=meta.get("event_ts"),
+                    queued_ts=row.get("first_queued_ts"),
+                    sent_ts=now,
+                    attempt=attempt,
+                    delivery_id=delivery_id,
+                    gate=gate,
+                )
+            except WebhookDeliveryAborted:
+                ds.finish_webhook_outbox(
+                    delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                    now=now, only_if_sending=True)
+                return
+            except Exception as e:
+                self._handle_failure(row, now, str(e))
+                return
+
+            if not self._am.outbox_row_gate_ok(row):
+                ds.finish_webhook_outbox(
+                    delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                    now=now, only_if_sending=True)
+                return
+
+            ds.finish_webhook_outbox(
+                delivery_id, state="delivered", error="", now=now,
+                attempt_count=attempt, only_if_sending=True)
+        finally:
+            # The row has left 'sending' (delivered / dropped_stale / pending),
+            # so no concurrent ACK/pause/remove can target it now.  Reclaim its
+            # per-send cancel tracking; otherwise a cancel that raced this send
+            # leaks a _webhook_send_epochs / _webhook_send_cancelled entry
+            # forever (delivery_ids are unique uuid4, never reused).
+            self._am.release_outbox_send_tracking(delivery_id)
 
     def _handle_failure(self, row: dict, now: float, err: str) -> None:
         ds = self._am._data_store

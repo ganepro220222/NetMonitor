@@ -1451,6 +1451,24 @@ class AlertManager:
             self, *, delivery_id: str = "", gate=None) -> None:
         """No-op hook for tests to simulate a pre-network race window."""
 
+    def release_outbox_send_tracking(self, delivery_id: str) -> None:
+        """Reclaim per-send cancel tracking once a delivery leaves 'sending'.
+
+        _cancel_inflight_outbox_sends records an epoch bump + cancelled flag
+        for every delivery that is mid-send when an ACK/pause/remove fires.
+        Those entries are keyed by the unique (uuid4) delivery_id and were
+        never removed, so _webhook_send_epochs / _webhook_send_cancelled grew
+        without bound over a long-running process.  The dispatcher calls this
+        once the row is finalized (terminal or back to pending) — at which
+        point it is no longer 'sending', so no concurrent cancel can re-add
+        it after we clear it.
+        """
+        if not delivery_id:
+            return
+        with self._webhook_outbox_send_lock:
+            self._webhook_send_epochs.pop(delivery_id, None)
+            self._webhook_send_cancelled.discard(delivery_id)
+
     def _outbox_http_open(
             self, req, timeout: int, *, delivery_id: str, commit_epoch: int,
             gate) -> None:
