@@ -465,7 +465,8 @@ class DataStore:
                         "WHERE incident_id=? ORDER BY id DESC LIMIT 1",
                         (iid,),
                     ).fetchone()
-                ping_type = (probe_row[0] or "icmp") if probe_row else "icmp"
+                ping_type = self._resolve_alert_ping_type(
+                    conn, tid, probe_row[0] if probe_row else None)
                 failure_reason = (probe_row[1] or "") if probe_row else ""
                 out[tid] = {
                     "incident_id": iid,
@@ -2449,11 +2450,63 @@ class DataStore:
             if "ping_type" not in cols:
                 conn.execute(
                     "ALTER TABLE alert_events ADD COLUMN ping_type TEXT")
+            self._backfill_alert_ping_types(conn)
             conn.execute("PRAGMA user_version = 12")
             conn.commit()
+            ver = 12
+
+        # v12 → v13: backfill NULL alert_events.ping_type from targets_meta
+        # for DBs that upgraded to v12 before the backfill existed (Bug 154).
+        if ver == 12:
+            self._backfill_alert_ping_types(conn)
+            conn.execute("PRAGMA user_version = 13")
+            conn.commit()
+            ver = 13
 
         # Restore in-memory active-incident state from DB
         self._restore_active_incidents(conn)
+
+    @staticmethod
+    def _resolve_alert_ping_type(conn: sqlite3.Connection, target_id: str,
+                                 alert_ping_type: Optional[str]) -> str:
+        """Resolve probe type for an alert row.
+
+        Prefer the per-event ping_type when present (v12+ writes).  Legacy
+        rows migrated from v11 keep NULL — fall back to targets_meta so
+        HTTP/TCP/DNS open incidents are not misclassified as ICMP on restart.
+        """
+        pt = (alert_ping_type or "").strip().lower()
+        if pt:
+            return pt
+        try:
+            row = conn.execute(
+                "SELECT ping_type FROM targets_meta WHERE target_id=?",
+                (target_id,)).fetchone()
+            if row and (row[0] or "").strip():
+                return (row[0] or "").strip().lower()
+        except Exception:
+            pass
+        return "icmp"
+
+    def _backfill_alert_ping_types(self, conn: sqlite3.Connection) -> None:
+        """Fill NULL alert_events.ping_type from targets_meta (v11 legacy)."""
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(alert_events)").fetchall()}
+        if "ping_type" not in cols:
+            return
+        conn.execute("""
+            UPDATE alert_events
+            SET ping_type = (
+                SELECT tm.ping_type FROM targets_meta tm
+                WHERE tm.target_id = alert_events.target_id
+            )
+            WHERE ping_type IS NULL
+              AND EXISTS (
+                SELECT 1 FROM targets_meta tm
+                WHERE tm.target_id = alert_events.target_id
+                  AND tm.ping_type IS NOT NULL AND tm.ping_type != ''
+              )
+        """)
 
     def _backfill_incident_ids(self, conn: sqlite3.Connection):
         """Assign incident_ids to historical alert_events that lack them."""
