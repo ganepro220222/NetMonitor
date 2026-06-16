@@ -29,9 +29,25 @@ def _alerter(**cfg_kw):
 
 def _open_red(a, tid, label, ip):
     a.on_status_change(tid, label, ip, "red")
-    inc = a._webhook_incidents[tid]
-    inc.last_reminder_at = 0
-    return inc
+    if tid in a._webhook_incidents:
+        a._webhook_incidents[tid].last_reminder_at = 0
+
+
+def _install_push_capture(a, calls):
+    """Mock _push_webhook; resolve aggregate rebuild() like deferred delivery."""
+    def _capture(**kw):
+        entry = {k: v for k, v in kw.items() if k != "rebuild"}
+        rebuild = kw.get("rebuild")
+        if rebuild is not None:
+            rebuilt = rebuild()
+            if rebuilt is None:
+                return
+            extra, message, target = rebuilt
+            entry["extra"] = extra
+            entry["message"] = message
+            entry["target"] = target
+        calls.append(entry)
+    a._push_webhook = _capture
 
 
 def test_config_aggregate_defaults():
@@ -70,7 +86,7 @@ def test_two_red_individual_reminders():
     _open_red(a, "t1", "A", "10.0.0.1")
     _open_red(a, "t2", "B", "10.0.0.2")
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
     a._tick_webhook_reminders()
     ind = [c for c in calls if c["event"] == "alert_reminder"]
     agg = [c for c in calls if c["event"] == "alert_reminder_aggregate"]
@@ -93,7 +109,7 @@ def test_three_red_aggregate_reminder():
     _open_red(a, "t2", "B", "10.0.0.2")
     _open_red(a, "t3", "C", "10.0.0.3")
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
     a._tick_webhook_reminders()
     agg = [c for c in calls if c["event"] == "alert_reminder_aggregate"]
     ind = [c for c in calls if c["event"] == "alert_reminder"]
@@ -115,7 +131,7 @@ def test_aggregate_updates_last_reminder_no_immediate_repeat():
     for i in range(3):
         _open_red(a, f"t{i}", f"N{i}", f"10.0.0.{i+1}")
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
     a._tick_webhook_reminders()
     first = len(calls)
     a._tick_webhook_reminders()
@@ -145,7 +161,7 @@ def test_recovery_reduces_aggregate_count():
         if tid in a._webhook_incidents:
             a._webhook_incidents[tid].last_reminder_at = 0
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
     a._tick_webhook_reminders()
     ind = [c for c in calls if c["event"] == "alert_reminder"]
     agg = [c for c in calls if c["event"] == "alert_reminder_aggregate"]
@@ -170,7 +186,7 @@ def test_aggregate_lists_longest_first():
     a._webhook_incidents["short"].started_at = now - 60
     a._webhook_incidents["long"].started_at = now - 3600
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
     a._tick_webhook_reminders()
     nodes = calls[0]["extra"]["aggregate"]["nodes"]
     ok = nodes[0]["target"] == "Long" and nodes[1]["target"] == "Short"

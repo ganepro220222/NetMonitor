@@ -520,6 +520,12 @@ class AlertManager:
                 if inc.current_status == "red" and not inc.acknowledged
             )
 
+    def is_incident_acknowledged(self, target_id: str) -> bool:
+        """Whether the open webhook incident for this target is ACK'd."""
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(target_id)
+            return inc is not None and inc.acknowledged
+
     def set_enabled(self, enabled: bool,
                     current_statuses: dict | None = None) -> None:
         """Toggle the alert manager on or off.
@@ -982,26 +988,36 @@ class AlertManager:
         )
 
     def _push_aggregate_reminder(self, open_snaps: list[dict], now: float) -> None:
-        sorted_snaps = sorted(
-            open_snaps,
-            key=lambda s: now - s["started_at"],
-            reverse=True,
-        )
-        extra = self._build_aggregate_reminder_extra(sorted_snaps, now)
-        max_dur = extra["aggregate"]["max_duration_text"]
-        count = extra["aggregate"]["count"]
-        message = (
-            f"当前仍有 {count} 个节点 red，最长已持续 {max_dur}"
-        )
+        """Queue aggregate reminder; payload rebuilt at delivery from live state."""
+        tid_seq_pairs = [(s["tid"], s["push_seq"]) for s in open_snaps]
+        threshold = self._cfg_int("webhook_reminder_aggregate_threshold", 3)
+
+        def rebuild():
+            eligible = self._eligible_red_reminder_snaps(tid_seq_pairs)
+            if len(eligible) < threshold:
+                return None
+            now2 = time.time()
+            sorted_snaps = sorted(
+                eligible,
+                key=lambda s: now2 - s["started_at"],
+                reverse=True,
+            )
+            extra = self._build_aggregate_reminder_extra(sorted_snaps, now2)
+            count = extra["aggregate"]["count"]
+            max_dur = extra["aggregate"]["max_duration_text"]
+            message = (
+                f"当前仍有 {count} 个节点 red，最长已持续 {max_dur}"
+            )
+            return extra, message, f"汇总({count}节点)"
+
         self._push_webhook(
             event="alert_reminder_aggregate",
-            target=f"汇总({count}节点)",
+            target="汇总",
             ip="",
             status="red",
-            message=message,
-            extra=extra,
+            message="",
             order_key="_aggregate_",
-            gate=("aggregate", [(s["tid"], s["push_seq"]) for s in open_snaps]),
+            rebuild=rebuild,
         )
 
     def _build_aggregate_reminder_extra(self, snaps: list[dict],
@@ -1167,22 +1183,44 @@ class AlertManager:
                 if self._webhook_valid_seq.get(tid) != seq:
                     return False
                 inc = self._webhook_incidents.get(tid)
-                return inc is not None and inc.push_seq == seq
+                if inc is None or inc.push_seq != seq:
+                    return False
+                if inc.acknowledged:
+                    return False
+                return True
             if kind == "alert_red":
                 # Allow delivery after close if still the current generation
                 # (queued before recovery on a short flap).
                 tid, seq = gate[1], gate[2]
                 return self._webhook_valid_seq.get(tid) == seq
             if kind == "aggregate":
+                # Legacy gate path — aggregate reminders now rebuild at
+                # delivery and no longer enqueue through _push_webhook.
                 for tid, seq in gate[1]:
                     if self._webhook_valid_seq.get(tid) != seq:
                         continue
                     inc = self._webhook_incidents.get(tid)
                     if (inc is not None and inc.push_seq == seq
-                            and inc.current_status == "red"):
+                            and inc.current_status == "red"
+                            and not inc.acknowledged):
                         return True
                 return False
         return True
+
+    def _eligible_red_reminder_snaps(self, tid_seq_pairs: list) -> list[dict]:
+        """Live reminder-eligible snapshots for deferred delivery rebuild."""
+        snaps: list[dict] = []
+        with self._webhook_incident_lock:
+            for tid, seq in tid_seq_pairs:
+                if self._webhook_valid_seq.get(tid) != seq:
+                    continue
+                inc = self._webhook_incidents.get(tid)
+                if (inc is None or inc.push_seq != seq
+                        or inc.current_status != "red"
+                        or inc.acknowledged):
+                    continue
+                snaps.append(self._snapshot_incident(inc))
+        return snaps
 
     def _ensure_webhook_worker(self, order_key: str) -> queue.Queue:
         with self._webhook_queue_lock:
@@ -1236,8 +1274,15 @@ class AlertManager:
                       status: str, message: str,
                       extra: dict | None = None,
                       order_key: str | None = None,
-                      gate=None) -> None:
-        """Queue webhook delivery; per-target ordering when order_key set."""
+                      gate=None,
+                      rebuild=None) -> None:
+        """Queue webhook delivery; per-target ordering when order_key set.
+
+        rebuild: optional callable returning (extra, message, target) at
+        delivery time, or None to drop.  Used by aggregate reminders so
+        deferred jobs reflect current ACK/recovery state, not enqueue-time
+        snapshots.
+        """
         if self._config is None:
             return
         url = (self._config.get_setting("webhook_url") or "").strip()
@@ -1246,10 +1291,19 @@ class AlertManager:
         ts_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
         def _deliver():
-            if not self._webhook_gate_ok(gate):
+            send_extra = extra
+            send_message = message
+            send_target = target
+            if rebuild is not None:
+                rebuilt = rebuild()
+                if rebuilt is None:
+                    return
+                send_extra, send_message, send_target = rebuilt
+            if gate is not None and not self._webhook_gate_ok(gate):
                 return
             self._send_webhook(
-                url, event, target, ip, status, message, ts_str, extra)
+                url, event, send_target, ip, status, send_message, ts_str,
+                send_extra)
 
         if order_key:
             self._ensure_webhook_worker(order_key).put(_deliver)

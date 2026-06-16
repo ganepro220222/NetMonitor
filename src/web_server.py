@@ -1715,7 +1715,7 @@ async function ackTarget(tid,btn){
     if(j&&j.ok){
       acknowledgedTids.add(tid);
       const t=targets[tid];
-      if(t)patchCard(t);
+      if(t){t.incident_acknowledged=true;patchCard(t);}
     }else if(btn){btn.disabled=false;btn.textContent='✓ 已知晓';}
   }catch(e){
     if(btn){btn.disabled=false;btn.textContent='✓ 已知晓';}
@@ -1724,7 +1724,7 @@ async function ackTarget(tid,btn){
 
 function buildAckBtnHtml(t){
   if(t.status!=='red')return '';
-  if(acknowledgedTids.has(t.tid))return '<span class="ack-done">✓ 已知晓</span>';
+  if(t.incident_acknowledged||acknowledgedTids.has(t.tid))return '<span class="ack-done">✓ 已知晓</span>';
   return `<button type="button" class="ack-btn" data-ack-tid="${esc(t.tid)}">✓ 已知晓</button>`;
 }
 
@@ -6064,6 +6064,7 @@ class WebServer:
             push_fn=self._broadcaster.push)
         self._data_store   = None   # set via set_data_store()
         self._alert_ack_fn = None   # set via set_alert_ack_callback()
+        self._incident_ack_status_fn = None  # set via set_incident_ack_status_fn()
         # Concurrency guard for /api/traceroute/quick — each request spawns a
         # subprocess; 3 concurrent is more than enough for a single-operator tool.
         self._quick_trace_sem = threading.BoundedSemaphore(3)
@@ -6221,6 +6222,19 @@ class WebServer:
         """Bind AlertManager.acknowledge_incident for /api/alerts/ack."""
         self._alert_ack_fn = cb
 
+    def set_incident_ack_status_fn(self, cb):
+        """Bind AlertManager.is_incident_acknowledged for Web UI sync."""
+        self._incident_ack_status_fn = cb
+
+    def _query_incident_acknowledged(self, tid: str) -> bool:
+        fn = self._incident_ack_status_fn
+        if fn is None:
+            return False
+        try:
+            return bool(fn(tid))
+        except Exception:
+            return False
+
     def _build_scheduler_snapshot(self) -> dict:
         """
         Build the active-target snapshot for the traceroute scheduler.
@@ -6352,7 +6366,10 @@ class WebServer:
                 # True/False = match result.
                 "keyword_ok":       keyword_ok,
                 "probe_success":    probe_success,
-                "is_probe_result":  is_probe_result}
+                "is_probe_result":  is_probe_result,
+                "incident_acknowledged": (
+                    status == "red" and self._query_incident_acknowledged(tid)
+                )}
         # Single atomic lock section — paused check, write, history, and
         # building all_t all happen under one lock so there is no window
         # between the paused check and the _targets write.

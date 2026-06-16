@@ -159,6 +159,7 @@ def main():
     alerter.set_trace_request_callback(web.request_traceroute_now)
     web.set_traceroute_result_callback(alerter.on_traceroute_result)
     web.set_alert_ack_callback(alerter.acknowledge_incident)
+    web.set_incident_ack_status_fn(alerter.is_incident_acknowledged)
 
     app = MainWindow(
         config_manager=config,

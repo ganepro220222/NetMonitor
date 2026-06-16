@@ -59,6 +59,22 @@ def _open(a, n):
         a.on_status_change(f"t{i}", f"N{i}", f"10.0.0.{i+1}", "red")
 
 
+def _install_push_capture(a, calls):
+    def _capture(**kw):
+        entry = {k: v for k, v in kw.items() if k != "rebuild"}
+        rebuild = kw.get("rebuild")
+        if rebuild is not None:
+            rebuilt = rebuild()
+            if rebuilt is None:
+                return
+            extra, message, target = rebuilt
+            entry["extra"] = extra
+            entry["message"] = message
+            entry["target"] = target
+        calls.append(entry)
+    a._push_webhook = _capture
+
+
 def _count_agg(calls):
     return sum(1 for c in calls if c["event"] == "alert_reminder_aggregate")
 
@@ -73,7 +89,7 @@ def test_staggered_due_single_aggregate_per_interval():
     a._webhook_incidents["t2"].last_reminder_at = now - 60
     a._last_aggregate_reminder_at = now - INTERVAL_SEC - 5
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
 
     a._tick_webhook_reminders()                     # tick A: t0 due
     agg_a = _count_agg(calls)
@@ -98,7 +114,7 @@ def test_aggregate_rearms_after_interval():
         a._webhook_incidents[f"t{i}"].last_reminder_at = 0
     a._last_aggregate_reminder_at = now - INTERVAL_SEC - 5  # last agg long ago
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
 
     a._tick_webhook_reminders()                     # fires (re-armed)
     first = _count_agg(calls)
@@ -128,7 +144,7 @@ def test_simultaneous_outage_still_single_aggregate():
     for i in range(4):
         a._webhook_incidents[f"t{i}"].last_reminder_at = 0
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    _install_push_capture(a, calls)
     a._tick_webhook_reminders()
     agg = [c for c in calls if c["event"] == "alert_reminder_aggregate"]
     ok = len(agg) == 1 and agg[0]["extra"]["aggregate"]["count"] == 4
