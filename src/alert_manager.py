@@ -28,6 +28,7 @@ WAV 文件来源：
 import copy
 import math
 import os
+import queue
 import struct
 import threading
 import time
@@ -35,7 +36,6 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.traceroute_summary import summarize_break, trace_signature
 from src.trace_policy import (
     should_request_traceroute,
     summarize_for_alert,
@@ -165,6 +165,7 @@ class WebhookIncident:
     ping_type: str = "icmp"
     failure_reason: str = ""
     trace_applicable: bool = True
+    push_seq: int = 0
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -196,6 +197,11 @@ class AlertManager:
 
         self._webhook_incidents: dict[str, WebhookIncident] = {}
         self._webhook_incident_lock = threading.RLock()
+        # Monotonic per-target seq: open incident assigns seq N; close
+        # bumps to N+1 so in-flight webhooks for a recovered flap drop.
+        self._webhook_valid_seq: dict[str, int] = {}
+        self._webhook_queue_lock = threading.Lock()
+        self._webhook_queues: dict[str, queue.Queue] = {}
         # Throttles the multi-node aggregate reminder to one push per
         # reminder interval.  An aggregate already lists EVERY open-red
         # node, so when incidents come due on different 30s ticks (the
@@ -260,11 +266,9 @@ class AlertManager:
                 ping_type=pt, failure_reason=fr,
                 trace_applicable=trace_ok)
             if is_new:
-                self._push_webhook(
-                    event="alert_red", target=target_label,
-                    ip=target_ip, status="red", message="连接中断",
-                    extra=self._build_incident_extra(
-                        target_id, pending_trace=trace_ok))
+                self._push_alert_red_webhook(
+                    target_id, target_label, target_ip,
+                    pending_trace=trace_ok)
 
         elif new_status == "orange":
             if old_status in ("gray", "green"):
@@ -314,7 +318,8 @@ class AlertManager:
                         event="recovery", target=target_label,
                         ip=target_ip, status="green",
                         message="连接已恢复正常",
-                        extra=self._build_recovery_extra(closed))
+                        extra=self._build_recovery_extra(closed),
+                        order_key=target_id)
                 else:
                     # Recovery from orange (warning, never went red):
                     # mirror orange-in's notification policy -- local
@@ -376,8 +381,9 @@ class AlertManager:
     def reseed_webhook_incidents(self, targets: list, paused_ids: set) -> int:
         """Rebuild in-memory webhook incidents from DB open incidents.
 
-        Does NOT send alert_red.  Sets last_reminder_at=now so restart
-        does not immediately burst reminders.
+        Sends a catch-up ``alert_red`` for each reseeded red incident so
+        operators are notified after a restart mid-outage.  Sets
+        last_reminder_at=now so restart does not immediately burst reminders.
         """
         if self._data_store is None:
             return 0
@@ -392,6 +398,7 @@ class AlertManager:
 
         now = time.time()
         count = 0
+        created_red: list[str] = []
         for tid, info in open_inc.items():
             t = target_map.get(tid)
             if t is None:
@@ -404,6 +411,9 @@ class AlertManager:
             label = info.get("label") or t.get("label", tid)
             ip = info.get("ip") or t.get("ip", "")
             iid = info.get("incident_id")
+            ping_type = (info.get("ping_type") or "icmp").strip().lower() or "icmp"
+            failure_reason = info.get("failure_reason") or ""
+            trace_ok = should_request_traceroute(ping_type, failure_reason)
 
             summary = None
             signature = None
@@ -412,8 +422,13 @@ class AlertManager:
                 trace_snap = self._data_store.get_incident_traceroute(
                     tid, started_at, incident_id=iid)
                 if trace_snap and trace_snap.get("hops"):
-                    summary = summarize_break(trace_snap["hops"])
-                    signature = trace_signature(summary)
+                    summary = summarize_for_alert(
+                        trace_snap["hops"],
+                        ping_type=ping_type,
+                        failure_reason=failure_reason,
+                        tcp_checks=trace_snap.get("tcp_checks"),
+                    )
+                    signature = trace_signature_from_summary(summary)
                     last_trace_at = float(trace_snap.get("ts") or 0)
             except Exception:
                 pass
@@ -421,7 +436,8 @@ class AlertManager:
             with self._webhook_incident_lock:
                 if tid in self._webhook_incidents:
                     continue
-                self._webhook_incidents[tid] = WebhookIncident(
+                seq = self._alloc_incident_seq_locked(tid)
+                inc = WebhookIncident(
                     tid=tid,
                     label=label,
                     ip=ip,
@@ -431,8 +447,30 @@ class AlertManager:
                     last_trace_at=last_trace_at,
                     last_trace_summary=summary,
                     last_trace_signature=signature,
+                    ping_type=ping_type,
+                    failure_reason=failure_reason,
+                    trace_applicable=trace_ok,
+                    push_seq=seq,
                 )
+                if not trace_ok and summary is None:
+                    skip = trace_skip_summary(ping_type, failure_reason)
+                    inc.last_trace_summary = skip
+                    inc.last_trace_signature = trace_signature_from_summary(skip)
+                self._webhook_incidents[tid] = inc
                 count += 1
+                if cur_st == "red":
+                    created_red.append(tid)
+
+        if self._webhook_configured():
+            for tid in created_red:
+                inc = self._webhook_incidents.get(tid)
+                if inc is None:
+                    continue
+                pending = inc.trace_applicable and inc.last_trace_summary is None
+                self._push_alert_red_webhook(
+                    tid, inc.label, inc.ip,
+                    message="连接中断（程序重启后续报）",
+                    pending_trace=pending)
         return count
 
     def acknowledge_incident(self, target_id: str) -> bool:
@@ -551,6 +589,16 @@ class AlertManager:
 
     # ── Webhook incident lifecycle ───────────────────────────────────
 
+    def _alloc_incident_seq_locked(self, tid: str) -> int:
+        """Allocate the next valid push seq.  Caller holds incident lock."""
+        seq = self._webhook_valid_seq.get(tid, 0) + 1
+        self._webhook_valid_seq[tid] = seq
+        return seq
+
+    def _invalidate_incident_seq_locked(self, tid: str) -> None:
+        """Bump seq so queued/in-flight webhooks for the closed flap drop."""
+        self._webhook_valid_seq[tid] = self._webhook_valid_seq.get(tid, 0) + 1
+
     def _open_or_update_webhook_incident(self, tid: str, label: str, ip: str,
                                          *, status: str = "red",
                                          ping_type: str = "icmp",
@@ -560,6 +608,7 @@ class AlertManager:
             inc = self._webhook_incidents.get(tid)
             if inc is None:
                 now = time.time()
+                seq = self._alloc_incident_seq_locked(tid)
                 inc = WebhookIncident(
                     tid=tid, label=label, ip=ip,
                     started_at=now, current_status=status,
@@ -567,6 +616,7 @@ class AlertManager:
                     ping_type=ping_type,
                     failure_reason=failure_reason,
                     trace_applicable=trace_applicable,
+                    push_seq=seq,
                 )
                 if not trace_applicable:
                     skip = trace_skip_summary(ping_type, failure_reason)
@@ -588,15 +638,18 @@ class AlertManager:
     def _close_webhook_incident(self, tid: str) -> dict | None:
         with self._webhook_incident_lock:
             inc = self._webhook_incidents.pop(tid, None)
-        if inc is None:
-            return None
+            if inc is None:
+                return None
         snap = self._snapshot_incident(inc)
         snap["closed_at"] = time.time()
         return snap
 
     def _drop_webhook_incident(self, tid: str) -> None:
         with self._webhook_incident_lock:
+            if tid not in self._webhook_incidents:
+                return
             self._webhook_incidents.pop(tid, None)
+            self._invalidate_incident_seq_locked(tid)
 
     @staticmethod
     def _snapshot_incident(inc: WebhookIncident) -> dict:
@@ -613,6 +666,7 @@ class AlertManager:
             "ping_type": inc.ping_type,
             "failure_reason": inc.failure_reason,
             "trace_applicable": inc.trace_applicable,
+            "push_seq": inc.push_seq,
         }
 
     @staticmethod
@@ -827,8 +881,26 @@ class AlertManager:
                 status=snap["current_status"],
                 message="连接仍未恢复",
                 extra=self._build_reminder_extra(snap),
+                order_key=snap["tid"],
+                gate=("incident", snap["tid"], snap["push_seq"]),
             )
             self._maybe_request_trace_refresh(snap, now)
+
+    def _push_alert_red_webhook(self, tid: str, label: str, ip: str, *,
+                                message: str = "连接中断",
+                                pending_trace: bool = True) -> None:
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            if inc is None:
+                return
+            seq = inc.push_seq
+        self._push_webhook(
+            event="alert_red", target=label, ip=ip, status="red",
+            message=message,
+            extra=self._build_incident_extra(tid, pending_trace=pending_trace),
+            order_key=tid,
+            gate=("alert_red", tid, seq),
+        )
 
     def _push_aggregate_reminder(self, open_snaps: list[dict], now: float) -> None:
         sorted_snaps = sorted(
@@ -849,6 +921,8 @@ class AlertManager:
             status="red",
             message=message,
             extra=extra,
+            order_key="_aggregate_",
+            gate=("aggregate", [(s["tid"], s["push_seq"]) for s in open_snaps]),
         )
 
     def _build_aggregate_reminder_extra(self, snaps: list[dict],
@@ -996,25 +1070,89 @@ class AlertManager:
             status=snap["current_status"],
             message=summary.get("text", "traceroute 诊断更新"),
             extra=extra,
+            order_key=snap["tid"],
+            gate=("incident", snap["tid"], snap["push_seq"]),
         )
 
     # ── Webhook push ─────────────────────────────────────────────────
 
+    def _webhook_gate_ok(self, gate) -> bool:
+        """Return True if a deferred webhook should still be delivered."""
+        if gate is None:
+            return True
+        kind = gate[0]
+        with self._webhook_incident_lock:
+            if kind == "incident":
+                tid, seq = gate[1], gate[2]
+                if self._webhook_valid_seq.get(tid) != seq:
+                    return False
+                inc = self._webhook_incidents.get(tid)
+                return inc is not None and inc.push_seq == seq
+            if kind == "alert_red":
+                # Allow delivery after close if still the current generation
+                # (queued before recovery on a short flap).
+                tid, seq = gate[1], gate[2]
+                return self._webhook_valid_seq.get(tid) == seq
+            if kind == "aggregate":
+                for tid, seq in gate[1]:
+                    if self._webhook_valid_seq.get(tid) != seq:
+                        continue
+                    inc = self._webhook_incidents.get(tid)
+                    if (inc is not None and inc.push_seq == seq
+                            and inc.current_status == "red"):
+                        return True
+                return False
+        return True
+
+    def _ensure_webhook_worker(self, order_key: str) -> queue.Queue:
+        with self._webhook_queue_lock:
+            q = self._webhook_queues.get(order_key)
+            if q is None:
+                q = queue.Queue()
+                self._webhook_queues[order_key] = q
+                threading.Thread(
+                    target=self._webhook_delivery_worker,
+                    args=(order_key, q),
+                    daemon=True,
+                    name=f"webhook-q-{order_key[:24]}",
+                ).start()
+            return q
+
+    def _webhook_delivery_worker(self, order_key: str, q: queue.Queue) -> None:
+        while True:
+            job = q.get()
+            try:
+                job()
+            except Exception as e:
+                print(f"[Webhook] delivery error ({order_key}): {e}")
+            finally:
+                q.task_done()
+
     def _push_webhook(self, *, event: str, target: str, ip: str,
                       status: str, message: str,
-                      extra: dict | None = None) -> None:
-        """Fire-and-forget webhook push in a daemon thread."""
+                      extra: dict | None = None,
+                      order_key: str | None = None,
+                      gate=None) -> None:
+        """Queue webhook delivery; per-target ordering when order_key set."""
         if self._config is None:
             return
         url = (self._config.get_setting("webhook_url") or "").strip()
         if not url:
             return
         ts_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        threading.Thread(
-            target=self._send_webhook,
-            args=(url, event, target, ip, status, message, ts_str, extra),
-            daemon=True, name="webhook",
-        ).start()
+
+        def _deliver():
+            if not self._webhook_gate_ok(gate):
+                return
+            self._send_webhook(
+                url, event, target, ip, status, message, ts_str, extra)
+
+        if order_key:
+            self._ensure_webhook_worker(order_key).put(_deliver)
+        else:
+            threading.Thread(
+                target=_deliver, daemon=True, name="webhook",
+            ).start()
 
     @staticmethod
     def _send_webhook(url, event, target, ip, status, message, ts_str,

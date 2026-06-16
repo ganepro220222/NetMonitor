@@ -453,12 +453,28 @@ class DataStore:
                         (iid,),
                     ).fetchone()
                     started_at = fb[0] if fb and fb[0] is not None else time.time()
+                probe_row = conn.execute(
+                    "SELECT ping_type, failure_reason FROM alert_events "
+                    "WHERE incident_id=? AND new_status='red' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (iid,),
+                ).fetchone()
+                if probe_row is None:
+                    probe_row = conn.execute(
+                        "SELECT ping_type, failure_reason FROM alert_events "
+                        "WHERE incident_id=? ORDER BY id DESC LIMIT 1",
+                        (iid,),
+                    ).fetchone()
+                ping_type = (probe_row[0] or "icmp") if probe_row else "icmp"
+                failure_reason = (probe_row[1] or "") if probe_row else ""
                 out[tid] = {
                     "incident_id": iid,
                     "started_at": float(started_at),
                     "last_status": ns,
                     "label": label or "",
                     "ip": ip or "",
+                    "ping_type": ping_type,
+                    "failure_reason": failure_reason,
                 }
             return out
         except Exception:

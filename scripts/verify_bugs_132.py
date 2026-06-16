@@ -63,23 +63,29 @@ def test_green_not_reseeded():
     return ok
 
 
-def test_reseed_creates_incident_no_alert_red():
+def test_reseed_sends_catchup_alert_red():
     ds, _ = _mk_store()
     started = time.time() - 1800
     _insert_open_red(ds, started=started)
     a = _alerter(ds)
+    a.set_config(type("C", (), {"get_setting": lambda _s, k: {
+        "webhook_url": "http://127.0.0.1:9/hook",
+    }.get(k)})())
     calls = []
-    a._push_webhook = lambda **kw: calls.append(kw)
+    a._send_webhook = staticmethod(
+        lambda *args, **kw: calls.append({"event": args[1], "message": args[5]}))
     n = a.reseed_webhook_incidents(
         [{"id": "t1", "label": "GW", "ip": "10.0.0.1"}], set())
+    a._webhook_queues["t1"].join()
     inc = a._webhook_incidents.get("t1")
     ok = (
         n == 1
         and inc is not None
         and abs(inc.started_at - started) < 2
-        and not any(c["event"] == "alert_red" for c in calls)
+        and any(c["event"] == "alert_red" for c in calls)
+        and any("重启后续报" in c["message"] for c in calls)
     )
-    print(f"Bug132 reseed incident no alert_red -> {ok}")
+    print(f"Bug132 reseed catch-up alert_red -> {ok}")
     return ok
 
 
@@ -209,7 +215,7 @@ def main():
     results = [
         ("open_inc", test_get_open_incidents_from_db()),
         ("no_green", test_green_not_reseeded()),
-        ("reseed", test_reseed_creates_incident_no_alert_red()),
+        ("reseed", test_reseed_sends_catchup_alert_red()),
         ("skip_pause", test_reseed_skips_paused()),
         ("reseed_reminder", test_reseed_reminder_after_interval()),
         ("ack_reminder", test_ack_stops_reminder_recovery_still_possible()),
