@@ -1567,6 +1567,8 @@ class AlertManager:
             url, data=body,
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST")
+        self.assert_outbox_webhook_send_allowed(
+            delivery_id=delivery_id, gate=gate)
         with urllib.request.urlopen(req, timeout=10):
             pass
 
