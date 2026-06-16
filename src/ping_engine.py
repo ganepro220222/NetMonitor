@@ -2225,6 +2225,7 @@ class PingEngine:
         self.settings = {**self.settings, **new_settings}
         with self._monitors_lock:
             monitors = list(self._monitors.values())
+        _MISSING = object()
         for m in monitors:
             # Per-target overrides win over a global change.  The previous
             # `m.settings = {**m.settings, **new_settings}` blindly pushed
@@ -2239,7 +2240,8 @@ class PingEngine:
                         if k not in overrides}
             if isinstance(m, HTTPMonitor) and "latency_warn_ms" not in overrides:
                 applied.pop("latency_warn_ms", None)
-                merged = {**m.settings, **applied}
+            merged = {**m.settings, **applied}
+            if isinstance(m, HTTPMonitor) and "latency_warn_ms" not in overrides:
                 # HTTP uses the dedicated global http_latency_warn_ms, not the
                 # ICMP/TCP/DNS 150.  Recompute from the (possibly just-changed)
                 # global value so a settings save takes effect immediately.
@@ -2248,9 +2250,13 @@ class PingEngine:
                     merged["latency_warn_ms"] = http_warn
                 else:
                     merged.pop("latency_warn_ms", None)
+            old_settings = m.settings
+            semantic_changed = any(
+                old_settings.get(k, _MISSING) != merged.get(k, _MISSING)
+                for k in m.PROBE_SEMANTIC_KEYS)
+            with m._commit_lock:
                 m.settings = merged
-            else:
-                m.settings = {**m.settings, **applied}
+                m.invalidate_stale_extended_caches(old_settings, merged)
             # If the new global window_size actually reached this monitor
             # (i.e. it isn't overridden per-target), resize its deque so
             # the change takes effect immediately on the running
@@ -2259,6 +2265,13 @@ class PingEngine:
             # window until the next restart.
             if "window_size" in applied:
                 self._resize_window_if_needed(m, applied["window_size"])
+            if semantic_changed:
+                try:
+                    _ds = getattr(self, "_data_store", None)
+                    if _ds is not None:
+                        _ds.bump_target_generation(m.target_id)
+                except Exception:
+                    pass
 
     @staticmethod
     def _resize_window_if_needed(monitor, new_size):
