@@ -135,7 +135,7 @@ class WebhookOutboxDispatcher:
 
         ds.finish_webhook_outbox(
             delivery_id, state="delivered", error="", now=now,
-            only_if_sending=True)
+            attempt_count=attempt, only_if_sending=True)
 
     def _handle_failure(self, row: dict, now: float, err: str) -> None:
         ds = self._am._data_store
