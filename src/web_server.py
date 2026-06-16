@@ -5695,9 +5695,13 @@ function connect(){
       // from any delete/clear events that happened while the browser was offline.
       Object.keys(targets).forEach(k=>delete targets[k]);
       Object.keys(portStatus).forEach(k=>delete portStatus[k]);
+      acknowledgedTids.clear();
       resetStatsUi();
       applyServerStats(msg.stats);
-      msg.targets.forEach(t=>{targets[t.tid]=t;});
+      msg.targets.forEach(t=>{
+        targets[t.tid]=t;
+        if(t.status==='red'&&t.incident_acknowledged)acknowledgedTids.add(t.tid);
+      });
       if(msg.port_statuses) Object.assign(portStatus,msg.port_statuses);
       // Always rebuild hist from server, even if server hist is empty
       hist.length=0;
@@ -6323,6 +6327,8 @@ class WebServer:
             self._targets[tid] = {**self._targets.get(tid, {}),
                                   "status": "paused",
                                   "is_probe_result": False}
+            self._targets[tid]["incident_acknowledged"] = (
+                self._live_incident_acknowledged(tid, "paused"))
             # Snapshot inside the lock so the push payload can't race against
             # a concurrent remove_target / update_target that mutates _targets.
             to_push = dict(self._targets[tid])
@@ -6349,6 +6355,8 @@ class WebServer:
             if tid in self._targets:
                 self._targets[tid]["status"] = "gray"
                 self._targets[tid]["is_probe_result"] = False
+                self._targets[tid]["incident_acknowledged"] = (
+                    self._live_incident_acknowledged(tid, "gray"))
                 to_push = dict(self._targets[tid])   # snapshot inside lock
             else:
                 to_push = None
