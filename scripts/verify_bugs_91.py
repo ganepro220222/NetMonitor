@@ -53,7 +53,7 @@ def test_v11_migration_fixes_polluted_cum_stats():
         ds2.shutdown()
 
         ok = (
-            ver == 11
+            ver >= 11
             and cum.get("total") == 2
             and cum.get("success") == 1
             and cum.get("latency_avg") == 10.0

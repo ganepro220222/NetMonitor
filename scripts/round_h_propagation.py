@@ -68,9 +68,23 @@ def test_h3_webhook_payloads():
     check("failure_reason" in src_snap, "H3e: _snapshot_incident includes failure_reason")
     check("trace_applicable" in src_snap, "H3e: _snapshot_incident includes trace_applicable")
 
-    src_fmt = inspect.getsource(am_mod.AlertManager._format_webhook_text)
-    check("探测类型" in src_fmt, "H3f: webhook text shows ping type")
-    check("失败原因" in src_fmt, "H3f: webhook text shows failure reason")
+    # H3f: assert on the RENDERED webhook text, not _format_webhook_text's
+    # source.  The "探测类型" / "失败原因" strings live in the ping_type_label
+    # and _webhook_failure_line helpers that _format_webhook_text composes, so
+    # a source grep of the top-level function alone is a false negative.
+    probe = am_mod.AlertManager._incident_probe_fields(
+        {"ping_type": "tcp", "failure_reason": "connection_refused"})
+    fmt_extra = {
+        "incident": {**probe, "duration_text": "5 分钟", "reminder_count": 1},
+        "trace": {},
+    }
+    fmt_text = am_mod.AlertManager._format_webhook_text(
+        "🔴", "告警仍未恢复", "alert_reminder", "GW", "10.0.0.1", "red",
+        "连接仍未恢复", "2026-01-01 00:00:00", fmt_extra)
+    check("探测类型" in fmt_text and probe["ping_type_label"] in fmt_text,
+          "H3f: webhook text shows ping type")
+    check("失败原因" in fmt_text and "TCP 连接被拒绝" in fmt_text,
+          "H3f: webhook text shows failure reason")
 
 
 def test_h4_export_excel():
