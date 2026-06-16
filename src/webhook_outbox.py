@@ -10,6 +10,7 @@ from typing import Any
 BACKOFF_SECONDS = (5, 15, 30, 60, 120, 300)
 DISPATCH_INTERVAL_SEC = 2.0
 CLOSED_SUMMARY_DELAY_SEC = 60
+SENDING_LEASE_SEC = 120.0
 COALESCE_EVENTS = frozenset({"alert_reminder", "diagnostic_update"})
 REMINDER_MAX_ATTEMPTS = 12
 DIAGNOSTIC_MAX_ATTEMPTS = 8
@@ -45,6 +46,9 @@ class WebhookOutboxDispatcher:
     def start(self) -> None:
         if self._thread is not None:
             return
+        ds = self._am._data_store
+        if ds is not None:
+            ds.recover_orphaned_sending_webhook_outbox()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="webhook-outbox-dispatch")
         self._thread.start()
@@ -73,6 +77,7 @@ class WebhookOutboxDispatcher:
         if ds is None or not am._webhook_configured():
             return
         now = time.time()
+        ds.recover_stale_sending_webhook_outbox(now, SENDING_LEASE_SEC)
         ds.drop_red_blocked_closed_summary(now, CLOSED_SUMMARY_DELAY_SEC)
         rows = ds.fetch_deliverable_webhook_outbox(now, limit=50)
         for row in rows:

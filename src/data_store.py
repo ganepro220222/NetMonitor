@@ -602,6 +602,36 @@ class DataStore:
         except Exception:
             return []
 
+    def recover_orphaned_sending_webhook_outbox(
+            self, now: float | None = None) -> int:
+        """After process restart, in-flight sending rows are orphaned."""
+        now = float(now or time.time())
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            cur = conn.execute(
+                "UPDATE webhook_outbox SET delivery_state='pending', "
+                "last_error='recovered_after_restart', next_attempt_ts=?, "
+                "updated_at=? WHERE delivery_state='sending'",
+                (now, now))
+            conn.commit()
+            return cur.rowcount
+
+    def recover_stale_sending_webhook_outbox(
+            self, now: float, lease_sec: float) -> int:
+        """Reclaim sending rows whose delivery lease has expired."""
+        now = float(now)
+        cutoff = now - float(lease_sec)
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            cur = conn.execute(
+                "UPDATE webhook_outbox SET delivery_state='pending', "
+                "last_error='stale_sending_recovered', next_attempt_ts=?, "
+                "updated_at=? "
+                "WHERE delivery_state='sending' AND last_attempt_ts <= ?",
+                (now, now, cutoff))
+            conn.commit()
+            return cur.rowcount
+
     def drop_red_blocked_closed_summary(self, now: float,
                                         delay_sec: float) -> int:
         """Drop head alert_red rows blocking due recovery past closed-summary delay.
