@@ -340,6 +340,13 @@ class AlertManager:
             self._last_alert_status.pop(target_id, None)
             self._red_targets.discard(target_id)
         self._drop_webhook_incident(target_id)
+        # Permanent deletion: also reclaim the per-target delivery worker and
+        # seq entry that _drop_webhook_incident (shared with pause) leaves in
+        # place, so a removed target doesn't leak a queue + daemon thread +
+        # _webhook_valid_seq entry forever.
+        self._drop_webhook_delivery(target_id)
+        with self._webhook_incident_lock:
+            self._webhook_valid_seq.pop(target_id, None)
         # Do NOT call _stop_red_alarm() here — evaluate_alarm() in MainWindow
         # will decide based on the full current state after the card is removed.
 
@@ -1143,12 +1150,36 @@ class AlertManager:
     def _webhook_delivery_worker(self, order_key: str, q: queue.Queue) -> None:
         while True:
             job = q.get()
+            if job is None:
+                # Sentinel from _drop_webhook_delivery: the target was
+                # removed.  Any jobs queued ahead of the sentinel have
+                # already been drained (FIFO) — e.g. a recovery webhook
+                # pushed just before deletion still goes out — so the
+                # worker can exit cleanly here.
+                q.task_done()
+                return
             try:
                 job()
             except Exception as e:
                 print(f"[Webhook] delivery error ({order_key}): {e}")
             finally:
                 q.task_done()
+
+    def _drop_webhook_delivery(self, order_key: str) -> None:
+        """Tear down a per-target delivery worker after target removal.
+
+        _ensure_webhook_worker spawns one queue.Queue + one daemon thread
+        per order_key (the target id) and never reclaims them.  On target
+        deletion this leaks a queue, a thread, and a _webhook_valid_seq
+        entry permanently — unbounded under add/remove churn since tids are
+        fresh UUIDs.  Pop the queue and enqueue a sentinel so the worker
+        drains anything still pending (stale jobs gate-drop themselves) and
+        then exits.
+        """
+        with self._webhook_queue_lock:
+            q = self._webhook_queues.pop(order_key, None)
+        if q is not None:
+            q.put(None)
 
     def _push_webhook(self, *, event: str, target: str, ip: str,
                       status: str, message: str,
