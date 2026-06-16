@@ -158,17 +158,60 @@ def _post_final_assert_race_scenario(*, action: str, delivery_id: str):
     row, target_id = _enqueue_reminder(
         a, ds, delivery_id=delivery_id, target_id=target_id)
 
-    def _record_urlopen(req, timeout=10):
-        urlopen_calls.append(getattr(req, "full_url", str(req)))
-        return type("Resp", (), {"read": lambda self: b"", "__enter__": lambda s: s,
-                                  "__exit__": lambda *a: None})()
-
     a._webhook_pre_http_send_hook = _pre_http_hook
     t = threading.Thread(
         target=disp._deliver_one, args=(row, time.time()), daemon=True)
-    with patch("urllib.request.urlopen", side_effect=_record_urlopen):
+    with patch("urllib.request.urlopen") as mock_urlopen:
         t.start()
         assert entered.wait(timeout=5), "did not reach pre-http hook"
+        expected_error = _apply_action(a, action, target_id)
+        release.set()
+        t.join(timeout=5)
+        urlopen_calls = [
+            str(c.args[0].full_url) if getattr(c.args[0], "full_url", None)
+            else str(c.args[0]) for c in mock_urlopen.call_args_list
+        ]
+
+    rem = _outbox_row(ds, delivery_id)
+    return {
+        "action": action,
+        "sent": urlopen_calls,
+        "rows": [(rem["delivery_id"], rem["delivery_state"], rem["last_error"])],
+        "expected_error": expected_error,
+    }
+
+
+def _urlopen_entry_race_scenario(*, action: str, delivery_id: str):
+    """Race at HTTP open: patch public urllib.request.urlopen (must not fire)."""
+    a, disp, ds = make_alerter()
+    entered = threading.Event()
+    release = threading.Event()
+    patched_calls = []
+    target_id = "t1"
+
+    def _patched_urlopen(req, timeout=10):
+        patched_calls.append(getattr(req, "full_url", str(req)))
+        return type("Resp", (), {"read": lambda self: b"", "__enter__": lambda s: s,
+                                  "__exit__": lambda *a: None})()
+
+    row, target_id = _enqueue_reminder(
+        a, ds, delivery_id=delivery_id, target_id=target_id)
+
+    real_open = AlertManager._outbox_http_open.__get__(a, AlertManager)
+
+    def _open_wait(req, timeout, *, delivery_id, commit_epoch, gate):
+        entered.set()
+        release.wait(timeout=5)
+        return real_open(
+            req, timeout, delivery_id=delivery_id,
+            commit_epoch=commit_epoch, gate=gate)
+
+    a._outbox_http_open = _open_wait
+    t = threading.Thread(
+        target=disp._deliver_one, args=(row, time.time()), daemon=True)
+    with patch("urllib.request.urlopen", side_effect=_patched_urlopen):
+        t.start()
+        assert entered.wait(timeout=5), "did not reach outbox http open"
         expected_error = _apply_action(a, action, target_id)
         release.set()
         t.join(timeout=5)
@@ -176,7 +219,7 @@ def _post_final_assert_race_scenario(*, action: str, delivery_id: str):
     rem = _outbox_row(ds, delivery_id)
     return {
         "action": action,
-        "sent": urlopen_calls,
+        "sent": patched_calls,
         "rows": [(rem["delivery_id"], rem["delivery_state"], rem["last_error"])],
         "expected_error": expected_error,
     }
@@ -253,6 +296,24 @@ def test_remove_after_final_assert():
             action="remove", delivery_id="remove-after_final_assert"))
 
 
+def test_ack_urlopen_entry_race():
+    return _check_no_urlopen(
+        _urlopen_entry_race_scenario(
+            action="ack", delivery_id="ack-urlopen_entry"))
+
+
+def test_pause_urlopen_entry_race():
+    return _check_no_urlopen(
+        _urlopen_entry_race_scenario(
+            action="pause", delivery_id="pause-urlopen_entry"))
+
+
+def test_remove_urlopen_entry_race():
+    return _check_no_urlopen(
+        _urlopen_entry_race_scenario(
+            action="remove", delivery_id="remove-urlopen_entry"))
+
+
 def main():
     results = [
         ("ack_during_send", test_ack_during_send()),
@@ -264,6 +325,9 @@ def main():
         ("ack_after_final_assert", test_ack_after_final_assert()),
         ("pause_after_final_assert", test_pause_after_final_assert()),
         ("remove_after_final_assert", test_remove_after_final_assert()),
+        ("ack_urlopen_entry", test_ack_urlopen_entry_race()),
+        ("pause_urlopen_entry", test_pause_urlopen_entry_race()),
+        ("remove_urlopen_entry", test_remove_urlopen_entry_race()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:
