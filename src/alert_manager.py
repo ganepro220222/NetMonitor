@@ -724,10 +724,11 @@ class AlertManager:
 
     def _drop_webhook_incident(self, tid: str) -> None:
         with self._webhook_incident_lock:
-            if tid not in self._webhook_incidents:
+            inc = self._webhook_incidents.pop(tid, None)
+            if inc is None:
                 return
-            self._webhook_incidents.pop(tid, None)
             self._invalidate_incident_seq_locked(tid)
+        self._clear_persisted_incident_ack(inc)
 
     @staticmethod
     def _snapshot_incident(inc: WebhookIncident) -> dict:
