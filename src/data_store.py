@@ -218,7 +218,7 @@ class DataStore:
         # are actually deleted, not when the wipe is merely enqueued).
         self._wipe_complete_callback = None
         self._outbox_lock = threading.Lock()
-        self._outbox_conn = None
+        self._outbox_tls = threading.local()
 
         threading.Thread(
             target=self._maybe_vacuum, daemon=True,
@@ -523,12 +523,15 @@ class DataStore:
     # ── Webhook outbox (reliable delivery) ───────────────────────────
 
     def _outbox_write_conn(self) -> sqlite3.Connection:
-        conn = getattr(self, "_outbox_conn", None)
-        if conn is None:
-            conn = sqlite3.connect(self._db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            self._outbox_conn = conn
+        """Per-thread outbox write connection (dispatcher runs off main thread)."""
+        conn = getattr(self._outbox_tls, "conn", None)
+        if conn is not None:
+            return conn
+        conn = sqlite3.connect(
+            self._db_path, timeout=30, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        self._outbox_tls.conn = conn
         return conn
 
     def enqueue_webhook_outbox(
