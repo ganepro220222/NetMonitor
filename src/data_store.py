@@ -664,10 +664,11 @@ class DataStore:
             row = conn.execute(
                 "SELECT * FROM webhook_outbox "
                 "WHERE event='alert_red' AND order_key=? "
+                "AND incident_id=? "
                 "AND delivery_id!=? AND delivered_ts IS NULL "
                 "AND delivery_state != 'delivered' "
                 "ORDER BY id LIMIT 1",
-                (order_key, exclude_id or ""),
+                (order_key, incident_id or "", exclude_id or ""),
             ).fetchone()
             return self._outbox_row_to_dict(row) if row else None
         except Exception:
@@ -769,9 +770,11 @@ class DataStore:
             row = conn.execute(
                 "SELECT * FROM webhook_outbox "
                 "WHERE event='recovery' AND order_key=? "
+                "AND incident_id=? "
                 "AND delivery_state='pending' "
                 "ORDER BY id LIMIT 1",
-                (order_key,)).fetchone()
+                (order_key, incident_id or ""),
+            ).fetchone()
             return self._outbox_row_to_dict(row) if row else None
         except Exception:
             return None

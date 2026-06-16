@@ -114,7 +114,10 @@ class WebhookOutboxDispatcher:
         attempt = int(row.get("attempt_count") or 0) + 1
         max_a = int(row.get("max_attempts") or 0)
         if event == "alert_red" and ds is not None:
-            recovery = ds.find_pending_recovery(row.get("order_key") or "")
+            recovery = ds.find_pending_recovery(
+                row.get("order_key") or "",
+                row.get("incident_id") or "",
+            )
             age = now - float(row.get("first_queued_ts") or now)
             if recovery and age >= CLOSED_SUMMARY_DELAY_SEC:
                 ds.finish_webhook_outbox(
