@@ -38,7 +38,7 @@ def test_alert_red_zero_duration():
     }
     text = _fmt("alert_red", extra)
     ok = (
-        "开始时间：2026-06-13 22:17:07" in text
+        "故障开始：2026-06-13 22:17:07" in text
         and "已持续：0 秒" not in text
         and "失败原因：DNS 查询超时" in text
     )
