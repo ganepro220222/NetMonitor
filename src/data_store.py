@@ -687,7 +687,8 @@ class DataStore:
                         "updated_at=? "
                         "WHERE event='recovery' AND order_key=? "
                         "AND incident_id=? AND delivery_state='pending' "
-                        "AND next_attempt_ts > ?",
+                        "AND next_attempt_ts > ? "
+                        "AND NOT (attempt_count > 0 AND last_error != '')",
                         (now, now, order_key, incident_id or "", now),
                     )
                 dropped += cur.rowcount
