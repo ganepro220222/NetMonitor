@@ -331,6 +331,8 @@ class AlertManager:
                     # alert.  Operators paged for an outage deserve a
                     # follow-up "all clear" through the same channel.
                     closed = self._close_webhook_incident(target_id)
+                    with self._webhook_incident_lock:
+                        rec_seq = self._webhook_valid_seq.get(target_id, 0)
                     self._send_notification(
                         title="🟢 网络已恢复",
                         msg=f"「{target_label}」({target_ip}) 连接已恢复正常。"
@@ -340,7 +342,9 @@ class AlertManager:
                         ip=target_ip, status="green",
                         message="连接已恢复正常",
                         extra=self._build_recovery_extra(closed),
-                        order_key=target_id)
+                        order_key=target_id,
+                        gate=("recovery", target_id, rec_seq),
+                    )
                 else:
                     # Recovery from orange (warning, never went red):
                     # mirror orange-in's notification policy -- local
@@ -431,7 +435,7 @@ class AlertManager:
             return
         cfg_ids = self._config_target_ids()
         if cfg_ids is not None:
-            self._webhook_known_targets.update(cfg_ids)
+            self._webhook_known_targets = set(cfg_ids)
             self._webhook_known_targets_initialized = True
             try:
                 open_iid_map: dict[str, str] = {}
@@ -441,15 +445,19 @@ class AlertManager:
                         tid: str(info.get("incident_id") or "").strip()
                         for tid, info in open_inc.items()
                     }
-                    n_orphan = self._data_store.drop_orphan_webhook_outbox(cfg_ids)
-                    n_stale = (
-                        self._data_store
-                        .drop_stale_webhook_outbox_for_closed_incidents(
-                            open_iid_map))
-                    self._log_outbox_cleanup("reconcile orphan", n_orphan)
-                    self._log_outbox_cleanup("reconcile stale incident", n_stale)
+                n_orphan = self._data_store.drop_orphan_webhook_outbox(cfg_ids)
+                n_stale = (
+                    self._data_store
+                    .drop_stale_webhook_outbox_for_closed_incidents(
+                        open_iid_map))
+                self._log_outbox_cleanup("reconcile orphan", n_orphan)
+                self._log_outbox_cleanup("reconcile stale incident", n_stale)
             except Exception:
                 pass
+        else:
+            if self._webhook_known_targets_initialized:
+                self._webhook_known_targets.clear()
+            self._webhook_known_targets_initialized = False
 
     def set_config(self, config) -> None:
         self._config = config
@@ -770,14 +778,65 @@ class AlertManager:
     def _webhook_target_known(self, tid: str) -> bool:
         if not tid:
             return False
+        if self._webhook_known_targets_initialized:
+            return tid in self._webhook_known_targets
         if tid in self._webhook_known_targets:
             return True
-        if self._webhook_known_targets_initialized:
-            return False
         cfg_ids = self._config_target_ids()
         if cfg_ids is not None:
             return tid in cfg_ids
         return False
+
+    _TARGET_GATED_OUTBOX_EVENTS = frozenset({
+        "alert_red", "alert_reminder", "diagnostic_update", "recovery",
+        "incident_closed_summary",
+    })
+
+    def _parse_outbox_gate(self, gate) -> tuple | None | bool:
+        """Return parsed gate tuple, None if absent, False if malformed."""
+        if gate is None:
+            return None
+        if not isinstance(gate, (list, tuple)) or len(gate) < 1:
+            return False
+        kind = gate[0]
+        if kind == "aggregate":
+            if len(gate) != 2:
+                return False
+            pairs = gate[1]
+            if not isinstance(pairs, (list, tuple)):
+                return False
+            norm_pairs: list[tuple[str, int]] = []
+            for item in pairs:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    return False
+                tid, seq = item[0], item[1]
+                if not isinstance(tid, str) or not tid:
+                    return False
+                try:
+                    norm_pairs.append((tid, int(seq)))
+                except (TypeError, ValueError):
+                    return False
+            return ("aggregate", tuple(norm_pairs))
+        if kind in ("reminder", "incident", "alert_red", "recovery"):
+            if len(gate) != 3:
+                return False
+            tid, seq = gate[1], gate[2]
+            if not isinstance(tid, str) or not tid:
+                return False
+            try:
+                return (kind, tid, int(seq))
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    def _outbox_row_target_ok(self, row: dict, *, event: str = "") -> bool:
+        tid = (row.get("target_id") or "").strip()
+        if not tid:
+            return True
+        ev = (event or row.get("event") or "").strip()
+        if ev not in self._TARGET_GATED_OUTBOX_EVENTS:
+            return True
+        return self._webhook_target_known(tid)
 
     def _invalidate_incident_seq_locked(self, tid: str) -> None:
         """Bump seq so queued/in-flight webhooks for the closed flap drop."""
@@ -1320,11 +1379,20 @@ class AlertManager:
 
     def _webhook_gate_ok(self, gate, *, incident_id: str = "") -> bool:
         """Return True if a deferred webhook should still be delivered."""
-        if gate is None:
+        parsed = self._parse_outbox_gate(gate)
+        if parsed is False:
+            return False
+        if parsed is None:
             return True
+        gate = parsed
         kind = gate[0]
         row_iid = (incident_id or "").strip()
         with self._webhook_incident_lock:
+            if kind == "recovery":
+                tid, seq = gate[1], gate[2]
+                if not self._webhook_target_known(tid):
+                    return False
+                return self._webhook_valid_seq.get(tid, 0) == seq
             if kind == "reminder":
                 tid, seq = gate[1], gate[2]
                 if not self._webhook_target_known(tid):
@@ -1382,7 +1450,7 @@ class AlertManager:
                             and not inc.acknowledged):
                         return True
                 return False
-        return True
+        return False
 
     def _eligible_red_reminder_snaps(self, tid_seq_pairs: list) -> list[dict]:
         """Live reminder-eligible snapshots for deferred delivery rebuild."""
@@ -1521,23 +1589,28 @@ class AlertManager:
 
     def outbox_row_gate_ok(self, row: dict) -> bool:
         """Re-check persisted outbox gate before/after network send."""
-        gate = self.outbox_row_gate(row)
-        if gate is None:
-            return True
-        return self._webhook_gate_ok(
-            gate, incident_id=row.get("incident_id") or "")
-
-    def outbox_row_gate(self, row: dict):
-        """Return persisted gate tuple from an outbox row, or None."""
         import json as _json
         try:
             payload = _json.loads(row.get("payload_json") or "{}")
         except Exception:
-            return None
-        gate = payload.get("gate")
+            return False
+        event = payload.get("event") or row.get("event") or ""
+        gate = self._parse_outbox_gate(payload.get("gate"))
+        if gate is False:
+            return False
         if gate is None:
-            return None
-        return tuple(gate)
+            return self._outbox_row_target_ok(row, event=event)
+        return self._webhook_gate_ok(
+            gate, incident_id=row.get("incident_id") or "")
+
+    def outbox_row_gate(self, row: dict):
+        """Return parsed gate tuple from an outbox row, or None / False."""
+        import json as _json
+        try:
+            payload = _json.loads(row.get("payload_json") or "{}")
+        except Exception:
+            return False
+        return self._parse_outbox_gate(payload.get("gate"))
 
     def assert_outbox_webhook_send_allowed(
             self, *, delivery_id: str = "", gate=None) -> None:
@@ -1571,8 +1644,10 @@ class AlertManager:
             raise WebhookDeliveryAborted("superseded")
         if delivery_id in self._webhook_send_cancelled:
             raise WebhookDeliveryAborted("cancelled")
-        if gate is not None and not self._webhook_gate_ok(tuple(gate)):
-            raise WebhookDeliveryAborted("gate")
+        if gate is not None:
+            parsed = self._parse_outbox_gate(gate)
+            if parsed is False or not self._webhook_gate_ok(parsed, incident_id=""):
+                raise WebhookDeliveryAborted("gate")
         if self._data_store is not None:
             state = self._data_store.get_webhook_outbox_delivery_state(
                 delivery_id)
@@ -1584,8 +1659,10 @@ class AlertManager:
         """Early gate/state check (non-atomic; used before payload build)."""
         if delivery_id in self._webhook_send_cancelled:
             raise WebhookDeliveryAborted("cancelled")
-        if gate is not None and not self._webhook_gate_ok(tuple(gate)):
-            raise WebhookDeliveryAborted("gate")
+        if gate is not None:
+            parsed = self._parse_outbox_gate(gate)
+            if parsed is False or not self._webhook_gate_ok(parsed, incident_id=""):
+                raise WebhookDeliveryAborted("gate")
         if delivery_id and self._data_store is not None:
             state = self._data_store.get_webhook_outbox_delivery_state(
                 delivery_id)
@@ -1659,12 +1736,15 @@ class AlertManager:
             return None
 
         event = payload.get("event") or row.get("event") or ""
-        gate = payload.get("gate")
-        if gate is not None:
-            gate_t = tuple(gate)
+        parsed_gate = self._parse_outbox_gate(payload.get("gate"))
+        if parsed_gate is False:
+            return None
+        if parsed_gate is not None:
             if not self._webhook_gate_ok(
-                    gate_t, incident_id=row.get("incident_id") or ""):
+                    parsed_gate, incident_id=row.get("incident_id") or ""):
                 return None
+        elif not self._outbox_row_target_ok(row, event=event):
+            return None
 
         rebuild_spec = payload.get("rebuild_spec")
         if rebuild_spec and rebuild_spec.get("type") == "aggregate":

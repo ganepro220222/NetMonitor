@@ -96,7 +96,13 @@ class WebhookOutboxDispatcher:
         if not ds.claim_webhook_outbox(delivery_id, now):
             return
         try:
-            prepared = self._am.prepare_outbox_delivery(row, now)
+            try:
+                prepared = self._am.prepare_outbox_delivery(row, now)
+            except Exception:
+                ds.finish_webhook_outbox(
+                    delivery_id, state="dropped_stale", error="malformed_gate",
+                    now=now, only_if_sending=True)
+                return
             if prepared is None:
                 ds.finish_webhook_outbox(
                     delivery_id, state="dropped_stale", error="gate_or_rebuild",

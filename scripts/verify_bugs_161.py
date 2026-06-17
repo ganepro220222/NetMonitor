@@ -22,7 +22,7 @@ WEB_SERVER = os.path.join(ROOT, "src", "web_server.py")
 
 
 def _cfg(**overrides):
-    targets = overrides.pop("targets", [])
+    targets = overrides.pop("targets", None)
     base = {
         "webhook_url": "http://127.0.0.1:9/hook",
         "webhook_reminder_enabled": True,
@@ -34,10 +34,14 @@ def _cfg(**overrides):
         "webhook_trace_update_enabled": False,
     }
     base.update(overrides)
-    return type("C", (), {
-        "get_setting": lambda _s, k: base.get(k),
-        "get_targets": lambda _s: list(targets),
-    })()
+
+    class _Cfg:
+        def get_setting(self, k):
+            return base.get(k)
+
+    if targets is not None:
+        _Cfg.get_targets = lambda _s: list(targets)
+    return _Cfg()
 
 
 def _mk_store():
@@ -49,6 +53,8 @@ def _mk_store():
 
 
 def _alerter(ds=None, **cfg_kw):
+    if "targets" not in cfg_kw:
+        cfg_kw["targets"] = [{"id": "t1", "label": "GW", "ip": "10.0.0.1"}]
     a = AlertManager(enabled=False, assets_dir=os.path.join(ROOT, "assets"))
     a.set_config(_cfg(**cfg_kw))
     if ds:

@@ -31,8 +31,8 @@ def default_cfg(**overrides):
         def get_setting(self, k):
             return base.get(k)
 
-        def get_targets(self):
-            return list(targets) if targets is not None else []
+    if targets is not None:
+        _Cfg.get_targets = lambda self: list(targets)
 
     return _Cfg()
 

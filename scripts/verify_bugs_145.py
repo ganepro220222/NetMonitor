@@ -32,7 +32,8 @@ def _cfg():
 
 def _alerter(ds=None):
     from scripts.webhook_test_util import make_alerter
-    a, disp, ds = make_alerter(ds=ds)
+    a, disp, ds = make_alerter(
+        ds=ds, targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     return a, disp
 
 
