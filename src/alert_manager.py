@@ -212,6 +212,9 @@ class AlertManager:
         # Monotonic per-target seq: open incident assigns seq N; close
         # bumps to N+1 so in-flight webhooks for a recovered flap drop.
         self._webhook_valid_seq: dict[str, int] = {}
+        # Configured target ids (reseed / remove keep this in sync for gate).
+        self._webhook_known_targets: set[str] = set()
+        self._webhook_outbox_baselines_restored = False
         self._webhook_queue_lock = threading.Lock()
         self._webhook_queues: dict[str, queue.Queue] = {}
         # Throttles the multi-node aggregate reminder to one push per
@@ -363,6 +366,7 @@ class AlertManager:
         # place, so a removed target doesn't leak a queue + daemon thread +
         # _webhook_valid_seq entry forever.
         self._drop_webhook_delivery(target_id)
+        self._webhook_known_targets.discard(target_id)
         with self._webhook_incident_lock:
             self._webhook_valid_seq.pop(target_id, None)
         # Do NOT call _stop_red_alarm() here — evaluate_alarm() in MainWindow
@@ -391,6 +395,13 @@ class AlertManager:
     def set_outbox_dispatcher(self, dispatcher) -> None:
         self._outbox_dispatcher = dispatcher
 
+    def ensure_webhook_outbox_baselines(self) -> None:
+        """Restore per-target seq floors from durable outbox once after restart."""
+        if self._data_store is None or self._webhook_outbox_baselines_restored:
+            return
+        self._webhook_outbox_baselines_restored = True
+        self._restore_webhook_seq_from_outbox(None)
+
     def set_config(self, config) -> None:
         self._config = config
 
@@ -418,6 +429,7 @@ class AlertManager:
         if self._data_store is None:
             return 0
         target_map = {t["id"]: t for t in targets if isinstance(t, dict)}
+        self._webhook_known_targets = set(target_map.keys())
         tids = [tid for tid in target_map if tid not in paused_ids]
         if not tids:
             return 0
@@ -425,6 +437,18 @@ class AlertManager:
             open_inc = self._data_store.get_open_incidents(tids)
         except Exception:
             return 0
+
+        open_iid_map = {
+            tid: str(info.get("incident_id") or "").strip()
+            for tid, info in open_inc.items()
+        }
+        try:
+            self._data_store.drop_orphan_webhook_outbox(self._webhook_known_targets)
+            self._data_store.drop_stale_webhook_outbox_for_closed_incidents(
+                open_iid_map)
+            self._restore_webhook_seq_from_outbox(list(self._webhook_known_targets))
+        except Exception:
+            pass
 
         now = time.time()
         count = 0
@@ -473,7 +497,7 @@ class AlertManager:
             with self._webhook_incident_lock:
                 if tid in self._webhook_incidents:
                     continue
-                seq = self._alloc_incident_seq_locked(tid)
+                seq = self._reseed_incident_seq_locked(tid, iid or "")
                 inc = WebhookIncident(
                     tid=tid,
                     label=label,
@@ -504,6 +528,10 @@ class AlertManager:
             for tid in created_red:
                 inc = self._webhook_incidents.get(tid)
                 if inc is None:
+                    continue
+                iid = (inc.incident_id or "").strip()
+                if iid and self._data_store.has_pending_webhook_outbox_event(
+                        tid, "alert_red", incident_id=iid):
                     continue
                 pending = inc.trace_applicable and inc.last_trace_summary is None
                 self._push_alert_red_webhook(
@@ -647,6 +675,52 @@ class AlertManager:
         seq = self._webhook_valid_seq.get(tid, 0) + 1
         self._webhook_valid_seq[tid] = seq
         return seq
+
+    def _reseed_incident_seq_locked(self, tid: str, incident_id: str) -> int:
+        """Restore push seq after restart without invalidating pending outbox."""
+        pending_max = 0
+        if self._data_store and incident_id:
+            try:
+                pending_max = self._data_store.max_pending_incident_seq(
+                    tid, incident_id=incident_id)
+            except Exception:
+                pending_max = 0
+        cur = self._webhook_valid_seq.get(tid, 0)
+        if pending_max:
+            seq = max(cur, pending_max)
+            self._webhook_valid_seq[tid] = seq
+            return seq
+        return self._alloc_incident_seq_locked(tid)
+
+    def _restore_webhook_seq_from_outbox(
+            self, target_ids: list[str] | None) -> None:
+        """Raise per-target seq floor from durable outbox before reseed alloc."""
+        if self._data_store is None:
+            return
+        try:
+            seq_map = self._data_store.max_pending_incident_seq_by_target(
+                target_ids)
+        except Exception:
+            return
+        with self._webhook_incident_lock:
+            for tid, mx in seq_map.items():
+                if mx > self._webhook_valid_seq.get(tid, 0):
+                    self._webhook_valid_seq[tid] = int(mx)
+
+    def _webhook_target_known(self, tid: str) -> bool:
+        if not tid:
+            return False
+        if self._webhook_known_targets:
+            return tid in self._webhook_known_targets
+        cfg = self._config
+        if cfg is not None and hasattr(cfg, "get_targets"):
+            try:
+                return any(
+                    isinstance(t, dict) and t.get("id") == tid
+                    for t in cfg.get_targets())
+            except Exception:
+                pass
+        return True
 
     def _invalidate_incident_seq_locked(self, tid: str) -> None:
         """Bump seq so queued/in-flight webhooks for the closed flap drop."""
@@ -1187,44 +1261,57 @@ class AlertManager:
 
     # ── Webhook push ─────────────────────────────────────────────────
 
-    def _webhook_gate_ok(self, gate) -> bool:
+    def _webhook_gate_ok(self, gate, *, incident_id: str = "") -> bool:
         """Return True if a deferred webhook should still be delivered."""
         if gate is None:
             return True
         kind = gate[0]
+        row_iid = (incident_id or "").strip()
         with self._webhook_incident_lock:
             if kind == "reminder":
                 tid, seq = gate[1], gate[2]
+                if not self._webhook_target_known(tid):
+                    return False
                 if self._webhook_valid_seq.get(tid) != seq:
                     return False
                 inc = self._webhook_incidents.get(tid)
                 if inc is None or inc.push_seq != seq:
+                    return False
+                if row_iid and inc.incident_id and row_iid != inc.incident_id:
                     return False
                 if inc.acknowledged:
                     return False
                 return inc.current_status == "red"
             if kind == "incident":
                 tid, seq = gate[1], gate[2]
+                if not self._webhook_target_known(tid):
+                    return False
                 if self._webhook_valid_seq.get(tid) != seq:
                     return False
                 inc = self._webhook_incidents.get(tid)
                 if inc is None or inc.push_seq != seq:
+                    return False
+                if row_iid and inc.incident_id and row_iid != inc.incident_id:
                     return False
                 if inc.acknowledged:
                     return False
                 return inc.current_status in ("red", "orange")
             if kind == "alert_red":
                 # Allow delivery after close if still the current generation
-                # (queued before recovery on a short flap).  When the
-                # incident is no longer in memory (recovery / restart),
-                # allow if the queued seq is still >= the valid seq baseline.
+                # (queued before recovery on a short flap).  Recovery closes
+                # the incident without bumping seq, so cur == seq still holds.
                 tid, seq = gate[1], gate[2]
+                if not self._webhook_target_known(tid):
+                    return False
                 cur = self._webhook_valid_seq.get(tid, 0)
                 if cur == seq:
                     return True
                 inc = self._webhook_incidents.get(tid)
-                if inc is None and cur <= seq:
-                    return True
+                if inc is not None:
+                    if inc.push_seq != seq:
+                        return False
+                    if row_iid and inc.incident_id and row_iid != inc.incident_id:
+                        return False
                 return False
             if kind == "aggregate":
                 # Legacy gate path — aggregate reminders now rebuild at
@@ -1380,7 +1467,8 @@ class AlertManager:
         gate = self.outbox_row_gate(row)
         if gate is None:
             return True
-        return self._webhook_gate_ok(gate)
+        return self._webhook_gate_ok(
+            gate, incident_id=row.get("incident_id") or "")
 
     def outbox_row_gate(self, row: dict):
         """Return persisted gate tuple from an outbox row, or None."""
@@ -1517,7 +1605,8 @@ class AlertManager:
         gate = payload.get("gate")
         if gate is not None:
             gate_t = tuple(gate)
-            if not self._webhook_gate_ok(gate_t):
+            if not self._webhook_gate_ok(
+                    gate_t, incident_id=row.get("incident_id") or ""):
                 return None
 
         rebuild_spec = payload.get("rebuild_spec")

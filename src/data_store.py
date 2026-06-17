@@ -882,6 +882,143 @@ class DataStore:
                 (reason or "target_removed", now, target_id))
             conn.commit()
 
+    def max_pending_incident_seq_by_target(
+            self, target_ids: list[str] | None = None) -> dict[str, int]:
+        """Highest incident_seq among pending/sending rows, per target."""
+        clauses = [
+            "delivery_state IN ('pending', 'sending')",
+            "target_id != ''",
+            "incident_seq IS NOT NULL",
+        ]
+        params: list = []
+        if target_ids:
+            placeholders = ",".join("?" * len(target_ids))
+            clauses.append(f"target_id IN ({placeholders})")
+            params.extend(target_ids)
+        sql = (
+            "SELECT target_id, MAX(incident_seq) FROM webhook_outbox "
+            f"WHERE {' AND '.join(clauses)} GROUP BY target_id"
+        )
+        out: dict[str, int] = {}
+        try:
+            conn = self._read_conn()
+            for tid, mx in conn.execute(sql, params).fetchall():
+                if tid and mx is not None:
+                    out[str(tid)] = int(mx)
+        except Exception:
+            pass
+        return out
+
+    def max_pending_incident_seq(
+            self, target_id: str, *, incident_id: str = "") -> int:
+        """Max incident_seq for pending/sending rows on one target/incident."""
+        if not target_id:
+            return 0
+        clauses = [
+            "delivery_state IN ('pending', 'sending')",
+            "target_id=?",
+            "incident_seq IS NOT NULL",
+        ]
+        params: list = [target_id]
+        iid = (incident_id or "").strip()
+        if iid:
+            clauses.append("incident_id=?")
+            params.append(iid)
+        try:
+            conn = self._read_conn()
+            row = conn.execute(
+                f"SELECT MAX(incident_seq) FROM webhook_outbox "
+                f"WHERE {' AND '.join(clauses)}",
+                params).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            return 0
+
+    def has_pending_webhook_outbox_event(
+            self, target_id: str, event: str, *,
+            incident_id: str = "") -> bool:
+        if not target_id or not event:
+            return False
+        clauses = [
+            "delivery_state IN ('pending', 'sending')",
+            "target_id=?",
+            "event=?",
+        ]
+        params: list = [target_id, event]
+        iid = (incident_id or "").strip()
+        if iid:
+            clauses.append("incident_id=?")
+            params.append(iid)
+        try:
+            conn = self._read_conn()
+            row = conn.execute(
+                f"SELECT 1 FROM webhook_outbox WHERE {' AND '.join(clauses)} "
+                "LIMIT 1",
+                params).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    def drop_orphan_webhook_outbox(self, valid_target_ids: set[str]) -> int:
+        """Drop pending/sending rows whose target is no longer configured."""
+        if not valid_target_ids:
+            return 0
+        now = time.time()
+        placeholders = ",".join("?" * len(valid_target_ids))
+        params = list(valid_target_ids) + [now]
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            cur = conn.execute(
+                "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                "last_error='target_orphan', updated_at=? "
+                "WHERE delivery_state IN ('pending', 'sending') "
+                "AND target_id != '' "
+                f"AND target_id NOT IN ({placeholders})",
+                [now] + list(valid_target_ids))
+            conn.commit()
+            return cur.rowcount
+
+    def drop_stale_webhook_outbox_for_closed_incidents(
+            self, open_incident_by_target: dict[str, str]) -> int:
+        """Drop gated rows that no longer match the current open incident."""
+        now = time.time()
+        gated = ("alert_red", "alert_reminder", "diagnostic_update")
+        dropped = 0
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            rows = conn.execute(
+                "SELECT delivery_id, target_id, incident_id, event "
+                "FROM webhook_outbox "
+                "WHERE delivery_state IN ('pending', 'sending') "
+                "AND target_id != ''").fetchall()
+            for delivery_id, tid, iid, event in rows:
+                tid = tid or ""
+                iid = iid or ""
+                event = event or ""
+                if event not in gated:
+                    continue
+                open_iid = (open_incident_by_target.get(tid) or "").strip()
+                stale = False
+                if open_iid:
+                    if iid and iid != open_iid:
+                        stale = True
+                else:
+                    # No open incident: reminders/diagnostics are never valid.
+                    # alert_red may still belong to a short flap awaiting delivery.
+                    if event in ("alert_reminder", "diagnostic_update"):
+                        stale = True
+                if not stale:
+                    continue
+                cur = conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                    "last_error='stale_incident_on_restart', updated_at=? "
+                    "WHERE delivery_id=? "
+                    "AND delivery_state IN ('pending', 'sending')",
+                    (now, delivery_id))
+                dropped += cur.rowcount
+            conn.commit()
+        return dropped
+
     def get_webhook_deliveries(
             self, *, incident_id: str | None = None,
             target_id: str | None = None, limit: int = 100) -> list[dict]:

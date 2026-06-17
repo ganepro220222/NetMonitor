@@ -48,6 +48,7 @@ class WebhookOutboxDispatcher:
             return
         ds = self._am._data_store
         if ds is not None:
+            self._am.ensure_webhook_outbox_baselines()
             ds.recover_orphaned_sending_webhook_outbox()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="webhook-outbox-dispatch")
@@ -76,6 +77,7 @@ class WebhookOutboxDispatcher:
         ds = am._data_store
         if ds is None or not am._webhook_configured():
             return
+        am.ensure_webhook_outbox_baselines()
         now = time.time()
         ds.recover_stale_sending_webhook_outbox(now, SENDING_LEASE_SEC)
         ds.drop_red_blocked_closed_summary(now, CLOSED_SUMMARY_DELAY_SEC)
