@@ -94,7 +94,8 @@ def test_source_drop_red_blocked_closed_summary():
         wo_src = f.read()
     ok = (
         "def drop_red_blocked_closed_summary" in ds_src
-        and "drop_red_blocked_closed_summary(now" in wo_src
+        and "drop_red_blocked_closed_summary" in wo_src
+        and "CLOSED_SUMMARY_DELAY_SEC" in wo_src
     )
     print(f"Bug163 source unblock before fetch -> {ok}")
     return ok

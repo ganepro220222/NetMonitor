@@ -791,6 +791,10 @@ class AlertManager:
         "alert_red", "alert_reminder", "diagnostic_update", "recovery",
         "incident_closed_summary",
     })
+    _KNOWN_WEBHOOK_OUTBOX_EVENTS = frozenset({
+        "alert_red", "alert_reminder", "alert_reminder_aggregate",
+        "diagnostic_update", "recovery", "incident_closed_summary",
+    })
 
     def _parse_outbox_gate(self, gate) -> tuple | None | bool:
         """Return parsed gate tuple, None if absent, False if malformed."""
@@ -829,14 +833,85 @@ class AlertManager:
                 return False
         return False
 
-    def _outbox_row_target_ok(self, row: dict, *, event: str = "") -> bool:
+    def _outbox_row_target_ok(
+            self, row: dict, *, payload_event: str = "") -> bool:
         tid = (row.get("target_id") or "").strip()
         if not tid:
             return True
-        ev = (event or row.get("event") or "").strip()
-        if ev not in self._TARGET_GATED_OUTBOX_EVENTS:
-            return True
-        return self._webhook_target_known(tid)
+        row_ev = (row.get("event") or "").strip()
+        payload_ev = (payload_event or "").strip()
+        if row_ev in self._TARGET_GATED_OUTBOX_EVENTS:
+            if not self._webhook_target_known(tid):
+                return False
+        if payload_ev in self._TARGET_GATED_OUTBOX_EVENTS:
+            if not self._webhook_target_known(tid):
+                return False
+        if row_ev and payload_ev and row_ev != payload_ev:
+            if (row_ev in self._TARGET_GATED_OUTBOX_EVENTS
+                    or payload_ev in self._TARGET_GATED_OUTBOX_EVENTS):
+                return False
+        if payload_ev and payload_ev not in self._KNOWN_WEBHOOK_OUTBOX_EVENTS:
+            return False
+        return True
+
+    def _outbox_row_event_mismatch(self, row: dict, payload: dict) -> bool:
+        row_ev = (row.get("event") or "").strip()
+        payload_ev = (payload.get("event") or "").strip()
+        if not row_ev or not payload_ev:
+            return False
+        return row_ev != payload_ev
+
+    def _is_recovery_outbox_row(self, row: dict, payload: dict) -> bool:
+        row_ev = (row.get("event") or "").strip()
+        payload_ev = (payload.get("event") or "").strip()
+        return row_ev == "recovery" or payload_ev == "recovery"
+
+    def _recovery_closed_summary_red(self, row: dict):
+        ds = self._data_store
+        if ds is None:
+            return None
+        return ds.find_undelivered_alert_red(
+            row.get("order_key") or "",
+            row.get("incident_id") or "",
+            exclude_id=row.get("delivery_id") or "",
+        )
+
+    def _recovery_closed_summary_eligible(
+            self, row: dict, payload: dict, *, now: float,
+            red: dict | None = None) -> bool:
+        if self._outbox_row_event_mismatch(row, payload):
+            return False
+        if not self._is_recovery_outbox_row(row, payload):
+            return False
+        red = red if red is not None else self._recovery_closed_summary_red(row)
+        if not red or red.get("delivery_state") == "delivered":
+            return False
+        age = now - float(red.get("first_queued_ts") or now)
+        superseded = (
+            red.get("last_error") == "superseded_by_closed_summary"
+            or red.get("delivery_state") == "dropped_stale"
+        )
+        return age >= CLOSED_SUMMARY_DELAY_SEC or superseded
+
+    def _prepare_recovery_closed_summary(
+            self, row: dict, payload: dict, now: float):
+        if not self._is_recovery_outbox_row(row, payload):
+            return None
+        ds = self._data_store
+        if ds is None:
+            return None
+        red = self._recovery_closed_summary_red(row)
+        if not self._recovery_closed_summary_eligible(
+                row, payload, now=now, red=red):
+            return None
+        if red.get("delivery_state") not in ("dropped_stale", "delivered"):
+            ds.finish_webhook_outbox(
+                red["delivery_id"],
+                state="dropped_stale",
+                error="superseded_by_closed_summary",
+                now=now,
+            )
+        return self._build_closed_summary_delivery(payload, red, now)
 
     def _invalidate_incident_seq_locked(self, tid: str) -> None:
         """Bump seq so queued/in-flight webhooks for the closed flap drop."""
@@ -1599,7 +1674,10 @@ class AlertManager:
         if gate is False:
             return False
         if gate is None:
-            return self._outbox_row_target_ok(row, event=event)
+            if self._recovery_closed_summary_eligible(
+                    row, payload, now=time.time()):
+                return True
+            return self._outbox_row_target_ok(row, payload_event=event)
         return self._webhook_gate_ok(
             gate, incident_id=row.get("incident_id") or "")
 
@@ -1729,7 +1807,6 @@ class AlertManager:
     def prepare_outbox_delivery(self, row: dict, now: float):
         """Resolve a persisted outbox row into a send-ready payload."""
         import json as _json
-        ds = self._data_store
         try:
             payload = _json.loads(row.get("payload_json") or "{}")
         except Exception:
@@ -1739,11 +1816,17 @@ class AlertManager:
         parsed_gate = self._parse_outbox_gate(payload.get("gate"))
         if parsed_gate is False:
             return None
+
+        closed_summary = self._prepare_recovery_closed_summary(
+            row, payload, now)
+        if closed_summary is not None:
+            return closed_summary
+
         if parsed_gate is not None:
             if not self._webhook_gate_ok(
                     parsed_gate, incident_id=row.get("incident_id") or ""):
                 return None
-        elif not self._outbox_row_target_ok(row, event=event):
+        elif not self._outbox_row_target_ok(row, payload_event=event):
             return None
 
         rebuild_spec = payload.get("rebuild_spec")
@@ -1754,30 +1837,6 @@ class AlertManager:
             extra, message, target = rebuilt
             payload = {**payload, "extra": extra, "message": message,
                        "target": target}
-
-        if event == "recovery" and ds is not None:
-            red = ds.find_undelivered_alert_red(
-                row.get("order_key") or "",
-                row.get("incident_id") or "",
-                exclude_id=row.get("delivery_id") or "",
-            )
-            if red and red.get("delivery_state") != "delivered":
-                age = now - float(red.get("first_queued_ts") or now)
-                superseded = (
-                    red.get("last_error") == "superseded_by_closed_summary"
-                    or red.get("delivery_state") == "dropped_stale"
-                )
-                if age >= CLOSED_SUMMARY_DELAY_SEC or superseded:
-                    if red.get("delivery_state") not in (
-                            "dropped_stale", "delivered"):
-                        ds.finish_webhook_outbox(
-                            red["delivery_id"],
-                            state="dropped_stale",
-                            error="superseded_by_closed_summary",
-                            now=now,
-                        )
-                    return self._build_closed_summary_delivery(
-                        payload, red, now)
 
         event_ts = float(payload.get("event_ts") or row.get("event_ts") or now)
         event_ts_str = time.strftime(

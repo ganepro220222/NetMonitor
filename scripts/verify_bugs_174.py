@@ -138,7 +138,8 @@ def test_deleted_target_alert_red_blocked():
 
 
 def test_short_flap_alert_red_still_delivers():
-    a, disp, _ = make_alerter()
+    a, disp, _ = make_alerter(
+        targets=[{"id": "t", "label": "GW", "ip": "10.0.0.1"}])
     calls = []
     flush = install_push_capture(a, calls, disp)
     a.on_status_change("t", "GW", "10.0.0.1", "red")

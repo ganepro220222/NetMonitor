@@ -199,6 +199,30 @@ def test_stale_known_cache_cleared_on_config_failure():
     return ok
 
 
+def test_row_payload_event_mismatch_deleted():
+    cases = [
+        ("row_alert_payload_unknown_no_gate", "alert_red", "unknown_event"),
+        ("row_recovery_payload_unknown_no_gate", "recovery", "unknown_event"),
+    ]
+    ok = True
+    for did, row_event, payload_event in cases:
+        ds, _ = _mk_store()
+        _enqueue(
+            ds, delivery_id=did, event=row_event,
+            payload_event=payload_event, gate=None)
+        a, disp, _ = make_alerter(ds=ds)
+        _send, tick, calls, exc = _tick_capture(a, disp, ds, did)
+        tick()
+        state, err = _state(ds, did)
+        case_ok = not calls and not exc and state == "dropped_stale"
+        ok = ok and case_ok
+        print(
+            f"  {did} exc={exc} calls={calls} state={state!r} err={err!r} "
+            f"-> {case_ok}")
+    print(f"Bug180 row/payload event mismatch fail-closed -> {ok}")
+    return ok
+
+
 def main():
     results = [
         ("ungated_no_cfg", test_ungated_deleted_no_get_targets()),
@@ -208,6 +232,7 @@ def main():
         ("malformed_kinds", test_malformed_gate_fail_open_kinds()),
         ("recovery_gate", test_recovery_has_gate_on_status_change()),
         ("stale_cache", test_stale_known_cache_cleared_on_config_failure()),
+        ("event_mismatch", test_row_payload_event_mismatch_deleted()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:
