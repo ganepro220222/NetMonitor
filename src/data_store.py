@@ -636,8 +636,8 @@ class DataStore:
                                         delay_sec: float) -> int:
         """Drop head blockers preventing due recovery past closed-summary delay.
 
-        When alert_red or diagnostic_update is in long backoff
-        (next_attempt_ts in the future) it still occupies head-of-line,
+        When alert_red, diagnostic_update, or alert_reminder is in long
+        backoff (next_attempt_ts in the future) it still occupies head-of-line,
         preventing recovery from being fetched.  If a matching recovery row
         is due and the incident is old enough, drop stale blockers so
         closed-summary can proceed.
@@ -693,7 +693,7 @@ class DataStore:
                 dropped += cur.rowcount
 
             while True:
-                diag_blockers = conn.execute(
+                stale_blockers = conn.execute(
                     """
                     WITH head AS (
                         SELECT order_key, MIN(id) AS min_id
@@ -704,16 +704,16 @@ class DataStore:
                     SELECT o.delivery_id, o.order_key, o.incident_id
                     FROM webhook_outbox o
                     JOIN head h ON o.order_key = h.order_key AND o.id = h.min_id
-                    WHERE o.event = 'diagnostic_update'
+                    WHERE o.event IN ('diagnostic_update', 'alert_reminder')
                       AND o.delivery_state = 'pending'
                       AND o.next_attempt_ts > ?
                     """,
                     (now,),
                 ).fetchall()
-                if not diag_blockers:
+                if not stale_blockers:
                     break
                 pass_dropped = 0
-                for delivery_id, order_key, incident_id in diag_blockers:
+                for delivery_id, order_key, incident_id in stale_blockers:
                     due_recovery = conn.execute(
                         "SELECT delivery_id FROM webhook_outbox "
                         "WHERE event='recovery' AND order_key=? "
