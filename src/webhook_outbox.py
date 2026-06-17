@@ -80,7 +80,12 @@ class WebhookOutboxDispatcher:
         am.ensure_webhook_outbox_baselines()
         now = time.time()
         ds.recover_stale_sending_webhook_outbox(now, SENDING_LEASE_SEC)
-        ds.drop_red_blocked_closed_summary(now, CLOSED_SUMMARY_DELAY_SEC)
+        n_blocked = ds.drop_red_blocked_closed_summary(
+            now, CLOSED_SUMMARY_DELAY_SEC)
+        if n_blocked:
+            print(
+                f"[WebhookOutbox] closed-summary unblock: "
+                f"dropped {n_blocked} row(s)")
         rows = ds.fetch_deliverable_webhook_outbox(now, limit=50)
         for row in rows:
             self._deliver_one(row, now)
@@ -120,9 +125,10 @@ class WebhookOutboxDispatcher:
                     delivery_id=delivery_id,
                     gate=gate,
                 )
-            except WebhookDeliveryAborted:
+            except WebhookDeliveryAborted as e:
                 ds.finish_webhook_outbox(
-                    delivery_id, state="dropped_stale", error="gate_or_rebuild",
+                    delivery_id, state="dropped_stale",
+                    error=str(e) or "gate_or_rebuild",
                     now=now, only_if_sending=True)
                 return
             except Exception as e:

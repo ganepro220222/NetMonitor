@@ -420,6 +420,11 @@ class AlertManager:
         except Exception:
             return None
 
+    @staticmethod
+    def _log_outbox_cleanup(label: str, count: int) -> None:
+        if count:
+            print(f"[WebhookOutbox] {label}: dropped {count} row(s)")
+
     def _reconcile_webhook_outbox_targets(self) -> None:
         """Drop orphan/stale outbox rows using the current configured target set."""
         if self._data_store is None:
@@ -436,9 +441,13 @@ class AlertManager:
                         tid: str(info.get("incident_id") or "").strip()
                         for tid, info in open_inc.items()
                     }
-                    self._data_store.drop_orphan_webhook_outbox(cfg_ids)
-                    self._data_store.drop_stale_webhook_outbox_for_closed_incidents(
-                        open_iid_map)
+                    n_orphan = self._data_store.drop_orphan_webhook_outbox(cfg_ids)
+                    n_stale = (
+                        self._data_store
+                        .drop_stale_webhook_outbox_for_closed_incidents(
+                            open_iid_map))
+                    self._log_outbox_cleanup("reconcile orphan", n_orphan)
+                    self._log_outbox_cleanup("reconcile stale incident", n_stale)
             except Exception:
                 pass
 
@@ -468,7 +477,10 @@ class AlertManager:
         """
         if self._data_store is None:
             return 0
-        target_map = {t["id"]: t for t in targets if isinstance(t, dict)}
+        target_map = {
+            t["id"]: t for t in targets
+            if isinstance(t, dict) and t.get("id")
+        }
         self._webhook_known_targets = set(target_map.keys())
         self._webhook_known_targets_initialized = True
         tids = [tid for tid in target_map if tid not in paused_ids]
@@ -485,9 +497,12 @@ class AlertManager:
                 open_inc = {}
 
         try:
-            self._data_store.drop_orphan_webhook_outbox(self._webhook_known_targets)
-            self._data_store.drop_stale_webhook_outbox_for_closed_incidents(
+            n_orphan = self._data_store.drop_orphan_webhook_outbox(
+                self._webhook_known_targets)
+            n_stale = self._data_store.drop_stale_webhook_outbox_for_closed_incidents(
                 open_iid_map)
+            self._log_outbox_cleanup("reseed orphan", n_orphan)
+            self._log_outbox_cleanup("reseed stale incident", n_stale)
             self._restore_webhook_seq_from_outbox(list(self._webhook_known_targets))
         except Exception:
             pass
