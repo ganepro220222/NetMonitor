@@ -42,6 +42,32 @@ def _enqueue(ds, *, delivery_id, target_id="deleted", event="alert_red",
     )
 
 
+_SENTINEL = object()
+
+
+def _enqueue_malformed_event(
+        ds, *, delivery_id, target_id="deleted", row_event="",
+        payload_event=_SENTINEL, include_payload_event=True):
+    now = time.time()
+    payload = {
+        "target": "gone", "ip": "1.2.3.4", "status": "red",
+        "message": "stale", "event_ts": now,
+    }
+    if include_payload_event and payload_event is not _SENTINEL:
+        payload["event"] = payload_event
+    ds.enqueue_webhook_outbox(
+        delivery_id=delivery_id,
+        target_id=target_id,
+        incident_id="inc-old",
+        incident_seq=1,
+        event=row_event,
+        order_key=target_id,
+        payload=payload,
+        event_ts=now,
+        max_attempts=0,
+    )
+
+
 def _tick_capture(a, disp, ds, delivery_id):
     calls = []
     exc = []
@@ -223,6 +249,33 @@ def test_row_payload_event_mismatch_deleted():
     return ok
 
 
+def test_empty_event_malformed_fail_closed():
+    cases = [
+        ("empty_row_missing_payload_event", "", _SENTINEL, False),
+        ("empty_row_blank_payload_event", "", "", True),
+        ("row_alert_missing_payload_event", "alert_red", _SENTINEL, False),
+        ("row_unknown_missing_payload_event", "unknown_event", _SENTINEL, False),
+    ]
+    ok = True
+    for did, row_event, payload_event, include_evt in cases:
+        ds, _ = _mk_store()
+        _enqueue_malformed_event(
+            ds, delivery_id=did, row_event=row_event,
+            payload_event=payload_event,
+            include_payload_event=include_evt)
+        a, disp, _ = make_alerter(ds=ds)
+        _send, tick, calls, exc = _tick_capture(a, disp, ds, did)
+        tick()
+        state, err = _state(ds, did)
+        case_ok = not calls and not exc and state == "dropped_stale"
+        ok = ok and case_ok
+        print(
+            f"  {did} exc={exc} calls={calls} state={state!r} err={err!r} "
+            f"-> {case_ok}")
+    print(f"Bug181 empty event malformed fail-closed -> {ok}")
+    return ok
+
+
 def main():
     results = [
         ("ungated_no_cfg", test_ungated_deleted_no_get_targets()),
@@ -233,6 +286,7 @@ def main():
         ("recovery_gate", test_recovery_has_gate_on_status_change()),
         ("stale_cache", test_stale_known_cache_cleared_on_config_failure()),
         ("event_mismatch", test_row_payload_event_mismatch_deleted()),
+        ("empty_event", test_empty_event_malformed_fail_closed()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:

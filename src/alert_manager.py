@@ -840,6 +840,8 @@ class AlertManager:
             return True
         row_ev = (row.get("event") or "").strip()
         payload_ev = (payload_event or "").strip()
+        if not row_ev and not payload_ev:
+            return False
         if row_ev in self._TARGET_GATED_OUTBOX_EVENTS:
             if not self._webhook_target_known(tid):
                 return False
@@ -851,6 +853,8 @@ class AlertManager:
                     or payload_ev in self._TARGET_GATED_OUTBOX_EVENTS):
                 return False
         if payload_ev and payload_ev not in self._KNOWN_WEBHOOK_OUTBOX_EVENTS:
+            return False
+        if row_ev and row_ev not in self._KNOWN_WEBHOOK_OUTBOX_EVENTS:
             return False
         return True
 
