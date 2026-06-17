@@ -145,16 +145,14 @@ class WebhookOutboxDispatcher:
                 ds.finish_webhook_outbox(
                     delivery_id, state="dropped_stale", error="gate_or_rebuild",
                     now=now, only_if_sending=True)
+                if event == "incident_closed_summary":
+                    self._supersede_red_for_closed_summary(ds, meta, now)
                 return
 
             ds.finish_webhook_outbox(
                 delivery_id, state="delivered", error="", now=now,
                 attempt_count=attempt, only_if_sending=True)
-            supersede_red_id = meta.get("supersede_red_id")
-            if supersede_red_id:
-                ds.finish_webhook_outbox(
-                    supersede_red_id, state="dropped_stale",
-                    error="superseded_by_closed_summary", now=now)
+            self._supersede_red_for_closed_summary(ds, meta, now)
         finally:
             # The row has left 'sending' (delivered / dropped_stale / pending),
             # so no concurrent ACK/pause/remove can target it now.  Reclaim its
@@ -162,6 +160,14 @@ class WebhookOutboxDispatcher:
             # leaks a _webhook_send_epochs / _webhook_send_cancelled entry
             # forever (delivery_ids are unique uuid4, never reused).
             self._am.release_outbox_send_tracking(delivery_id)
+
+    @staticmethod
+    def _supersede_red_for_closed_summary(ds, meta: dict, now: float) -> None:
+        supersede_red_id = meta.get("supersede_red_id")
+        if supersede_red_id:
+            ds.finish_webhook_outbox(
+                supersede_red_id, state="dropped_stale",
+                error="superseded_by_closed_summary", now=now)
 
     def _handle_failure(self, row: dict, now: float, err: str) -> None:
         ds = self._am._data_store
