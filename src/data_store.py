@@ -634,17 +634,19 @@ class DataStore:
 
     def drop_red_blocked_closed_summary(self, now: float,
                                         delay_sec: float) -> int:
-        """Drop head alert_red rows blocking due recovery past closed-summary delay.
+        """Drop head blockers preventing due recovery past closed-summary delay.
 
-        When alert_red is in long backoff (next_attempt_ts in the future) it
-        still occupies head-of-line, preventing recovery from being fetched.
-        If the red has been pending longer than delay_sec and a matching
-        recovery row is due, drop the red so closed-summary can proceed.
+        When alert_red or diagnostic_update is in long backoff
+        (next_attempt_ts in the future) it still occupies head-of-line,
+        preventing recovery from being fetched.  If a matching recovery row
+        is due and the incident is old enough, drop stale blockers so
+        closed-summary can proceed.
         """
         now = float(now)
         delay_sec = float(delay_sec)
         with self._outbox_lock:
             conn = self._outbox_write_conn()
+            dropped = 0
             blockers = conn.execute(
                 """
                 WITH head AS (
@@ -663,7 +665,6 @@ class DataStore:
                 """,
                 (now, now, delay_sec),
             ).fetchall()
-            dropped = 0
             for delivery_id, order_key, incident_id in blockers:
                 due_recovery = conn.execute(
                     "SELECT 1 FROM webhook_outbox "
@@ -690,6 +691,63 @@ class DataStore:
                         (now, now, order_key, incident_id or "", now),
                     )
                 dropped += cur.rowcount
+
+            while True:
+                diag_blockers = conn.execute(
+                    """
+                    WITH head AS (
+                        SELECT order_key, MIN(id) AS min_id
+                        FROM webhook_outbox
+                        WHERE delivery_state IN ('pending', 'sending')
+                        GROUP BY order_key
+                    )
+                    SELECT o.delivery_id, o.order_key, o.incident_id
+                    FROM webhook_outbox o
+                    JOIN head h ON o.order_key = h.order_key AND o.id = h.min_id
+                    WHERE o.event = 'diagnostic_update'
+                      AND o.delivery_state = 'pending'
+                      AND o.next_attempt_ts > ?
+                    """,
+                    (now,),
+                ).fetchall()
+                if not diag_blockers:
+                    break
+                pass_dropped = 0
+                for delivery_id, order_key, incident_id in diag_blockers:
+                    due_recovery = conn.execute(
+                        "SELECT delivery_id FROM webhook_outbox "
+                        "WHERE event='recovery' AND order_key=? "
+                        "AND incident_id=? AND delivery_state='pending' "
+                        "AND next_attempt_ts <= ? "
+                        "LIMIT 1",
+                        (order_key, incident_id or "", now),
+                    ).fetchone()
+                    if not due_recovery:
+                        continue
+                    blocking_red = conn.execute(
+                        "SELECT 1 FROM webhook_outbox "
+                        "WHERE event='alert_red' AND order_key=? "
+                        "AND incident_id=? "
+                        "AND delivery_state IN ('pending', 'sending') "
+                        "AND id < (SELECT id FROM webhook_outbox "
+                        "WHERE delivery_id=? LIMIT 1) "
+                        "LIMIT 1",
+                        (order_key, incident_id or "", delivery_id),
+                    ).fetchone()
+                    if blocking_red:
+                        continue
+                    cur = conn.execute(
+                        "UPDATE webhook_outbox SET "
+                        "delivery_state='dropped_stale', "
+                        "last_error='superseded_by_closed_summary', "
+                        "updated_at=? "
+                        "WHERE delivery_id=? AND delivery_state='pending'",
+                        (now, delivery_id),
+                    )
+                    pass_dropped += cur.rowcount
+                dropped += pass_dropped
+                if not pass_dropped:
+                    break
             conn.commit()
             return dropped
 
