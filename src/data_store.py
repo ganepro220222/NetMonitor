@@ -677,7 +677,7 @@ class DataStore:
                     continue
                 cur = conn.execute(
                     "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
-                    "last_error='superseded_by_closed_summary', updated_at=? "
+                    "last_error='unblocked_for_closed_summary', updated_at=? "
                     "WHERE delivery_id=? AND delivery_state='pending'",
                     (now, delivery_id),
                 )

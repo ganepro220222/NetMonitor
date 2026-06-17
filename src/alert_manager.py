@@ -908,13 +908,6 @@ class AlertManager:
         if not self._recovery_closed_summary_eligible(
                 row, payload, now=now, red=red):
             return None
-        if red.get("delivery_state") not in ("dropped_stale", "delivered"):
-            ds.finish_webhook_outbox(
-                red["delivery_id"],
-                state="dropped_stale",
-                error="superseded_by_closed_summary",
-                now=now,
-            )
         return self._build_closed_summary_delivery(payload, red, now)
 
     def _invalidate_incident_seq_locked(self, tid: str) -> None:
@@ -1656,6 +1649,9 @@ class AlertManager:
         message = (
             "该故障曾发生但首次告警推送失败，现补发闭环信息"
         )
+        meta = {"event_ts": recovery_payload.get("event_ts") or now}
+        if red_row and red_row.get("delivery_id"):
+            meta["supersede_red_id"] = red_row["delivery_id"]
         return (
             "incident_closed_summary",
             target,
@@ -1663,7 +1659,7 @@ class AlertManager:
             "green",
             message,
             closed,
-            {"event_ts": recovery_payload.get("event_ts") or now},
+            meta,
         )
 
     def outbox_row_gate_ok(self, row: dict) -> bool:
@@ -1821,17 +1817,19 @@ class AlertManager:
         if parsed_gate is False:
             return None
 
+        if parsed_gate is not None:
+            if not self._webhook_gate_ok(
+                    parsed_gate, incident_id=row.get("incident_id") or ""):
+                return None
+
         closed_summary = self._prepare_recovery_closed_summary(
             row, payload, now)
         if closed_summary is not None:
             return closed_summary
 
-        if parsed_gate is not None:
-            if not self._webhook_gate_ok(
-                    parsed_gate, incident_id=row.get("incident_id") or ""):
+        if parsed_gate is None:
+            if not self._outbox_row_target_ok(row, payload_event=event):
                 return None
-        elif not self._outbox_row_target_ok(row, payload_event=event):
-            return None
 
         rebuild_spec = payload.get("rebuild_spec")
         if rebuild_spec and rebuild_spec.get("type") == "aggregate":

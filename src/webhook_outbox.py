@@ -150,6 +150,11 @@ class WebhookOutboxDispatcher:
             ds.finish_webhook_outbox(
                 delivery_id, state="delivered", error="", now=now,
                 attempt_count=attempt, only_if_sending=True)
+            supersede_red_id = meta.get("supersede_red_id")
+            if supersede_red_id:
+                ds.finish_webhook_outbox(
+                    supersede_red_id, state="dropped_stale",
+                    error="superseded_by_closed_summary", now=now)
         finally:
             # The row has left 'sending' (delivered / dropped_stale / pending),
             # so no concurrent ACK/pause/remove can target it now.  Reclaim its
