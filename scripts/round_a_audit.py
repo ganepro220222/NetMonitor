@@ -20,11 +20,15 @@ import tempfile
 import time
 from pathlib import Path
 
-# ── add src/ to path so we can import DataStore ───────────────────────
-SRC = Path(__file__).resolve().parent.parent / "src"
-sys.path.insert(0, str(SRC))
+# ── add repo root to path so we can import the src.* package ──────────
+# export_excel (and trace_policy) use package-qualified `from src.X`
+# imports, matching the rest of the codebase and the verify_bugs scripts.
+# Importing data_store top-level via src/-on-path left `src` unresolvable
+# inside export_excel (A5 raised "No module named 'src'").
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-from data_store import DataStore, _PROBE_OK_SQL, _PROBE_LAT_OK_SQL
+from src.data_store import DataStore, _PROBE_OK_SQL, _PROBE_LAT_OK_SQL
 
 # ── helpers ───────────────────────────────────────────────────────────
 PASS = 0

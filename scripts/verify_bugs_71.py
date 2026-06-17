@@ -111,8 +111,11 @@ def test_alert_timeline_ms_timestamps():
         ws = wb["告警时间线"]
         event_times = []
         for row in ws.iter_rows(min_row=2, values_only=True):
-            if row and row[3] and row[4] and "→" in str(row[4]):
-                event_times.append(str(row[3]))
+            # Detail rows: col E (idx 4) = 事件时间, col F (idx 5) = 状态变化.
+            # A 探测类型 column (col D) was later inserted ahead of these,
+            # shifting the time/transition one column right of the old layout.
+            if row and row[4] and row[5] and "→" in str(row[5]):
+                event_times.append(str(row[4]))
         ok = (
             len(event_times) == 2
             and event_times[0] != event_times[1]
