@@ -157,6 +157,10 @@ def main():
     alerter.set_data_store(data_store)
     alerter.set_config(config)
     alerter.set_trace_request_callback(web.request_traceroute_now)
+    try:
+        alerter.reseed_webhook_incidents(config.get_targets(), set())
+    except Exception:
+        pass
     from src.webhook_outbox import WebhookOutboxDispatcher
     webhook_dispatcher = WebhookOutboxDispatcher(alerter)
     alerter.set_outbox_dispatcher(webhook_dispatcher)

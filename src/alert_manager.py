@@ -214,6 +214,7 @@ class AlertManager:
         self._webhook_valid_seq: dict[str, int] = {}
         # Configured target ids (reseed / remove keep this in sync for gate).
         self._webhook_known_targets: set[str] = set()
+        self._webhook_known_targets_initialized = False
         self._webhook_outbox_baselines_restored = False
         self._webhook_queue_lock = threading.Lock()
         self._webhook_queues: dict[str, queue.Queue] = {}
@@ -243,6 +244,7 @@ class AlertManager:
                          target_ip: str, new_status: str, *,
                          ping_type: str | None = None,
                          failure_reason: str | None = None):
+        self._webhook_known_targets.add(target_id)
         """状态颜色发生变化时由主窗口调用，判断是否触发声音和通知。
 
         self.enabled controls AUDIO ONLY (sound files, red-alarm loop).
@@ -396,11 +398,49 @@ class AlertManager:
         self._outbox_dispatcher = dispatcher
 
     def ensure_webhook_outbox_baselines(self) -> None:
-        """Restore per-target seq floors from durable outbox once after restart."""
+        """Restore seq floors and reconcile orphan outbox rows once after restart."""
         if self._data_store is None or self._webhook_outbox_baselines_restored:
             return
         self._webhook_outbox_baselines_restored = True
+        try:
+            self._reconcile_webhook_outbox_targets()
+        except Exception:
+            pass
         self._restore_webhook_seq_from_outbox(None)
+
+    def _config_target_ids(self) -> set[str] | None:
+        cfg = self._config
+        if cfg is None or not hasattr(cfg, "get_targets"):
+            return None
+        try:
+            return {
+                t["id"] for t in cfg.get_targets()
+                if isinstance(t, dict) and t.get("id")
+            }
+        except Exception:
+            return None
+
+    def _reconcile_webhook_outbox_targets(self) -> None:
+        """Drop orphan/stale outbox rows using the current configured target set."""
+        if self._data_store is None:
+            return
+        cfg_ids = self._config_target_ids()
+        if cfg_ids is not None:
+            self._webhook_known_targets.update(cfg_ids)
+            self._webhook_known_targets_initialized = True
+            try:
+                open_iid_map: dict[str, str] = {}
+                if cfg_ids:
+                    open_inc = self._data_store.get_open_incidents(list(cfg_ids))
+                    open_iid_map = {
+                        tid: str(info.get("incident_id") or "").strip()
+                        for tid, info in open_inc.items()
+                    }
+                    self._data_store.drop_orphan_webhook_outbox(cfg_ids)
+                    self._data_store.drop_stale_webhook_outbox_for_closed_incidents(
+                        open_iid_map)
+            except Exception:
+                pass
 
     def set_config(self, config) -> None:
         self._config = config
@@ -430,18 +470,20 @@ class AlertManager:
             return 0
         target_map = {t["id"]: t for t in targets if isinstance(t, dict)}
         self._webhook_known_targets = set(target_map.keys())
+        self._webhook_known_targets_initialized = True
         tids = [tid for tid in target_map if tid not in paused_ids]
-        if not tids:
-            return 0
-        try:
-            open_inc = self._data_store.get_open_incidents(tids)
-        except Exception:
-            return 0
+        open_inc: dict = {}
+        open_iid_map: dict[str, str] = {}
+        if tids:
+            try:
+                open_inc = self._data_store.get_open_incidents(tids)
+                open_iid_map = {
+                    tid: str(info.get("incident_id") or "").strip()
+                    for tid, info in open_inc.items()
+                }
+            except Exception:
+                open_inc = {}
 
-        open_iid_map = {
-            tid: str(info.get("incident_id") or "").strip()
-            for tid, info in open_inc.items()
-        }
         try:
             self._data_store.drop_orphan_webhook_outbox(self._webhook_known_targets)
             self._data_store.drop_stale_webhook_outbox_for_closed_incidents(
@@ -449,6 +491,9 @@ class AlertManager:
             self._restore_webhook_seq_from_outbox(list(self._webhook_known_targets))
         except Exception:
             pass
+
+        if not tids:
+            return 0
 
         now = time.time()
         count = 0
@@ -710,17 +755,14 @@ class AlertManager:
     def _webhook_target_known(self, tid: str) -> bool:
         if not tid:
             return False
-        if self._webhook_known_targets:
-            return tid in self._webhook_known_targets
-        cfg = self._config
-        if cfg is not None and hasattr(cfg, "get_targets"):
-            try:
-                return any(
-                    isinstance(t, dict) and t.get("id") == tid
-                    for t in cfg.get_targets())
-            except Exception:
-                pass
-        return True
+        if tid in self._webhook_known_targets:
+            return True
+        if self._webhook_known_targets_initialized:
+            return False
+        cfg_ids = self._config_target_ids()
+        if cfg_ids is not None:
+            return tid in cfg_ids
+        return False
 
     def _invalidate_incident_seq_locked(self, tid: str) -> None:
         """Bump seq so queued/in-flight webhooks for the closed flap drop."""

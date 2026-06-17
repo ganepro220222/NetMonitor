@@ -155,6 +155,87 @@ def test_short_flap_alert_red_still_delivers():
     return ok
 
 
+def _enqueue_deleted_alert_red(ds, *, delivery_id="DEL"):
+    ds.enqueue_webhook_outbox(
+        delivery_id=delivery_id,
+        target_id="deleted",
+        incident_id="inc-old",
+        incident_seq=1,
+        event="alert_red",
+        order_key="deleted",
+        payload={
+            "event": "alert_red",
+            "target": "gone", "ip": "1.2.3.4", "status": "red",
+            "message": "stale", "gate": ["alert_red", "deleted", 1],
+            "event_ts": time.time(),
+        },
+        event_ts=time.time(),
+        max_attempts=0,
+    )
+
+
+def test_deleted_without_reseed():
+    ds, _ = _mk_store()
+    _enqueue_deleted_alert_red(ds)
+    a, disp, _ds = make_alerter(ds=ds)
+    calls = []
+
+    def _send(url, event, target, ip, status, message, ts_str,
+              extra=None, **kw):
+        calls.append((event, kw.get("delivery_id", "")))
+
+    a._send_webhook = staticmethod(_send)
+    disp._tick()
+    st = ds.get_webhook_outbox_delivery_state("DEL")
+    ok = (
+        st == "dropped_stale"
+        and not calls
+        and not a._webhook_gate_ok(("alert_red", "deleted", 1))
+    )
+    print(
+        f"Bug174 deleted_without_reseed -> {ok} "
+        f"sent={calls} state={st!r} known={a._webhook_known_targets} "
+        f"gate={a._webhook_gate_ok(('alert_red', 'deleted', 1))}")
+    return ok
+
+
+def test_deleted_with_empty_reseed():
+    ds, _ = _mk_store()
+    _enqueue_deleted_alert_red(ds, delivery_id="DEL-EMPTY")
+    a, disp, _ds = make_alerter(ds=ds)
+    calls = []
+    a._send_webhook = staticmethod(
+        lambda *a, **k: calls.append((a[1], k.get("delivery_id", ""))))
+    a.reseed_webhook_incidents([], set())
+    disp._tick()
+    st = ds.get_webhook_outbox_delivery_state("DEL-EMPTY")
+    ok = st == "dropped_stale" and not calls
+    print(
+        f"Bug174 deleted_with_empty_reseed -> {ok} "
+        f"sent={calls} state={st!r} known={a._webhook_known_targets}")
+    return ok
+
+
+def test_dispatcher_before_reseed():
+    ds, _ = _mk_store()
+    _enqueue_deleted_alert_red(ds, delivery_id="DEL-EARLY")
+    a, disp, _ds = make_alerter(
+        ds=ds,
+        targets=[{"id": "alive", "label": "OK", "ip": "10.0.0.2"}])
+    calls = []
+    a._send_webhook = staticmethod(
+        lambda *a, **k: calls.append((a[1], k.get("delivery_id", ""))))
+    disp.start()
+    time.sleep(0.08)
+    disp.stop()
+    st = ds.get_webhook_outbox_delivery_state("DEL-EARLY")
+    ok = st == "dropped_stale" and not calls
+    print(
+        f"Bug174 dispatcher_before_reseed -> {ok} "
+        f"sent={calls} state={st!r}")
+    return ok
+
+
 def test_deleted_target_failed_red_stops_retrying():
     ds, _ = _mk_store()
     a, disp, ds = make_alerter()
@@ -197,6 +278,9 @@ def main():
         ("stale_gates", test_restart_stale_gates_blocked()),
         ("no_dup_catchup", test_restart_open_incident_no_duplicate_catchup()),
         ("deleted_red", test_deleted_target_alert_red_blocked()),
+        ("deleted_no_reseed", test_deleted_without_reseed()),
+        ("deleted_empty_reseed", test_deleted_with_empty_reseed()),
+        ("dispatcher_before_reseed", test_dispatcher_before_reseed()),
         ("short_flap", test_short_flap_alert_red_still_delivers()),
         ("no_infinite_retry", test_deleted_target_failed_red_stops_retrying()),
     ]

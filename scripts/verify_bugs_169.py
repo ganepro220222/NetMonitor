@@ -40,6 +40,7 @@ def test_first_success_attempt_count():
     )
     with a._webhook_incident_lock:
         a._webhook_valid_seq["t1"] = 1
+        a._webhook_known_targets.add("t1")
 
     disp._tick()
     row = _row(ds, "first-success")
@@ -85,6 +86,7 @@ def test_retry_success_attempt_count():
     )
     with a._webhook_incident_lock:
         a._webhook_valid_seq["t2"] = 1
+        a._webhook_known_targets.add("t2")
 
     disp._tick()
     with ds._outbox_lock:

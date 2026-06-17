@@ -22,6 +22,7 @@ WEB_SERVER = os.path.join(ROOT, "src", "web_server.py")
 
 
 def _cfg(**overrides):
+    targets = overrides.pop("targets", [])
     base = {
         "webhook_url": "http://127.0.0.1:9/hook",
         "webhook_reminder_enabled": True,
@@ -33,7 +34,10 @@ def _cfg(**overrides):
         "webhook_trace_update_enabled": False,
     }
     base.update(overrides)
-    return type("C", (), {"get_setting": lambda _s, k: base.get(k)})()
+    return type("C", (), {
+        "get_setting": lambda _s, k: base.get(k),
+        "get_targets": lambda _s: list(targets),
+    })()
 
 
 def _mk_store():
@@ -232,7 +236,8 @@ def test_restart_pending_continues():
     ds.shutdown()
     ds2 = DataStore(db_path=os.path.join(td, "t.db"))
     ds2._schema_ready.wait(timeout=5)
-    a2, disp2 = _alerter(ds2)
+    a2, disp2 = _alerter(
+        ds2, targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     sent = _capture_send(a2)
     _tick(disp2, 3)
     ok = pending >= 1 and any(s["event"] == "alert_red" for s in sent)

@@ -961,20 +961,25 @@ class DataStore:
 
     def drop_orphan_webhook_outbox(self, valid_target_ids: set[str]) -> int:
         """Drop pending/sending rows whose target is no longer configured."""
-        if not valid_target_ids:
-            return 0
         now = time.time()
-        placeholders = ",".join("?" * len(valid_target_ids))
-        params = list(valid_target_ids) + [now]
         with self._outbox_lock:
             conn = self._outbox_write_conn()
-            cur = conn.execute(
-                "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
-                "last_error='target_orphan', updated_at=? "
-                "WHERE delivery_state IN ('pending', 'sending') "
-                "AND target_id != '' "
-                f"AND target_id NOT IN ({placeholders})",
-                [now] + list(valid_target_ids))
+            if valid_target_ids:
+                placeholders = ",".join("?" * len(valid_target_ids))
+                cur = conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                    "last_error='target_orphan', updated_at=? "
+                    "WHERE delivery_state IN ('pending', 'sending') "
+                    "AND target_id != '' "
+                    f"AND target_id NOT IN ({placeholders})",
+                    [now] + list(valid_target_ids))
+            else:
+                cur = conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                    "last_error='target_orphan', updated_at=? "
+                    "WHERE delivery_state IN ('pending', 'sending') "
+                    "AND target_id != ''",
+                    (now,))
             conn.commit()
             return cur.rowcount
 

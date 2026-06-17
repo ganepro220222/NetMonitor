@@ -64,7 +64,8 @@ def test_restart_recovers_stale_sending_head():
     ds.shutdown()
     ds2 = DataStore(db_path=db)
     ds2._schema_ready.wait(timeout=5)
-    a, disp, _ = make_alerter(ds=ds2)
+    a, disp, _ = make_alerter(
+        ds=ds2, targets=[{"id": "t", "label": "GW", "ip": "10.0.0.1"}])
     sent = []
 
     def _send(*_a, **_k):

@@ -14,6 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def default_cfg(**overrides):
+    targets = overrides.pop("targets", None)
     base = {
         "webhook_url": "http://127.0.0.1:9/hook",
         "webhook_reminder_enabled": True,
@@ -25,11 +26,21 @@ def default_cfg(**overrides):
         "webhook_trace_update_enabled": False,
     }
     base.update(overrides)
-    return type("C", (), {"get_setting": lambda _s, k: base.get(k)})()
+
+    class _Cfg:
+        def get_setting(self, k):
+            return base.get(k)
+
+        def get_targets(self):
+            return list(targets) if targets is not None else []
+
+    return _Cfg()
 
 
-def make_alerter(*, ds=None, assets_dir=None, **cfg_kw):
+def make_alerter(*, ds=None, assets_dir=None, targets=None, **cfg_kw):
     """AlertManager + DataStore + outbox dispatcher for webhook tests."""
+    if targets is not None:
+        cfg_kw["targets"] = targets
     if assets_dir is None:
         assets_dir = os.path.join(ROOT, "assets")
     if ds is None:
