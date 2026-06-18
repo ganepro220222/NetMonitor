@@ -1905,12 +1905,33 @@ class AlertManager:
         if self._outbox_dispatcher is not None:
             self._outbox_dispatcher.wake()
 
+    _LARK_FEISHU_WEBHOOK_HOSTS = frozenset({
+        "open.feishu.cn",
+        "open.larksuite.com",
+        "open.larkoffice.com",
+    })
+    _WECOM_DINGTALK_WEBHOOK_HOSTS = frozenset({
+        "qyapi.weixin.qq.com",
+        "oapi.dingtalk.com",
+    })
+
+    @staticmethod
+    def _webhook_url_hostname(url: str) -> str:
+        from urllib.parse import urlparse
+        try:
+            return (urlparse((url or "").strip()).hostname or "").lower()
+        except Exception:
+            return ""
+
     @staticmethod
     def _is_lark_feishu_webhook_url(url: str) -> bool:
-        url_l = (url or "").lower()
-        return any(
-            host in url_l
-            for host in ("feishu", "larkoffice", "larksuite"))
+        host = AlertManager._webhook_url_hostname(url)
+        return host in AlertManager._LARK_FEISHU_WEBHOOK_HOSTS
+
+    @staticmethod
+    def _is_wecom_dingtalk_webhook_url(url: str) -> bool:
+        host = AlertManager._webhook_url_hostname(url)
+        return host in AlertManager._WECOM_DINGTALK_WEBHOOK_HOSTS
 
     def _send_webhook(self, url, event, target, ip, status, message, ts_str,
                       extra=None, *, event_ts=None, queued_ts=None,
@@ -1947,11 +1968,9 @@ class AlertManager:
             event_ts=event_ts, queued_ts=queued_ts, sent_ts=sent_ts,
             attempt=attempt)
 
-        url_l = url.lower()
-        if self._is_lark_feishu_webhook_url(url_l):
+        if self._is_lark_feishu_webhook_url(url):
             payload = {"msg_type": "text", "content": {"text": text}}
-        elif ("qyapi" in url_l or "weixin" in url_l
-              or "dingtalk" in url_l or "oapi" in url_l):
+        elif self._is_wecom_dingtalk_webhook_url(url):
             payload = {"msgtype": "text", "text": {"content": text}}
         else:
             payload = {
