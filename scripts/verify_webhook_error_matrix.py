@@ -31,6 +31,18 @@ class ErrorHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
         _body = self.rfile.read(length)
+        if self.path.startswith("/chunked_oversize"):
+            # No Content-Length — chunked body exceeds webhook read cap.
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            parts = (b"x" * (600 * 1024), b"y" * (600 * 1024))
+            for chunk in parts:
+                self.wfile.write(f"{len(chunk):x}\r\n".encode())
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+            return
         if self.path.startswith("/close"):
             # Content-Length mismatch then socket close — IncompleteRead on Unix.
             self.wfile.write(
@@ -227,12 +239,34 @@ def test_truncated_response():
     return ok
 
 
+def test_chunked_oversize():
+    """Chunked response without Content-Length must not be treated delivered."""
+    srv = MockServer()
+    srv.start()
+    _a, disp, ds = _make_fixture(srv.url + "/chunked_oversize")
+    now = time.time()
+    _enqueue_one(ds, "DCHUNK", now)
+    _deliver_one(disp, "DCHUNK", now)
+    st = _row_state(ds, "DCHUNK")
+    srv.stop()
+    err = (st["last_error"] or "").lower()
+    ok = (
+        st["delivery_state"] == "pending"
+        and st["attempt_count"] > 0
+        and st["next_attempt_ts"] > now
+        and "too large" in err
+    )
+    print(f"  chunked oversize -> pending+error: {ok}  state={st}")
+    return ok
+
+
 def main():
     results = [
         ("500", test_500()),
         ("429", test_429()),
         ("refused", test_refused()),
         ("truncated_response", test_truncated_response()),
+        ("chunked_oversize", test_chunked_oversize()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:
