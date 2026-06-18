@@ -1779,9 +1779,13 @@ class AlertManager:
                 commit_epoch=commit_epoch)
             with _ORIGINAL_HTTP_OPEN(req, timeout=timeout):
                 pass
-            self._verify_outbox_send_commit(
-                delivery_id=delivery_id, gate=gate,
-                commit_epoch=commit_epoch)
+            try:
+                self._verify_outbox_send_commit(
+                    delivery_id=delivery_id, gate=gate,
+                    commit_epoch=commit_epoch)
+            except WebhookDeliveryAborted as e:
+                raise WebhookDeliveryAborted(
+                    str(e), side_effect_committed=True) from e
 
     def _commit_outbox_webhook_http(
             self, req, *, delivery_id: str = "", gate=None, timeout: int = 10):

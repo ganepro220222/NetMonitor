@@ -19,6 +19,10 @@ DIAGNOSTIC_MAX_ATTEMPTS = 8
 class WebhookDeliveryAborted(Exception):
     """Outbox delivery cancelled by ACK/pause/remove or gate before network send."""
 
+    def __init__(self, reason: str = "", *, side_effect_committed: bool = False):
+        super().__init__(reason)
+        self.side_effect_committed = side_effect_committed
+
 
 def compute_next_attempt_ts(attempt_count: int, now: float | None = None) -> float:
     """Return the next retry timestamp after a failed attempt."""
@@ -136,6 +140,9 @@ class WebhookOutboxDispatcher:
                     delivery_id, state="dropped_stale",
                     error=str(e) or "gate_or_rebuild",
                     now=now, only_if_sending=True)
+                if (event == "incident_closed_summary"
+                        and e.side_effect_committed):
+                    self._supersede_red_for_closed_summary(ds, meta, now)
                 return
             except Exception as e:
                 self._handle_failure(row, now, str(e))
