@@ -91,6 +91,8 @@ _SECTIONS = [
          "自动路由追踪快照的保留时长（7-365 天）。"),
         ("db_diag_retention_days",        "诊断历史保留天数",     "int", 7,  730,
          "ICMP / DNS 高级诊断结果的保留时长（7-730 天）。诊断结果体积较小，可较久保留。"),
+        ("db_webhook_outbox_retention_days", "Webhook 投递记录保留天数", "int", 7, 365,
+         "已送达/已丢弃/永久失败的 webhook 队列记录保留时长（7-365 天）。待投递记录不受此限制。"),
     ]),
 ]
 

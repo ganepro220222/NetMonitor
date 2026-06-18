@@ -149,7 +149,8 @@ class DataStore:
                  hourly_retention_days: int = 90,
                  alert_retention_days: int = 365,
                  traceroute_retention_days: int = 30,
-                 diag_retention_days: int = 180):
+                 diag_retention_days: int = 180,
+                 webhook_outbox_retention_days: int = 90):
 
         self._db_path                = db_path
         self._raw_retention_days          = raw_retention_days
@@ -163,6 +164,7 @@ class DataStore:
         # dns_diagnostic_history — the user has one knob for "diagnostic
         # history" rather than separate knobs per protocol.
         self._diag_retention_days          = diag_retention_days
+        self._webhook_outbox_retention_days = webhook_outbox_retention_days
 
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
@@ -387,13 +389,22 @@ class DataStore:
                          hourly: int | None = None,
                          alert: int | None = None,
                          traceroute: int | None = None,
-                         diag: int | None = None) -> None:
+                         diag: int | None = None,
+                         webhook_outbox: int | None = None) -> None:
         """Live-update retention thresholds without restarting the process."""
         if raw        is not None: self._raw_retention_days          = raw
         if hourly     is not None: self._hourly_retention_days        = hourly
         if alert      is not None: self._alert_retention_days         = alert
         if traceroute is not None: self._traceroute_retention_days    = traceroute
         if diag       is not None: self._diag_retention_days          = diag
+        if webhook_outbox is not None:
+            self._webhook_outbox_retention_days = webhook_outbox
+
+    def _webhook_ops_recent_cutoff(self, now: float | None = None) -> float:
+        """Recent window for ops stats / problem views (days, capped)."""
+        now = float(now or time.time())
+        window_days = min(7, max(1, int(self._webhook_outbox_retention_days)))
+        return now - window_days * 86400
 
     def get_cum_stats(self) -> dict:
         """
@@ -1060,11 +1071,12 @@ class DataStore:
         import json as _json
         conn = self._read_conn()
         now = time.time()
-        recent_cutoff = now - 7 * 86400
+        recent_cutoff = self._webhook_ops_recent_cutoff(now)
         try:
             rows = conn.execute(
                 "SELECT * FROM webhook_outbox "
-                "WHERE delivery_state IN ('pending', 'sending', 'failed_permanent') "
+                "WHERE delivery_state IN ('pending', 'sending') "
+                "OR (delivery_state='failed_permanent' AND updated_at>=?) "
                 "OR (delivery_state='dropped_stale' AND last_error!='' "
                 "    AND updated_at>=?) "
                 "ORDER BY "
@@ -1074,7 +1086,7 @@ class DataStore:
                 "  WHEN 'failed_permanent' THEN 2 "
                 "  ELSE 3 END, updated_at DESC "
                 "LIMIT ?",
-                (recent_cutoff, int(limit)),
+                (recent_cutoff, recent_cutoff, int(limit)),
             ).fetchall()
             out = []
             for row in rows:
@@ -1106,25 +1118,31 @@ class DataStore:
         return "; ".join(parts) if parts else "(empty)"
 
     def get_webhook_delivery_stats(self) -> dict:
+        """Operational delivery counts (recent terminals + all active rows)."""
         conn = self._read_conn()
+        recent_cutoff = self._webhook_ops_recent_cutoff()
         try:
             rows = conn.execute(
                 "SELECT delivery_state, COUNT(*) FROM webhook_outbox "
-                "GROUP BY delivery_state").fetchall()
+                "WHERE delivery_state IN ('pending', 'sending') "
+                "OR updated_at>=? "
+                "GROUP BY delivery_state",
+                (recent_cutoff,)).fetchall()
             return {st: cnt for st, cnt in rows}
         except Exception:
             return {}
 
     def get_last_webhook_failures(self, limit: int = 5) -> list[dict]:
         conn = self._read_conn()
+        recent_cutoff = self._webhook_ops_recent_cutoff()
         try:
             rows = conn.execute(
                 "SELECT delivery_id, target_id, event, delivery_state, "
                 "last_error, updated_at FROM webhook_outbox "
                 "WHERE delivery_state IN ('failed_permanent', 'pending') "
-                "AND last_error!='' "
+                "AND last_error!='' AND updated_at>=? "
                 "ORDER BY updated_at DESC LIMIT ?",
-                (int(limit),)).fetchall()
+                (recent_cutoff, int(limit))).fetchall()
             return [
                 {"delivery_id": r[0], "target_id": r[1], "event": r[2],
                  "state": r[3], "error": r[4], "updated_at": r[5]}
@@ -4646,6 +4664,23 @@ class DataStore:
                          (now - self._diag_retention_days * 86400,))
             conn.execute("DELETE FROM dns_diagnostic_history WHERE created_ts<?",
                          (now - self._diag_retention_days * 86400,))
+            self._cleanup_webhook_outbox(conn, now)
+
+    def _cleanup_webhook_outbox(self, conn, now: int) -> int:
+        """Delete terminal webhook_outbox rows older than retention cutoff."""
+        cutoff = now - int(self._webhook_outbox_retention_days) * 86400
+        cur = conn.execute(
+            "DELETE FROM webhook_outbox "
+            "WHERE delivery_state NOT IN ('pending', 'sending') "
+            "AND ("
+            "  (delivery_state='delivered' "
+            "   AND COALESCE(delivered_ts, updated_at)<?) "
+            "  OR (delivery_state IN ('dropped_stale', 'failed_permanent') "
+            "      AND updated_at<?)"
+            ")",
+            (cutoff, cutoff),
+        )
+        return cur.rowcount or 0
 
     def _read_conn(self) -> sqlite3.Connection:
         """

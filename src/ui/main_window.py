@@ -1412,7 +1412,8 @@ class MainWindow(ctk.CTk):
         engine_updates = {}
         retention_keys = {"db_raw_retention_days", "db_hourly_retention_days",
                           "db_alert_retention_days", "db_traceroute_retention_days",
-                          "db_diag_retention_days"}
+                          "db_diag_retention_days",
+                          "db_webhook_outbox_retention_days"}
         for key, value in changed.items():
             self.config.set_setting(key, value)
             if key not in retention_keys:
@@ -1428,6 +1429,7 @@ class MainWindow(ctk.CTk):
                 alert=changed.get("db_alert_retention_days"),
                 traceroute=changed.get("db_traceroute_retention_days"),
                 diag=changed.get("db_diag_retention_days"),
+                webhook_outbox=changed.get("db_webhook_outbox_retention_days"),
             )
         if "latency_warn_ms" in changed or "http_latency_warn_ms" in changed:
             # latency_warn_ms drives ICMP/TCP/DNS chart lines;

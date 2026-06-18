@@ -151,6 +151,8 @@ def main():
         traceroute_retention_days=int(
             config.get_setting("db_traceroute_retention_days") or 30),
         diag_retention_days=int(config.get_setting("db_diag_retention_days") or 180),
+        webhook_outbox_retention_days=int(
+            config.get_setting("db_webhook_outbox_retention_days") or 90),
     )
     web.set_data_store(data_store)
 
