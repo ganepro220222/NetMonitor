@@ -468,7 +468,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"RESULTS: {_passed} passed, {_failed} failed out of {total}")
     if _failed == 0:
-        print("✓  All checks passed")
+        print("All checks passed")
     else:
         print("⚠️  SOME CHECKS FAILED — review output above")
     return _failed
