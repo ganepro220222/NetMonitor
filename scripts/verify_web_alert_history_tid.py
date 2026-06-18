@@ -49,17 +49,26 @@ def _browser_hist_from_server(history_newest_first):
     return hist
 
 
-def _active_count(hist, *, use_tid):
+def _active_count(hist, *, use_tid, live_tids=None):
     last_st = {}
     for h in hist:
         if use_tid:
-            key = h.get("tid") or (h["label"] + "|" + h["ip"])
+            tid = h.get("tid")
+            if tid and live_tids is not None and tid not in live_tids:
+                continue
+            key = tid or (h["label"] + "|" + h["ip"])
             if key not in last_st:
                 last_st[key] = h["newSt"]
         else:
             key = h["label"] + "|" + h["ip"]
             last_st[key] = h["newSt"]
     return sum(1 for s in last_st.values() if s in ("red", "orange"))
+
+
+def _sse_init_history(w):
+    with w._lock:
+        live_tids = set(w._targets)
+        return [h for h in reversed(w._history) if h.get("tid") in live_tids]
 
 
 def _source_has_tid_fix():
@@ -78,6 +87,15 @@ def _source_has_tid_fix():
          'renderHist keys by tid with label|ip fallback'),
         ("if(!(keyinlastSt))" in compact,
          'renderHist keeps newest event per key'),
+        ("h.tid&&!(h.tidintargets)" in compact,
+         'renderHist ignores deleted tids for active count'),
+        ('self._history = [h for h in self._history if h.get("tid") != tid]'
+         in src,
+         'remove_target purges alert history for tid'),
+        ("hist=hist.filter(h=>h.tid!==msg.tid)" in compact,
+         'remove SSE drops hist rows for deleted tid'),
+        ("ifh.get(\"tid\")inlive_tids" in compact,
+         'SSE init history excludes deleted tids'),
     ]
     for passed, label in checks:
         print(f"    {label}: {'OK' if passed else 'FAIL'}")
@@ -112,7 +130,7 @@ def main():
 
     hist = _browser_hist_from_server(server_hist)
     active_old = _active_count(hist, use_tid=False)
-    active_new = _active_count(hist, use_tid=True)
+    active_new = _active_count(hist, use_tid=True, live_tids={tid})
 
     print(f"  browser_active_by_label_ip: {active_old} (legacy bug path)")
     print(f"  browser_active_by_tid: {active_new} (expected 0 after recovery)")
@@ -129,9 +147,35 @@ def main():
     _update(w2, tid="T2", label="stable", ip="10.0.0.2", status="green")
     with w2._lock:
         hist2 = _browser_hist_from_server(list(reversed(w2._history)))
-    stable_active = _active_count(hist2, use_tid=True)
+    stable_active = _active_count(hist2, use_tid=True, live_tids={"T2"})
     ok = ok and stable_active == 0
     print(f"  stable-label recovery active: {stable_active} (expected 0)")
+
+    # Delete while red: server history + SSE init + active count must not ghost.
+    w3 = WebServer(port=0)
+    w3._running = True
+    w3.set_data_store(_MockDS())
+    del_tid = "t-del"
+    _update(w3, tid=del_tid, label="deleted-while-red", ip="10.0.0.9", status="green")
+    _update(w3, tid=del_tid, label="deleted-while-red", ip="10.0.0.9", status="red",
+            probe_success=False)
+    w3.remove_target(del_tid)
+    with w3._lock:
+        targets_after = dict(w3._targets)
+        ghost_hist = [h for h in w3._history if h.get("tid") == del_tid]
+    init_hist = _sse_init_history(w3)
+    browser_hist = _browser_hist_from_server(init_hist)
+    delete_active = _active_count(browser_hist, use_tid=True, live_tids=set(targets_after))
+
+    print(f"targets_after_delete: {targets_after}")
+    print(f"sse_init_style_history: {init_hist}")
+    print(f"browser_unrecovered_count: {delete_active}")
+    print(f"expected_unrecovered_count_after_delete: 0")
+
+    ok = ok and del_tid not in targets_after
+    ok = ok and len(ghost_hist) == 0
+    ok = ok and init_hist == []
+    ok = ok and delete_active == 0
 
     src_ok = _source_has_tid_fix()
     ok = ok and src_ok

@@ -1992,7 +1992,7 @@ function renderHist(){
   // Count nodes whose LAST event is still orange/red (not yet recovered).
   // Raw event count inflates the number after recovery.
   const lastSt={};
-  hist.forEach(h=>{const key=h.tid||(h.label+'|'+h.ip);if(!(key in lastSt))lastSt[key]=h.newSt;});
+  hist.forEach(h=>{if(h.tid&&!(h.tid in targets))return;const key=h.tid||(h.label+'|'+h.ip);if(!(key in lastSt))lastSt[key]=h.newSt;});
   const active=Object.values(lastSt).filter(s=>s==='red'||s==='orange').length;
   hc.textContent=`（${hist.length}条${active?' · ⚠ '+active+'条未恢复':''}）`;
   body.innerHTML=hist.map(h=>{const os=st(h.oldSt),ns=st(h.newSt);
@@ -5807,8 +5807,9 @@ function connect(){
       document.getElementById('upd').textContent='历史已清空';return;}
     if(msg.type==='remove'){
       delete targets[msg.tid];
+      hist=hist.filter(h=>h.tid!==msg.tid);
       purgeDonutTarget(msg.tid);
-      renderCards();checkAlerts();
+      renderCards();checkAlerts();renderHist();
       const _statsTabRm=document.getElementById('tab-stats');
       if(_statsTabRm&&_statsTabRm.style.display!=='none'){
         buildBarCharts();
@@ -6707,6 +6708,7 @@ class WebServer:
             self._targets.pop(tid, None)
             self._paused.discard(tid)
             self._stats.pop(tid, None)
+            self._history = [h for h in self._history if h.get("tid") != tid]
             snap = self._build_scheduler_snapshot()
         # Tell scheduler immediately so it stops tracing the removed node.
         # Without this, if all nodes are deleted the scheduler keeps its stale
@@ -8533,7 +8535,9 @@ class WebServer:
                     # size during iteration, or partial-state init payloads).
                     with self._lock:
                         init_data = self._live_targets_snapshot()
-                        init_hist = list(reversed(self._history))
+                        live_tids = set(self._targets)
+                        init_hist = [h for h in reversed(self._history)
+                                     if h.get("tid") in live_tids]
                         # cum_stats may contain entries for deleted nodes;
                         # filtering here prevents "ghost" charts on the stats page.
                         init_stats = {tid: dict(s)
