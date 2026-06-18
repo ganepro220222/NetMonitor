@@ -429,11 +429,84 @@ class AlertManager:
         if count:
             print(f"[WebhookOutbox] {label}: dropped {count} row(s)")
 
+    def _config_target_map(self) -> dict[str, dict]:
+        cfg = self._config
+        if cfg is None or not hasattr(cfg, "get_targets"):
+            return {}
+        try:
+            return {
+                t["id"]: t for t in cfg.get_targets()
+                if isinstance(t, dict) and t.get("id")
+            }
+        except Exception:
+            return {}
+
+    def _config_target_entry(self, tid: str) -> dict | None:
+        return self._config_target_map().get(tid)
+
+    def _payload_identity_snapshot(self, payload: dict) -> tuple[str, str]:
+        label = payload.get("identity_label")
+        if label is None:
+            label = payload.get("target")
+        ip = payload.get("identity_ip")
+        if ip is None:
+            ip = payload.get("ip")
+        return (label or "", ip or "")
+
+    def _payload_has_identity_stamp(self, payload: dict) -> bool:
+        return (
+            "identity_gen" in payload
+            or "identity_label" in payload
+            or "identity_ip" in payload
+        )
+
+    def _webhook_payload_identity_ok(self, tid: str, payload: dict) -> bool:
+        """True when frozen payload identity still matches live target config."""
+        tid = (tid or "").strip()
+        if not tid:
+            return True
+        if not self._payload_has_identity_stamp(payload):
+            return True
+        cfg = self._config_target_entry(tid)
+        if cfg is None:
+            return False
+        snap_label, snap_ip = self._payload_identity_snapshot(payload)
+        if snap_label != cfg.get("label", "") or snap_ip != cfg.get("ip", ""):
+            return False
+        ds = self._data_store
+        stored_gen = payload.get("identity_gen")
+        if ds is not None and stored_gen is not None:
+            try:
+                return int(stored_gen) == ds.current_target_generation(tid)
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def on_target_identity_changed(self, target_id: str) -> None:
+        """Invalidate pending/sending webhooks after label/IP identity edit."""
+        if not target_id or self._data_store is None:
+            return
+        cfg = self._config_target_entry(target_id)
+        if cfg:
+            try:
+                self._data_store.drop_stale_webhook_outbox_for_identity(
+                    {target_id: cfg})
+            except Exception:
+                pass
+        with self._webhook_outbox_send_lock:
+            delivery_ids = self._data_store.list_sending_webhook_delivery_ids(
+                target_id)
+            for did in delivery_ids:
+                self._webhook_send_epochs[did] = (
+                    self._webhook_send_epochs.get(did, 0) + 1)
+                self._webhook_send_cancelled.add(did)
+
     def _reconcile_webhook_outbox_targets(self) -> None:
         """Drop orphan/stale outbox rows using the current configured target set."""
         if self._data_store is None:
             return
         cfg_ids = self._config_target_ids()
+        target_map = self._config_target_map()
         if cfg_ids is not None:
             self._webhook_known_targets = set(cfg_ids)
             self._webhook_known_targets_initialized = True
@@ -450,8 +523,11 @@ class AlertManager:
                     self._data_store
                     .drop_stale_webhook_outbox_for_closed_incidents(
                         open_iid_map))
+                n_identity = self._data_store.drop_stale_webhook_outbox_for_identity(
+                    target_map)
                 self._log_outbox_cleanup("reconcile orphan", n_orphan)
                 self._log_outbox_cleanup("reconcile stale incident", n_stale)
+                self._log_outbox_cleanup("reconcile stale identity", n_identity)
             except Exception:
                 pass
         else:
@@ -509,8 +585,11 @@ class AlertManager:
                 self._webhook_known_targets)
             n_stale = self._data_store.drop_stale_webhook_outbox_for_closed_incidents(
                 open_iid_map)
+            n_identity = self._data_store.drop_stale_webhook_outbox_for_identity(
+                target_map)
             self._log_outbox_cleanup("reseed orphan", n_orphan)
             self._log_outbox_cleanup("reseed stale incident", n_stale)
+            self._log_outbox_cleanup("reseed stale identity", n_identity)
             self._restore_webhook_seq_from_outbox(list(self._webhook_known_targets))
         except Exception:
             pass
@@ -1669,6 +1748,9 @@ class AlertManager:
             payload = _json.loads(row.get("payload_json") or "{}")
         except Exception:
             return False
+        tid = (row.get("target_id") or "").strip()
+        if tid and not self._webhook_payload_identity_ok(tid, payload):
+            return False
         event = payload.get("event") or row.get("event") or ""
         gate = self._parse_outbox_gate(payload.get("gate"))
         if gate is False:
@@ -1835,6 +1917,10 @@ class AlertManager:
             return None
 
         event = payload.get("event") or row.get("event") or ""
+        tid = (row.get("target_id") or "").strip()
+        if tid and not self._webhook_payload_identity_ok(tid, payload):
+            return None
+
         parsed_gate = self._parse_outbox_gate(payload.get("gate"))
         if parsed_gate is False:
             return None
@@ -1892,6 +1978,9 @@ class AlertManager:
         tid = order_key if order_key and order_key != "_aggregate_" else ""
         incident_id, incident_seq = self._resolve_outbox_incident(tid or None)
         event_ts = time.time()
+        identity_gen = 0
+        if tid and self._data_store is not None:
+            identity_gen = self._data_store.current_target_generation(tid)
         payload = {
             "event": event,
             "target": target,
@@ -1902,6 +1991,9 @@ class AlertManager:
             "gate": list(gate) if gate else None,
             "rebuild_spec": rebuild_spec,
             "event_ts": event_ts,
+            "identity_gen": identity_gen,
+            "identity_label": target,
+            "identity_ip": ip,
         }
         delivery_id = self._make_delivery_id()
         ok = order_key or tid or "_broadcast_"

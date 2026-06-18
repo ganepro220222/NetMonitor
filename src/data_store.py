@@ -1035,6 +1035,57 @@ class DataStore:
             conn.commit()
         return dropped
 
+    def drop_stale_webhook_outbox_for_identity(
+            self, target_map: dict[str, dict]) -> int:
+        """Drop pending/sending rows whose captured identity no longer matches."""
+        import json as _json
+        now = time.time()
+        dropped = 0
+        with self._outbox_lock:
+            conn = self._outbox_write_conn()
+            rows = conn.execute(
+                "SELECT delivery_id, target_id, payload_json "
+                "FROM webhook_outbox "
+                "WHERE delivery_state IN ('pending', 'sending') "
+                "AND target_id != ''").fetchall()
+            for delivery_id, tid, payload_json in rows:
+                tid = tid or ""
+                cfg = target_map.get(tid)
+                if not cfg:
+                    continue
+                label = cfg.get("label", "")
+                ip = cfg.get("ip", "")
+                try:
+                    payload = _json.loads(payload_json or "{}")
+                except Exception:
+                    continue
+                snap_label = payload.get("identity_label")
+                if snap_label is None:
+                    snap_label = payload.get("target")
+                snap_ip = payload.get("identity_ip")
+                if snap_ip is None:
+                    snap_ip = payload.get("ip")
+                snap_label = snap_label or ""
+                snap_ip = snap_ip or ""
+                stale = snap_label != label or snap_ip != ip
+                stored_gen = payload.get("identity_gen")
+                if not stale and stored_gen is not None:
+                    try:
+                        stale = int(stored_gen) != self.current_target_generation(tid)
+                    except (TypeError, ValueError):
+                        stale = True
+                if not stale:
+                    continue
+                cur = conn.execute(
+                    "UPDATE webhook_outbox SET delivery_state='dropped_stale', "
+                    "last_error='stale_identity', updated_at=? "
+                    "WHERE delivery_id=? "
+                    "AND delivery_state IN ('pending', 'sending')",
+                    (now, delivery_id))
+                dropped += cur.rowcount
+            conn.commit()
+        return dropped
+
     def get_webhook_deliveries(
             self, *, incident_id: str | None = None,
             target_id: str | None = None, limit: int = 100) -> list[dict]:

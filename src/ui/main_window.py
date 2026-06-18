@@ -2154,6 +2154,20 @@ class MainWindow(ctk.CTk):
 
         self._sync_card_chart_warn_line(target_id)
 
+        label_changed = target.get("label", "") != r["label"]
+        if label_changed:
+            _ds = self.__dict__.get("data_store")
+            if _ds is not None and hasattr(_ds, "bump_target_generation"):
+                try:
+                    _ds.bump_target_generation(target_id)
+                except Exception:
+                    pass
+        if label_changed or ip_changed or type_changed:
+            try:
+                self.alerter.on_target_identity_changed(target_id)
+            except Exception:
+                pass
+
         self._refresh_open_diag_windows_after_edit(
             target_id, r,
             ip_changed=ip_changed,
