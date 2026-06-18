@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data_store import DataStore
 from src.alert_manager import AlertManager
 from src.webhook_outbox import WebhookOutboxDispatcher
+from scripts.webhook_test_util import patch_connection_refused
 
 
 class OKHandler(http.server.BaseHTTPRequestHandler):
@@ -133,12 +134,13 @@ def test_recover_after_url_fix():
     ds = DataStore(db_path=os.path.join(td, "t.db"))
     ds._schema_ready.wait(timeout=5)
 
-    # Step 1: bad URL
-    bad_url = "http://127.0.0.1:19999/nonexistent"
+    # Step 1: bad URL (simulated connection refused, not a fixed local port)
+    bad_url = "http://127.0.0.1:1/nonexistent"
     a1, disp1 = _make_disp(ds, bad_url)
     now = time.time()
     _enqueue_one(ds, "DREC", now)
-    _deliver_one(disp1, "DREC", now)
+    with patch_connection_refused():
+        _deliver_one(disp1, "DREC", now)
     st1 = _row_state(ds, "DREC")
     step1_ok = (st1["delivery_state"] == "pending"
                 and st1["attempt_count"] == 1

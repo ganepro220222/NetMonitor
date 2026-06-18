@@ -3,6 +3,9 @@ import os
 import sys
 import tempfile
 import time
+import urllib.error
+from contextlib import contextmanager
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -11,6 +14,18 @@ from src.data_store import DataStore
 from src.webhook_outbox import WebhookOutboxDispatcher
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@contextmanager
+def patch_connection_refused():
+    """Force webhook HTTP open to fail like connection refused (no fixed port)."""
+
+    def _raise_refused(req, timeout=10):
+        raise urllib.error.URLError(
+            ConnectionRefusedError(10061, "Connection refused"))
+
+    with patch("src.alert_manager._ORIGINAL_HTTP_OPEN", side_effect=_raise_refused):
+        yield
 
 
 def default_cfg(**overrides):

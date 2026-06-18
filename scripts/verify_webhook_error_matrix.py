@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data_store import DataStore
 from src.alert_manager import AlertManager
 from src.webhook_outbox import WebhookOutboxDispatcher
+from scripts.webhook_test_util import patch_connection_refused
 
 # ── controllable mock server ──────────────────────────────────────
 
@@ -187,29 +188,12 @@ def test_429():
 
 
 def test_refused():
-    """Connect to a closed port -> connection refused."""
-    td = tempfile.mkdtemp()
-    ds = DataStore(db_path=os.path.join(td, "t.db"))
-    ds._schema_ready.wait(timeout=5)
-
-    class _Cfg:
-        def get_setting(self, k):
-            if k == "webhook_url":
-                return "http://127.0.0.1:19999/nonexistent"
-            return None
-        def get_targets(self):
-            return [{"id": "t", "label": "t", "ip": "10.0.0.1"}]
-
-    assets = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    assets = os.path.join(assets, "assets")
-    a = AlertManager(enabled=False, assets_dir=assets)
-    a.set_config(_Cfg())
-    a.set_data_store(ds)
-    disp = WebhookOutboxDispatcher(a)
-    a.set_outbox_dispatcher(disp)
+    """Simulated connection refused — no dependency on a fixed closed port."""
+    _a, disp, ds = _make_fixture("http://127.0.0.1:1/nonexistent")
     now = time.time()
     _enqueue_one(ds, "DREFUSED", now)
-    _deliver_one(disp, "DREFUSED", now)
+    with patch_connection_refused():
+        _deliver_one(disp, "DREFUSED", now)
     st = _row_state(ds, "DREFUSED")
     ok = (st["delivery_state"] == "pending"
           and st["attempt_count"] > 0
