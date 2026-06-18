@@ -1905,6 +1905,9 @@ class AlertManager:
         if self._outbox_dispatcher is not None:
             self._outbox_dispatcher.wake()
 
+    # Platform webhook hosts: exact hostname allowlist only (see
+    # scripts/verify_webhook_url_boundaries.py). Do not match substrings of
+    # the full URL or use broad suffix rules when adding new domains.
     _LARK_FEISHU_WEBHOOK_HOSTS = frozenset({
         "open.feishu.cn",
         "open.larksuite.com",
