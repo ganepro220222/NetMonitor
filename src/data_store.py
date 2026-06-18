@@ -1055,6 +1055,56 @@ class DataStore:
         except Exception:
             return []
 
+    def get_webhook_problem_deliveries(self, limit: int = 50) -> list[dict]:
+        """Return non-delivered / recent failure rows for ops troubleshooting."""
+        import json as _json
+        conn = self._read_conn()
+        now = time.time()
+        recent_cutoff = now - 7 * 86400
+        try:
+            rows = conn.execute(
+                "SELECT * FROM webhook_outbox "
+                "WHERE delivery_state IN ('pending', 'sending', 'failed_permanent') "
+                "OR (delivery_state='dropped_stale' AND last_error!='' "
+                "    AND updated_at>=?) "
+                "ORDER BY "
+                "CASE delivery_state "
+                "  WHEN 'sending' THEN 0 "
+                "  WHEN 'pending' THEN 1 "
+                "  WHEN 'failed_permanent' THEN 2 "
+                "  ELSE 3 END, updated_at DESC "
+                "LIMIT ?",
+                (recent_cutoff, int(limit)),
+            ).fetchall()
+            out = []
+            for row in rows:
+                d = self._outbox_row_to_dict(row)
+                try:
+                    payload = _json.loads(d.pop("payload_json") or "{}")
+                except Exception:
+                    payload = {}
+                d["payload"] = payload
+                d["payload_summary"] = self._webhook_payload_summary(payload)
+                d["target_label"] = (payload.get("target") or "").strip()
+                out.append(d)
+            return out
+        except Exception:
+            return []
+
+    @staticmethod
+    def _webhook_payload_summary(payload: dict) -> str:
+        parts = []
+        for key in ("event", "target", "ip", "status"):
+            val = (payload.get(key) or "").strip()
+            if val:
+                parts.append(f"{key}={val}")
+        msg = (payload.get("message") or "").strip()
+        if msg:
+            if len(msg) > 80:
+                msg = msg[:77] + "..."
+            parts.append(f"message={msg}")
+        return "; ".join(parts) if parts else "(empty)"
+
     def get_webhook_delivery_stats(self) -> dict:
         conn = self._read_conn()
         try:

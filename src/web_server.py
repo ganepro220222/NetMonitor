@@ -643,6 +643,19 @@ header{background:var(--surface);border-bottom:1px solid var(--border);
 #conn-pill{font-size:11px;padding:3px 11px;border-radius:20px;
   background:rgba(34,197,94,.12);border:1px solid #22c55e;color:#4ade80}
 #conn-pill.disc{background:rgba(239,68,68,.12);border-color:#ef4444;color:#f87171}
+#webhook-fail-pill{font-size:11px;padding:3px 11px;border-radius:20px;
+  background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#f87171;cursor:pointer}
+#webhook-fail-pill:hover{opacity:.85}
+.wh-table{width:100%;border-collapse:collapse;font-size:12px}
+.wh-table th,.wh-table td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+.wh-table th{color:var(--dim);font-weight:600;white-space:nowrap}
+.wh-table tr:hover td{background:var(--surface2)}
+.wh-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;word-break:break-all}
+.wh-state-pending{color:#fbbf24}.wh-state-sending{color:#60a5fa}
+.wh-state-failed{color:#f87171}.wh-state-dropped{color:var(--dim)}
+.wh-copy-btn{font-size:11px;padding:3px 8px;border-radius:5px;border:1px solid var(--border2);
+  background:var(--surface2);color:var(--text);cursor:pointer}
+.wh-copy-btn:hover{background:var(--border2)}
 .theme-btns{display:flex;border:1px solid var(--border2);border-radius:6px;position:relative}
 .tbtn{background:none;border:none;cursor:pointer;padding:5px 9px;font-size:14px;
   color:var(--dim);transition:.15s;border-right:1px solid var(--border2)}
@@ -1218,7 +1231,7 @@ body.theme-dark{
       </div>
     </div>
     <span id="conn-pill">● 已连接</span>
-    <span id="webhook-fail-pill" style="display:none;font-size:11px;padding:3px 11px;border-radius:20px;background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#f87171" title="Webhook 投递失败"></span>
+    <span id="webhook-fail-pill" style="display:none" title="点击查看 Webhook 投递详情" onclick="openWebhookFailPanel()"></span>
   </div>
 </header>
 <div class="tabs">
@@ -1398,6 +1411,27 @@ body.theme-dark{
     <div class="modal-footer" style="justify-content:flex-end">
       <button class="btn btn-ghost" onclick="closeCardSel()">取消</button>
       <button class="btn btn-primary" onclick="saveCardSel()">保存</button>
+    </div>
+  </div>
+</div>
+<!-- Webhook delivery failures modal -->
+<div class="modal-overlay hidden" id="wh-fail-overlay" onclick="if(event.target===this)closeWebhookFailPanel()">
+  <div class="modal-box" style="width:min(96vw,1100px);max-height:90vh">
+    <div class="modal-head">
+      <span class="modal-title">⚠ Webhook 投递详情</span>
+      <button class="modal-close" onclick="closeWebhookFailPanel()">×</button>
+    </div>
+    <div class="modal-body" style="overflow:auto;max-height:calc(90vh - 130px)">
+      <div id="wh-fail-stats" style="font-size:12px;color:var(--dim);margin-bottom:12px"></div>
+      <div id="wh-fail-body"><div style="color:var(--dim);font-size:13px">加载中...</div></div>
+    </div>
+    <div class="modal-footer">
+      <span id="wh-fail-hint" style="font-size:11px;color:var(--dim)"></span>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="refreshWebhookFailPanel()">🔄 刷新</button>
+        <button class="btn btn-ghost" onclick="copyAllWebhookDebug()">📋 复制全部排障信息</button>
+        <button class="btn btn-ghost" onclick="closeWebhookFailPanel()">关闭</button>
+      </div>
     </div>
   </div>
 </div>
@@ -5822,7 +5856,160 @@ async function refreshWebhookFailBanner(){
     const hint=top?`${top.event||'?'} ${top.error||''}`:`pending ${pending}`;
     pill.textContent='⚠ Webhook '+hint.slice(0,48);
     pill.style.display='inline-block';
+    if(document.getElementById('wh-fail-overlay')&&!document.getElementById('wh-fail-overlay').classList.contains('hidden')){
+      refreshWebhookFailPanel();
+    }
   }catch(e){}
+}
+let _whFailRows=[];
+let _whFailTimer=null;
+function _whFmtTs(ts){
+  if(ts==null||ts==='')return '—';
+  const n=Number(ts);
+  if(!Number.isFinite(n)||n<=0)return '—';
+  try{return new Date(n*1000).toLocaleString();}catch(e){return String(ts);}
+}
+function _whStateClass(st){
+  if(st==='pending')return 'wh-state-pending';
+  if(st==='sending')return 'wh-state-sending';
+  if(st==='failed_permanent')return 'wh-state-failed';
+  return 'wh-state-dropped';
+}
+function _whPayloadSummary(row){
+  return row.payload_summary||'(empty)';
+}
+function _whDebugText(row){
+  const lines=[
+    'Webhook delivery debug',
+    `delivery_id: ${row.delivery_id||''}`,
+    `target_id: ${row.target_id||''}`,
+    `target_label: ${row.target_label||''}`,
+    `event: ${row.event||''}`,
+    `state: ${row.delivery_state||''}`,
+    `attempt_count: ${row.attempt_count??''}`,
+    `max_attempts: ${row.max_attempts??''}`,
+    `last_error: ${row.last_error||''}`,
+    `first_queued_ts: ${_whFmtTs(row.first_queued_ts)} (${row.first_queued_ts??''})`,
+    `next_attempt_ts: ${_whFmtTs(row.next_attempt_ts)} (${row.next_attempt_ts??''})`,
+    `last_attempt_ts: ${_whFmtTs(row.last_attempt_ts)} (${row.last_attempt_ts??''})`,
+    `incident_id: ${row.incident_id||''}`,
+    `incident_seq: ${row.incident_seq??''}`,
+    `order_key: ${row.order_key||''}`,
+    `payload_summary: ${_whPayloadSummary(row)}`,
+  ];
+  return lines.join('\n');
+}
+async function copyTextToClipboard(text){
+  try{
+    if(navigator.clipboard&&window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  }catch(e){}
+  const ta=document.createElement('textarea');
+  ta.value=text;
+  ta.style.position='fixed';
+  ta.style.left='-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok=false;
+  try{ok=document.execCommand('copy');}catch(e){}
+  document.body.removeChild(ta);
+  return ok;
+}
+async function copyWebhookDebug(idx){
+  const row=_whFailRows[idx];
+  if(!row)return;
+  const ok=await copyTextToClipboard(_whDebugText(row));
+  const hint=document.getElementById('wh-fail-hint');
+  if(hint)hint.textContent=ok?'已复制该条排障信息':'复制失败，请手动选择';
+}
+async function copyAllWebhookDebug(){
+  if(!_whFailRows.length){
+    const hint=document.getElementById('wh-fail-hint');
+    if(hint)hint.textContent='没有可复制的记录';
+    return;
+  }
+  const text=_whFailRows.map((r,i)=>`--- #${i+1} ---\n${_whDebugText(r)}`).join('\n\n');
+  const ok=await copyTextToClipboard(text);
+  const hint=document.getElementById('wh-fail-hint');
+  if(hint)hint.textContent=ok?`已复制 ${_whFailRows.length} 条排障信息`:'复制失败，请手动选择';
+}
+function renderWebhookFailPanel(stats, rows){
+  _whFailRows=rows||[];
+  const statEl=document.getElementById('wh-fail-stats');
+  if(statEl){
+    const parts=[];
+    if(stats){
+      for(const [k,v] of Object.entries(stats)){
+        if(v)parts.push(`${k}: ${v}`);
+      }
+    }
+    statEl.textContent=parts.length?('状态统计 — '+parts.join(' · ')):'状态统计 — (无)';
+  }
+  const body=document.getElementById('wh-fail-body');
+  if(!body)return;
+  if(!rows.length){
+    body.innerHTML='<div style="color:var(--dim);font-size:13px">当前没有需要关注的 Webhook 投递记录。</div>';
+    return;
+  }
+  const head=`<tr>
+    <th>操作</th><th>delivery_id</th><th>target</th><th>event</th><th>state</th>
+    <th>attempt</th><th>last_error</th><th>next_attempt</th><th>first_queued</th><th>payload</th>
+  </tr>`;
+  const bodyRows=rows.map((r,i)=>{
+    const target=`${esc(r.target_label||'—')}<div class="wh-mono" style="color:var(--dim)">${esc(r.target_id||'')}</div>`;
+    return `<tr>
+      <td><button type="button" class="wh-copy-btn" onclick="copyWebhookDebug(${i})">复制</button></td>
+      <td class="wh-mono">${esc(r.delivery_id||'')}</td>
+      <td>${target}</td>
+      <td>${esc(r.event||'')}</td>
+      <td class="${_whStateClass(r.delivery_state)}">${esc(r.delivery_state||'')}</td>
+      <td>${esc(String(r.attempt_count??0))}${r.max_attempts?('/'+esc(String(r.max_attempts))):''}</td>
+      <td class="wh-mono">${esc(r.last_error||'—')}</td>
+      <td>${esc(_whFmtTs(r.next_attempt_ts))}</td>
+      <td>${esc(_whFmtTs(r.first_queued_ts))}</td>
+      <td class="wh-mono">${esc(_whPayloadSummary(r))}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML=`<table class="wh-table"><thead>${head}</thead><tbody>${bodyRows}</tbody></table>`;
+}
+async function refreshWebhookFailPanel(){
+  const body=document.getElementById('wh-fail-body');
+  if(body&&!_whFailRows.length)body.innerHTML='<div style="color:var(--dim);font-size:13px">加载中...</div>';
+  try{
+    const [statsR, rowsR]=await Promise.all([
+      fetch('/api/webhook/stats'),
+      fetch('/api/webhook/deliveries?problem=1&limit=100'),
+    ]);
+    const statsJ=await statsR.json();
+    const rows=await rowsR.json();
+    renderWebhookFailPanel((statsJ&&statsJ.stats)||{}, Array.isArray(rows)?rows:[]);
+    const hint=document.getElementById('wh-fail-hint');
+    if(hint)hint.textContent=`更新于 ${new Date().toLocaleTimeString()}`;
+  }catch(e){
+    if(body)body.innerHTML='<div style="color:#f87171;font-size:13px">加载失败，请稍后重试。</div>';
+  }
+}
+function openWebhookFailPanel(){
+  const ov=document.getElementById('wh-fail-overlay');
+  if(!ov)return;
+  ov.classList.remove('hidden');
+  refreshWebhookFailPanel();
+  if(_whFailTimer)clearInterval(_whFailTimer);
+  _whFailTimer=setInterval(()=>{
+    if(ov.classList.contains('hidden')){
+      clearInterval(_whFailTimer);
+      _whFailTimer=null;
+      return;
+    }
+    refreshWebhookFailPanel();
+  },15000);
+}
+function closeWebhookFailPanel(){
+  const ov=document.getElementById('wh-fail-overlay');
+  if(ov)ov.classList.add('hidden');
+  if(_whFailTimer){clearInterval(_whFailTimer);_whFailTimer=null;}
 }
 setInterval(refreshWebhookFailBanner,30000);
 refreshWebhookFailBanner();
@@ -7062,6 +7249,16 @@ class WebServer:
             ds = self._data_store
             if ds is None:
                 return json.dumps([]), 200, {
+                    "Content-Type": "application/json"}
+            if (request.args.get("problem") or "").strip() in (
+                    "1", "true", "yes"):
+                try:
+                    limit = int(request.args.get("limit") or 50)
+                except (TypeError, ValueError):
+                    limit = 50
+                rows = ds.get_webhook_problem_deliveries(
+                    limit=max(1, min(limit, 200)))
+                return json.dumps(rows, ensure_ascii=False), 200, {
                     "Content-Type": "application/json"}
             incident_id = (request.args.get("incident_id") or "").strip()
             target_id = (request.args.get("target_id") or "").strip()
