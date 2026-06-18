@@ -13,7 +13,8 @@ DATA_STORE = os.path.join(ROOT, "src", "data_store.py")
 def test_enqueue_main_thread_dispatch_background():
     from scripts.webhook_test_util import make_alerter
 
-    a, disp, ds = make_alerter()
+    a, disp, ds = make_alerter(
+        targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     calls = []
     errors = []
 

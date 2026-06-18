@@ -49,6 +49,14 @@ def _install_push_capture(a, calls, disp=None):
 
 def _open_red(a, tid, label, ip):
     a.on_status_change(tid, label, ip, "red")
+    # Persist the incident so get_open_incidents() sees it open, mirroring
+    # production (the monitoring loop records the alert alongside
+    # on_status_change).  Otherwise the outbox reconcile run on the first
+    # dispatch tick drops the reminder as stale-on-restart.
+    a._data_store.record_alert(target_id=tid, label=label, ip=ip,
+                               ts=time.time(), old_status="green",
+                               new_status="red", category="loss")
+    a._data_store.flush()
     if tid in a._webhook_incidents:
         a._webhook_incidents[tid].last_reminder_at = 0
 
@@ -59,6 +67,7 @@ def test_individual_first_reminder_count_is_one():
         webhook_reminder_interval_min=1,
         webhook_include_trace=False,
         webhook_trace_update_enabled=False,
+        targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}],
     )
     _open_red(a, "t1", "GW", "10.0.0.1")
     calls = []
@@ -78,6 +87,7 @@ def test_individual_reminder_count_increments():
         webhook_reminder_interval_min=1,
         webhook_include_trace=False,
         webhook_trace_update_enabled=False,
+        targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}],
     )
     _open_red(a, "t1", "GW", "10.0.0.1")
     captured = []
@@ -103,6 +113,7 @@ def test_reminder_count_in_text_payload():
         webhook_reminder_interval_min=1,
         webhook_include_trace=False,
         webhook_trace_update_enabled=False,
+        targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}],
     )
     _open_red(a, "t1", "GW", "10.0.0.1")
     captured = {}

@@ -22,7 +22,8 @@ def test_main_enqueue_background_dispatch():
     """Equivalent to /tmp/repro_outbox_thread_conn.py expectations."""
     from scripts.webhook_test_util import make_alerter
 
-    a, disp, ds = make_alerter()
+    a, disp, ds = make_alerter(
+        targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     calls = []
     errors = []
     a._send_webhook = staticmethod(lambda *_a, **_k: calls.append(1))
@@ -57,7 +58,9 @@ def test_main_enqueue_background_dispatch():
 def test_concurrent_enqueue_while_dispatching():
     from scripts.webhook_test_util import make_alerter
 
-    a, disp, ds = make_alerter()
+    a, disp, ds = make_alerter(targets=[
+        {"id": f"{p}{i}", "label": f"N{p}{i}", "ip": f"10.0.0.{i+1}"}
+        for p in ("A", "B", "C") for i in range(4)])
     calls = []
     errors = []
     lock = threading.Lock()
@@ -117,7 +120,8 @@ def test_concurrent_enqueue_while_dispatching():
 def test_failed_send_retries_without_sqlite_error():
     from scripts.webhook_test_util import make_alerter
 
-    a, disp, ds = make_alerter()
+    a, disp, ds = make_alerter(
+        targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     errors = []
     fail_once = {"n": 0}
 
