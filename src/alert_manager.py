@@ -1936,6 +1936,13 @@ class AlertManager:
         host = AlertManager._webhook_url_hostname(url)
         return host in AlertManager._WECOM_DINGTALK_WEBHOOK_HOSTS
 
+    @staticmethod
+    def _platform_webhook_text(text: str, delivery_id: str = "") -> str:
+        did = (delivery_id or "").strip()
+        if not did:
+            return text
+        return f"{text}\n投递ID：{did}"
+
     def _send_webhook(self, url, event, target, ip, status, message, ts_str,
                       extra=None, *, event_ts=None, queued_ts=None,
                       sent_ts=None, attempt=1, delivery_id="", gate=None):
@@ -1970,11 +1977,12 @@ class AlertManager:
             icon, title, event, target, ip, status, message, ts_str, extra,
             event_ts=event_ts, queued_ts=queued_ts, sent_ts=sent_ts,
             attempt=attempt)
+        platform_text = self._platform_webhook_text(text, delivery_id)
 
         if self._is_lark_feishu_webhook_url(url):
-            payload = {"msg_type": "text", "content": {"text": text}}
+            payload = {"msg_type": "text", "content": {"text": platform_text}}
         elif self._is_wecom_dingtalk_webhook_url(url):
-            payload = {"msgtype": "text", "text": {"content": text}}
+            payload = {"msgtype": "text", "text": {"content": platform_text}}
         else:
             payload = {
                 "event": event, "target": target, "ip": ip,

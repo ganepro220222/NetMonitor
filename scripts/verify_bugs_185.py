@@ -46,6 +46,7 @@ def test_feishu_url():
         and bodies[0].get("msg_type") == "text"
         and isinstance(bodies[0].get("content"), dict)
         and "text" in bodies[0]["content"]
+        and "投递ID：DID" in bodies[0]["content"]["text"]
     )
     print(f"Bug185 feishu url -> {ok} payload_keys={list(bodies[0].keys()) if bodies else []}")
     return ok
@@ -62,6 +63,7 @@ def test_larksuite_url():
         and isinstance(bodies[0].get("content"), dict)
         and "text" in bodies[0]["content"]
         and "event" not in bodies[0]
+        and "投递ID：DID" in bodies[0]["content"]["text"]
     )
     print(
         f"Bug185 larksuite url -> {ok} "

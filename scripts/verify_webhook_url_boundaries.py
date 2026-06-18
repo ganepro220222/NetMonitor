@@ -11,6 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.alert_manager import AlertManager
 
+# When adding a hostname to the allowlists below, also extend these templates.
+_LARK_FEISHU_ALLOWED_HOSTS = tuple(AlertManager._LARK_FEISHU_WEBHOOK_HOSTS)
+_WECOM_DINGTALK_ALLOWED_HOSTS = tuple(AlertManager._WECOM_DINGTALK_WEBHOOK_HOSTS)
+
 
 def _capture_send(a):
     bodies = []
@@ -120,6 +124,67 @@ def test_negative_hostname_boundaries():
     return ok
 
 
+def _evil_host_cases_for_allowed(allowed_host: str, label: str):
+    """Template negatives for each exact allowlist hostname."""
+    return [
+        (f"{label} suffix evil",
+         f"https://{allowed_host}.evil.com/hook", "generic"),
+        (f"{label} prefix evil",
+         f"https://evil{allowed_host}/hook", "generic"),
+        (f"{label} not-prefix host",
+         f"https://not.{allowed_host}/hook", "generic"),
+        (f"{label} userinfo@allowed",
+         f"https://{allowed_host}@example.com/hook", "generic"),
+    ]
+
+
+def test_allowlist_evil_host_templates():
+    cases = []
+    for host in _LARK_FEISHU_ALLOWED_HOSTS:
+        cases.extend(_evil_host_cases_for_allowed(host, f"lark {host}"))
+    for host in _WECOM_DINGTALK_ALLOWED_HOSTS:
+        cases.extend(_evil_host_cases_for_allowed(host, f"wecom {host}"))
+    cases.extend([
+        ("generic path platform token",
+         "https://example.com/open.feishu.cn/open-apis/bot/v2/hook/x", "generic"),
+        ("generic query platform token",
+         "https://example.com/hook?open.larksuite.com=1&qyapi.weixin.qq.com=2",
+         "generic"),
+    ])
+    ok = all(_check_url(n, u, e) for n, u, e in cases)
+    print(f"url_boundaries allowlist evil templates -> {ok}")
+    return ok
+
+
+def test_platform_text_includes_delivery_id():
+    from scripts.webhook_test_util import make_alerter
+    cases = [
+        ("feishu",
+         "https://open.feishu.cn/open-apis/bot/v2/hook/x",
+         lambda b: b["content"]["text"]),
+        ("larksuite",
+         "https://open.larksuite.com/open-apis/bot/v2/hook/x",
+         lambda b: b["content"]["text"]),
+        ("wecom",
+         "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?k=1",
+         lambda b: b["text"]["content"]),
+        ("dingtalk",
+         "https://oapi.dingtalk.com/robot/send?access_token=x",
+         lambda b: b["text"]["content"]),
+    ]
+    ok = True
+    for name, url, get_text in cases:
+        a, _, _ = make_alerter()
+        bodies = _capture_send(a)
+        _send(a, url)
+        text = get_text(bodies[0]) if bodies else ""
+        case_ok = "投递ID：DID" in text
+        ok = ok and case_ok
+        print(f"  platform text delivery_id {name} -> {case_ok}")
+    print(f"url_boundaries platform delivery_id -> {ok}")
+    return ok
+
+
 def test_allowlist_helpers_match_send():
     """Hostname helpers stay consistent with _send_webhook payload branch."""
     pairs = [
@@ -146,6 +211,8 @@ def main():
     results = [
         ("positive", test_positive_hostname_boundaries()),
         ("negative", test_negative_hostname_boundaries()),
+        ("evil_templates", test_allowlist_evil_host_templates()),
+        ("platform_delivery_id", test_platform_text_includes_delivery_id()),
         ("helpers", test_allowlist_helpers_match_send()),
     ]
     failed = [n for n, ok in results if not ok]
