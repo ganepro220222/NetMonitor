@@ -1184,14 +1184,16 @@ class DataStore:
             return {}
 
     def get_last_webhook_failures(self, limit: int = 5) -> list[dict]:
+        """Recent failure summaries for the webhook fail pill banner."""
         conn = self._read_conn()
         recent_cutoff = self._webhook_ops_recent_cutoff()
         try:
             rows = conn.execute(
                 "SELECT delivery_id, target_id, event, delivery_state, "
                 "last_error, updated_at FROM webhook_outbox "
-                "WHERE delivery_state IN ('failed_permanent', 'pending') "
-                "AND last_error!='' AND updated_at>=? "
+                "WHERE last_error!='' AND updated_at>=? "
+                "AND (delivery_state IN ('failed_permanent', 'pending') "
+                "     OR delivery_state='dropped_stale') "
                 "ORDER BY updated_at DESC LIMIT ?",
                 (recent_cutoff, int(limit))).fetchall()
             return [
