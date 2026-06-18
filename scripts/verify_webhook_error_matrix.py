@@ -219,7 +219,7 @@ def test_refused():
 
 
 def test_truncated_response():
-    """Truncated HTTP body should retry; Windows may treat as delivered."""
+    """Truncated HTTP body must retry as pending, not delivered."""
     srv = MockServer()
     srv.start()
     _a, disp, ds = _make_fixture(srv.url + "/close")
@@ -229,16 +229,9 @@ def test_truncated_response():
     st = _row_state(ds, "DCLOSE")
     srv.stop()
 
-    state = st["delivery_state"]
-    is_win = sys.platform == "win32"
-    if state == "delivered" and is_win:
-        ok = st["attempt_count"] >= 1
-        print(f"  truncated response [WIN=delivered]: {ok}  state={st}")
-        return ok
-
     err = (st["last_error"] or "").lower()
     ok = (
-        state == "pending"
+        st["delivery_state"] == "pending"
         and st["attempt_count"] > 0
         and st["next_attempt_ts"] > now
         and any(kw in err for kw in (

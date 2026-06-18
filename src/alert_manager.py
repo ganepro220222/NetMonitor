@@ -1773,12 +1773,30 @@ class AlertManager:
             self, req, timeout: int, *, delivery_id: str, commit_epoch: int,
             gate) -> None:
         """Perform HTTP POST; caller must not hold _webhook_outbox_send_lock."""
+        _MAX_RESPONSE_BYTES = 1_048_576
         with self._webhook_outbox_send_lock:
             self._verify_outbox_send_commit(
                 delivery_id=delivery_id, gate=gate,
                 commit_epoch=commit_epoch)
-            with _ORIGINAL_HTTP_OPEN(req, timeout=timeout):
-                pass
+            with _ORIGINAL_HTTP_OPEN(req, timeout=timeout) as resp:
+                getheader = getattr(resp, "getheader", None)
+                if callable(getheader):
+                    clen_hdr = getheader("Content-Length")
+                    if clen_hdr is not None:
+                        try:
+                            clen = int(clen_hdr)
+                        except ValueError:
+                            pass
+                        else:
+                            if clen > _MAX_RESPONSE_BYTES:
+                                raise ValueError(
+                                    f"webhook response Content-Length too large: "
+                                    f"{clen}")
+                read_fn = getattr(resp, "read", None)
+                if callable(read_fn):
+                    # Drain body so truncated/malformed responses raise instead of
+                    # being misreported as delivered after headers-only success.
+                    read_fn()
             try:
                 self._verify_outbox_send_commit(
                     delivery_id=delivery_id, gate=gate,
