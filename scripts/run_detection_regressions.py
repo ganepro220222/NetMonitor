@@ -24,6 +24,7 @@ DETECTION_REGRESSION_SCRIPTS = (
     "round_f_alert_boundary.py",
     "round_e_thread_safety.py",
     "verify_bugs_141.py",
+    "verify_icmp_diag_net_unreachable.py",
 )
 
 

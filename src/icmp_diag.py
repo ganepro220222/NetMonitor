@@ -228,8 +228,8 @@ def parse_ping_output(stdout: str, stderr: str,
     if any(p in combined for p in ["destination host unreachable",
                                     "无法访问目标主机", "host unreachable"]):
         return None, ERROR_UNREACHABLE
-    if any(p in combined for p in ["network unreachable", "网络不可达",
-                                    "destination net unreachable"]):
+    if any(p in combined for p in ["network unreachable", "network is unreachable",
+                                    "网络不可达", "destination net unreachable"]):
         return None, ERROR_NET_UNREACH
 
     # ── extract RTT ──────────────────────────────────────────────────────
