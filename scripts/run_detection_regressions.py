@@ -25,6 +25,7 @@ DETECTION_REGRESSION_SCRIPTS = (
     "round_e_thread_safety.py",
     "verify_bugs_141.py",
     "verify_icmp_diag_net_unreachable.py",
+    "verify_web_alert_history_tid.py",
 )
 
 

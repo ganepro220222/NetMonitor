@@ -1981,10 +1981,10 @@ function dismissAlert(){document.getElementById('alert-banner').classList.add('h
   titleAlertText='';
   if(titleTimer){clearInterval(titleTimer);titleTimer=null;document.title='网络连通性监测';}}
 
-function addHist(label,ip,oldSt,newSt,timeStr){
+function addHist(tid,label,ip,oldSt,newSt,timeStr){
   if((oldSt==='gray'||oldSt==='paused')&&newSt==='green')return;
   if(oldSt===newSt)return;
-  hist.unshift({t:timeStr||new Date().toTimeString().slice(0,8),label,ip,oldSt,newSt});
+  hist.unshift({t:timeStr||new Date().toTimeString().slice(0,8),tid,label,ip,oldSt,newSt});
   if(hist.length>MAX_HIST)hist.pop();renderHist();}
 function renderHist(){
   const body=document.getElementById('hist-body'),hc=document.getElementById('hcount');
@@ -1992,7 +1992,7 @@ function renderHist(){
   // Count nodes whose LAST event is still orange/red (not yet recovered).
   // Raw event count inflates the number after recovery.
   const lastSt={};
-  hist.forEach(h=>{lastSt[h.label+'|'+h.ip]=h.newSt;});
+  hist.forEach(h=>{const key=h.tid||(h.label+'|'+h.ip);if(!(key in lastSt))lastSt[key]=h.newSt;});
   const active=Object.values(lastSt).filter(s=>s==='red'||s==='orange').length;
   hc.textContent=`（${hist.length}条${active?' · ⚠ '+active+'条未恢复':''}）`;
   body.innerHTML=hist.map(h=>{const os=st(h.oldSt),ns=st(h.newSt);
@@ -5740,7 +5740,7 @@ function connect(){
       if(msg.port_statuses) Object.assign(portStatus,msg.port_statuses);
       // Always rebuild hist from server, even if server hist is empty
       hist.length=0;
-      if(msg.history) msg.history.forEach(ev=>hist.push({t:ev.time,label:ev.label,ip:ev.ip,oldSt:ev.old_status,newSt:ev.new_status}));
+      if(msg.history) msg.history.forEach(ev=>hist.push({t:ev.time,tid:ev.tid,label:ev.label,ip:ev.ip,oldSt:ev.old_status,newSt:ev.new_status}));
       renderCards();renderHist();checkAlerts();
       const _statsTab=document.getElementById('tab-stats');
       // Stats tab: range stats + waveform must both match post-init targets.
@@ -5761,7 +5761,7 @@ function connect(){
           pushNotification('🟠 网络警告',`${t.label || t.ip} 延迟或质量劣化`);
         }
         else if(t.status==='green'&&(old.status==='red'||old.status==='orange'))playRecovery();}
-      if(old&&old.status!==t.status)addHist(t.label,t.ip,old.status,t.status);
+      if(old&&old.status!==t.status)addHist(t.tid,t.label,t.ip,old.status,t.status);
       // Drop the cached port_status snapshot when the node's IP
       // changes -- the snapshot belonged to the OLD identity (it
       // was captured against the OLD ip's tcp_check results) and
@@ -6689,7 +6689,7 @@ class WebServer:
             if old_status not in (None, "paused") and old_status != status:
                 if not (old_status == "gray" and status == "green"):
                     self._history.append({"time": datetime.now().strftime("%H:%M:%S"),
-                        "label": label, "ip": ip,
+                        "tid": tid, "label": label, "ip": ip,
                         "old_status": old_status, "new_status": status})
             if len(self._history) > self.MAX_HISTORY: self._history.pop(0)
             snap = self._build_scheduler_snapshot()   # uses shared helper, lock already held
