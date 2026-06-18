@@ -1905,6 +1905,13 @@ class AlertManager:
         if self._outbox_dispatcher is not None:
             self._outbox_dispatcher.wake()
 
+    @staticmethod
+    def _is_lark_feishu_webhook_url(url: str) -> bool:
+        url_l = (url or "").lower()
+        return any(
+            host in url_l
+            for host in ("feishu", "larkoffice", "larksuite"))
+
     def _send_webhook(self, url, event, target, ip, status, message, ts_str,
                       extra=None, *, event_ts=None, queued_ts=None,
                       sent_ts=None, attempt=1, delivery_id="", gate=None):
@@ -1941,7 +1948,7 @@ class AlertManager:
             attempt=attempt)
 
         url_l = url.lower()
-        if "feishu" in url_l or "larkoffice" in url_l:
+        if self._is_lark_feishu_webhook_url(url_l):
             payload = {"msg_type": "text", "content": {"text": text}}
         elif ("qyapi" in url_l or "weixin" in url_l
               or "dingtalk" in url_l or "oapi" in url_l):
