@@ -9,8 +9,12 @@ SCRIPTS_DIR = os.path.join(ROOT, "scripts")
 # Keep verify_webhook_url_boundaries early — hostname allowlist guardrail.
 WEBHOOK_REGRESSION_SCRIPTS = (
     "verify_webhook_url_boundaries.py",
+    "verify_webhook_error_matrix.py",
+    "verify_webhook_recovery_after_url_fix.py",
+    "verify_webhook_multi_target_isolation.py",
+    "verify_webhook_observability_fields.py",
     "verify_webhook_fail_panel.py",
-    "verify_webhook_outbox_retention.py",
+    "verify_webhook_retention_policy.py",
     "verify_bugs_185.py",
     "verify_bugs_186.py",
     "verify_bugs_145.py",
