@@ -68,7 +68,8 @@ def test_reseed_sends_catchup_alert_red():
     started = time.time() - 1800
     _insert_open_red(ds, started=started)
     from scripts.webhook_test_util import make_alerter, install_push_capture
-    a, disp, _ds = make_alerter(ds=ds)
+    a, disp, _ds = make_alerter(
+        ds=ds, targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     calls = []
     flush = install_push_capture(a, calls, disp)
     n = a.reseed_webhook_incidents(

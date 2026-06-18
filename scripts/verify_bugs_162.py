@@ -24,7 +24,8 @@ def _mk_store():
     td = tempfile.mkdtemp()
     ds = DataStore(db_path=os.path.join(td, "t.db"))
     ds._schema_ready.wait(timeout=5)
-    a, disp, _ = make_alerter(ds=ds)
+    a, disp, _ = make_alerter(
+        ds=ds, targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     return a, disp, ds, td
 
 
