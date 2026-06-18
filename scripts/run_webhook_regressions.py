@@ -15,6 +15,7 @@ WEBHOOK_REGRESSION_SCRIPTS = (
     "verify_webhook_observability_fields.py",
     "verify_webhook_fail_panel.py",
     "verify_webhook_fail_pill_visibility.py",
+    "verify_webhook_api_exception_stability.py",
     "verify_webhook_retention_policy.py",
     "verify_webhook_identity_change.py",
     "verify_bugs_185.py",

@@ -7256,8 +7256,11 @@ class WebServer:
                     limit = int(request.args.get("limit") or 50)
                 except (TypeError, ValueError):
                     limit = 50
-                rows = ds.get_webhook_problem_deliveries(
-                    limit=max(1, min(limit, 200)))
+                try:
+                    rows = ds.get_webhook_problem_deliveries(
+                        limit=max(1, min(limit, 200)))
+                except Exception:
+                    rows = []
                 return json.dumps(rows, ensure_ascii=False), 200, {
                     "Content-Type": "application/json"}
             incident_id = (request.args.get("incident_id") or "").strip()
@@ -7266,10 +7269,13 @@ class WebServer:
                 limit = int(request.args.get("limit") or 100)
             except (TypeError, ValueError):
                 limit = 100
-            rows = ds.get_webhook_deliveries(
-                incident_id=incident_id or None,
-                target_id=target_id or None,
-                limit=max(1, min(limit, 500)))
+            try:
+                rows = ds.get_webhook_deliveries(
+                    incident_id=incident_id or None,
+                    target_id=target_id or None,
+                    limit=max(1, min(limit, 500)))
+            except Exception:
+                rows = []
             return json.dumps(rows, ensure_ascii=False), 200, {
                 "Content-Type": "application/json"}
 
@@ -7279,9 +7285,15 @@ class WebServer:
             if ds is None:
                 return json.dumps({"stats": {}, "failures": []}), 200, {
                     "Content-Type": "application/json"}
+            try:
+                stats = ds.get_webhook_delivery_stats()
+                failures = ds.get_last_webhook_failures(5)
+            except Exception:
+                stats = {}
+                failures = []
             return json.dumps({
-                "stats": ds.get_webhook_delivery_stats(),
-                "failures": ds.get_last_webhook_failures(5),
+                "stats": stats,
+                "failures": failures,
             }, ensure_ascii=False), 200, {
                 "Content-Type": "application/json"}
 
