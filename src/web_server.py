@@ -6395,6 +6395,10 @@ class WebServer:
         # the per-kind lock (single-pointer assignment to None is
         # monotonic, so stale reads only cause at most one extra 409).
         self._web_diag_busy_lock = threading.Lock()
+        # ── Screen geographic view (Phase 4) ─────────────────────────────
+        self._monitor_geo: dict | None = None
+        self._target_geos: dict[str, dict] = {}
+        self._geo_resolver = None
         if FLASK_AVAILABLE:
             # Explicitly pass root_path so Flask does not try to infer
             # it via importlib in frozen (PyInstaller) mode.
@@ -6512,6 +6516,15 @@ class WebServer:
     def set_incident_ack_status_fn(self, cb):
         """Bind AlertManager.is_incident_acknowledged for Web UI sync."""
         self._incident_ack_status_fn = cb
+
+    def set_screen_geo(self, monitor_geo=None, target_geos=None, resolver=None):
+        """Sync monitor/target geo for /api/screen/geo."""
+        if monitor_geo is not None or target_geos is not None:
+            self._monitor_geo = monitor_geo
+            if target_geos is not None:
+                self._target_geos = dict(target_geos)
+        if resolver is not None:
+            self._geo_resolver = resolver
 
     def _query_incident_acknowledged(self, tid: str) -> bool:
         fn = self._incident_ack_status_fn
@@ -7319,6 +7332,26 @@ class WebServer:
             return send_file(fp, mimetype="text/html; charset=utf-8",
                              max_age=0)
 
+        @app.route("/vendor/<path:name>")
+        def screen_vendor(name):
+            """Self-hosted ECharts + China GeoJSON for /screen (no CDN)."""
+            import pathlib
+            from flask import send_file
+            safe = pathlib.PurePosixPath(name).name
+            if safe != name or not re.match(
+                    r"^[a-zA-Z0-9_.-]+\.(js|json|map)$", safe):
+                return "", 404
+            fp = (pathlib.Path(__file__).parent / "web" / "vendor" / safe).resolve()
+            base = fp.parent.resolve()
+            try:
+                fp.relative_to(base)
+            except ValueError:
+                return "", 404
+            if not fp.is_file():
+                return "", 404
+            mt = "application/json" if safe.endswith(".json") else "application/javascript"
+            return send_file(fp, mimetype=mt, max_age=86400)
+
         def _screen_demo():
             return (request.args.get("demo") or "").strip().lower() in (
                 "1", "true", "yes")
@@ -7394,6 +7427,22 @@ class WebServer:
                     logging.getLogger(__name__).warning("[screen/events] %s", e)
                     rows = []
             return json.dumps({"events": rows}, ensure_ascii=False), 200, {
+                "Content-Type": "application/json"}
+
+        @app.route("/api/screen/geo")
+        def api_screen_geo():
+            from src import screen_service as ss
+            window = (request.args.get("window") or "today").strip().lower()
+            if _screen_demo():
+                return json.dumps(ss.demo_geo(), ensure_ascii=False), 200, {
+                    "Content-Type": "application/json"}
+            try:
+                payload = ss.build_geo(self, window=window)
+            except Exception as e:
+                logging.getLogger(__name__).warning("[screen/geo] %s", e)
+                payload = ss.demo_geo()
+                payload["error"] = str(e)
+            return json.dumps(payload, ensure_ascii=False), 200, {
                 "Content-Type": "application/json"}
 
         @app.route("/api/status")

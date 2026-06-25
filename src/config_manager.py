@@ -44,6 +44,8 @@ _STRING_TARGET_KEYS = (
 _BOOL_TARGET_KEYS = ("http_verify_ssl", "http_follow_redirects", "ipv6_only")
 _INT_TARGET_KEYS = ("tcp_port", "http_expected_status")
 _FLOAT_TARGET_KEYS = ("http_timeout", "timeout")
+_GEO_TARGET_KEYS = ("lat", "lon")
+_GEO_STRING_KEYS = ("label", "city", "region")
 
 import math
 import threading
@@ -143,6 +145,25 @@ def _sanitize_target(item: dict) -> dict:
             f"[ConfigManager] 目标 {out['id']} 的 tcp_port 超出 1–65535: "
             f"{tcp_port!r}，探测时将报 invalid_port"
         )
+
+    geo_raw = item.get("geo")
+    if isinstance(geo_raw, dict):
+        geo: dict = {}
+        for key in _GEO_TARGET_KEYS:
+            val = geo_raw.get(key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                geo[key] = float(val)
+            elif isinstance(val, str) and val.strip():
+                try:
+                    geo[key] = float(val.strip())
+                except ValueError:
+                    pass
+        for key in _GEO_STRING_KEYS:
+            val = geo_raw.get(key)
+            if isinstance(val, str) and val.strip():
+                geo[key] = val.strip()
+        if "lat" in geo and "lon" in geo:
+            out["geo"] = geo
 
     http_url = out.get("http_url")
     if http_url and pt in ("http", "https"):
@@ -276,6 +297,25 @@ def _sanitize_settings(raw: dict) -> dict:
                 geo = val.strip()
                 if geo and _WINDOW_GEOMETRY_RE.fullmatch(geo):
                     out[key] = geo
+            continue
+        if key == "monitor_geo":
+            if isinstance(val, dict):
+                mg: dict = {}
+                for gk in ("lat", "lon"):
+                    gv = val.get(gk)
+                    if isinstance(gv, (int, float)) and not isinstance(gv, bool):
+                        mg[gk] = float(gv)
+                    elif isinstance(gv, str) and gv.strip():
+                        try:
+                            mg[gk] = float(gv.strip())
+                        except ValueError:
+                            pass
+                for gk in ("label", "city", "region"):
+                    gv = val.get(gk)
+                    if isinstance(gv, str) and gv.strip():
+                        mg[gk] = gv.strip()
+                if "lat" in mg and "lon" in mg:
+                    out[key] = mg
             continue
         # webhook_events: legacy key — no longer read at runtime; drop on
         # sanitize so new saves don't perpetuate a dead setting.

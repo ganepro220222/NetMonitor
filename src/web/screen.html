@@ -258,6 +258,24 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:linear-gradient(90deg,rgba(239,68,68,.14),rgba(239,68,68,.04))}
 .score-hint{font-size:10px;color:var(--dim);margin-top:6px;line-height:1.45;max-width:260px;opacity:.85}
 .topo-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px;width:100%}
+.center.panel.geo-mode .topo-bg{display:none}
+.center.panel.geo-mode .topo-wrap{
+  background:
+    radial-gradient(ellipse at 50% 40%,rgba(34,211,238,.05),transparent 65%),
+    linear-gradient(180deg,rgba(2,8,20,.92),rgba(4,12,28,.88))}
+#geoChart{position:relative;z-index:1;width:100%;flex:1;min-height:0;display:none}
+.center.panel.geo-mode #geoChart{display:block}
+.center.panel.geo-mode #topoSvg{display:none}
+#geoInset{display:none;margin-top:8px;padding:8px 10px;border:1px solid rgba(30,58,95,.45);
+  background:rgba(8,16,32,.55);border-radius:4px;max-height:88px;overflow:auto}
+.center.panel.geo-mode #geoInset.has-inset{display:block}
+.geo-inset-title{font-size:10px;color:var(--dim);letter-spacing:.08em;margin-bottom:6px}
+.geo-inset-grid{display:flex;flex-wrap:wrap;gap:6px}
+.geo-inset-chip{font-size:11px;padding:4px 10px;border-radius:999px;cursor:pointer;
+  border:1px solid rgba(30,58,95,.55);background:rgba(15,23,42,.65);color:#cbd5e1}
+.geo-inset-chip.red{border-color:rgba(239,68,68,.45);color:#fecaca}
+.geo-inset-chip.orange{border-color:rgba(245,158,11,.45);color:#fde68a}
+.geo-inset-chip:hover{border-color:rgba(34,211,238,.35)}
 .hidden{display:none}
 </style>
 </head>
@@ -296,16 +314,22 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
     </div>
   </div>
 
-  <div class="panel center">
+  <div class="panel center geo-mode" id="centerPanel">
     <div class="ptitle">动态链路拓扑</div>
     <div class="pbody" style="display:flex;flex-direction:column;height:calc(100% - 42px)">
       <div class="topo-toolbar">
-        <button class="winbtn active" id="btnTopoSingle" onclick="setTopoMode('single',this)">单路径</button>
+        <button class="winbtn active" id="btnTopoGeo" onclick="setTopoMode('geo',this)">地理视图</button>
+        <button class="winbtn" id="btnTopoSingle" onclick="setTopoMode('single',this)">单路径</button>
         <button class="winbtn" id="btnTopoMerged" onclick="setTopoMode('merged',this)">合并拓扑</button>
         <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
         <span class="rotate-badge hidden" id="rotateBadge"></span>
       </div>
-      <div class="topo-wrap"><div class="topo-bg"></div><svg id="topoSvg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg></div>
+      <div class="topo-wrap">
+        <div class="topo-bg"></div>
+        <div id="geoChart"></div>
+        <svg id="topoSvg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+      <div id="geoInset"><div class="geo-inset-title">内网 / 未定位目标（逻辑布局）</div><div class="geo-inset-grid" id="geoInsetGrid"></div></div>
       <div class="topo-detail" id="topoDetail">选择节点或等待路径数据...</div>
     </div>
   </div>
@@ -334,13 +358,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   </div>
 </div>
 </div>
+<script src="/vendor/echarts.min.js"></script>
 <script>
 const DEMO=new URLSearchParams(location.search).get('demo')==='1';
 const EXPLAIN=DEMO||new URLSearchParams(location.search).get('explain')==='1';
 let WINDOW='today';
 let pathsData=null;
+let geoData=null;
 let selectedTid=null;
-let topoMode='single';
+let topoMode='geo';
 let refreshTimer=null;
 let rotateTimer=null;
 let rotatePausedUntil=0;
@@ -368,7 +394,7 @@ function fitStage(){
   el.style.left=((innerWidth-1920*s)/2)+'px';
   el.style.top=((innerHeight-1080*s)/2)+'px';
 }
-addEventListener('resize',()=>{fitStage();markScrollable();}); fitStage();
+addEventListener('resize',()=>{fitStage();markScrollable();if(geoChart) geoChart.resize();}); fitStage();
 
 function markScrollable(root){
   (root||document).querySelectorAll('.pbody,.tline').forEach(el=>{
@@ -461,10 +487,11 @@ function api(path){
 async function loadAll(){
   document.getElementById('refreshHint').textContent='刷新中...';
   try{
-    const [ov,paths,top,ev]=await Promise.all([
-      api('overview'), api('paths'), api('topn'), api('events')]);
+    const [ov,paths,top,ev,geo]=await Promise.all([
+      api('overview'), api('paths'), api('topn'), api('events'), api('geo')]);
     renderOverview(ov);
     pathsData=paths;
+    geoData=geo;
     renderTopo(paths);
     refreshRotateState(false);
     renderTop(top);
@@ -478,12 +505,19 @@ async function loadAll(){
   }
 }
 
+function syncCenterPanelMode(){
+  document.getElementById('centerPanel').classList.toggle('geo-mode',topoMode==='geo');
+}
+
 function setTopoMode(mode,btn){
   topoMode=mode;
+  document.getElementById('btnTopoGeo').classList.toggle('active',mode==='geo');
   document.getElementById('btnTopoSingle').classList.toggle('active',mode==='single');
   document.getElementById('btnTopoMerged').classList.toggle('active',mode==='merged');
-  if(pathsData) renderTopo(pathsData);
+  syncCenterPanelMode();
+  if(pathsData||geoData) renderTopo(pathsData);
   syncAutoRotate();
+  if(mode==='geo') requestAnimationFrame(()=>{if(geoChart) geoChart.resize();});
 }
 
 function toggleAutoRotate(btn){
@@ -506,7 +540,9 @@ function poolKey(pool){return pool.map(p=>p.tid).join('|');}
 
 function updateRotateBadge(poolInfo, idx){
   const el=document.getElementById('rotateBadge');
-  if(!ROTATE.enabled||topoMode!=='single'||!poolInfo||poolInfo.pool.length<ROTATE.minPaths){
+  const geoOk=topoMode==='geo';
+  const singleOk=topoMode==='single';
+  if(!ROTATE.enabled||(!geoOk&&!singleOk)||!poolInfo||poolInfo.pool.length<ROTATE.minPaths){
     el.classList.add('hidden');
     return;
   }
@@ -539,7 +575,8 @@ function startRotateTimer(poolInfo){
     }
     rotateIdx=(rotateIdx+1)%fresh.pool.length;
     selectedTid=fresh.pool[rotateIdx].tid;
-    renderSingleTopo(pathsData,false);
+    if(topoMode==='geo') renderGeo(geoData,false);
+    else renderSingleTopo(pathsData,false);
     updateRotateBadge(fresh,rotateIdx);
   },ms);
 }
@@ -548,7 +585,9 @@ function startRotateTimer(poolInfo){
 function refreshRotateState(restartTimer=false){
   const paths=(pathsData&&pathsData.paths)||[];
   const poolInfo=getRotatePool(paths);
-  if(!ROTATE.enabled||topoMode!=='single'||poolInfo.pool.length<ROTATE.minPaths){
+  const geoOk=topoMode==='geo';
+  const singleOk=topoMode==='single';
+  if(!ROTATE.enabled||(!geoOk&&!singleOk)||poolInfo.pool.length<ROTATE.minPaths){
     stopRotateTimer();
     rotatePoolKey='';
     updateRotateBadge(null,0);
@@ -561,7 +600,8 @@ function refreshRotateState(restartTimer=false){
     restartTimer=true;
     if(!poolInfo.pool.find(p=>p.tid===selectedTid)){
       selectedTid=poolInfo.pool[0].tid;
-      if(pathsData) renderSingleTopo(pathsData,false);
+      if(topoMode==='geo'&&geoData) renderGeo(geoData,false);
+      else if(pathsData) renderSingleTopo(pathsData,false);
     }
   }else{
     rotateIdx=Math.max(0,poolInfo.pool.findIndex(p=>p.tid===selectedTid));
@@ -586,13 +626,27 @@ function focusPath(tid,{pauseMs=0,render=true}={}){
   if(pauseMs) rotatePausedUntil=Date.now()+pauseMs;
   const poolInfo=getRotatePool((pathsData&&pathsData.paths)||[]);
   rotateIdx=Math.max(0,poolInfo.pool.findIndex(p=>p.tid===tid));
-  if(render&&pathsData) renderSingleTopo(pathsData,false);
+  if(render){
+    if(topoMode==='geo'&&geoData) renderGeo(geoData,false);
+    else if(pathsData) renderSingleTopo(pathsData,false);
+  }
   updateRotateBadge(poolInfo,rotateIdx);
 }
 
+function drillToSinglePath(tid){
+  if(!tid) return;
+  focusPath(tid,{pauseMs:ROTATE.manualPauseMs,render:false});
+  setTopoMode('single',document.getElementById('btnTopoSingle'));
+  focusPath(tid,{pauseMs:ROTATE.manualPauseMs,render:true});
+}
+
 function onTraceFaultSSE(m){
-  if(!m||!m.tid||topoMode!=='single') return;
-  focusPath(m.tid,{pauseMs:3000,render:true});
+  if(!m||!m.tid) return;
+  if(topoMode==='geo'){
+    focusPath(m.tid,{pauseMs:3000,render:true});
+  } else if(topoMode==='single'){
+    focusPath(m.tid,{pauseMs:3000,render:true});
+  }
   syncAutoRotate();
 }
 
@@ -775,7 +829,201 @@ function renderHopNode(pt, meta){
   return g;
 }
 
+let geoChart=null;
+let geoMapReady=false;
+let geoMapInitPromise=null;
+
+function ensureGeoMap(){
+  if(geoMapInitPromise) return geoMapInitPromise;
+  geoMapInitPromise=fetch('/vendor/china.json')
+    .then(r=>{if(!r.ok) throw new Error('china.json missing'); return r.json();})
+    .then(json=>{
+      if(typeof echarts==='undefined') throw new Error('ECharts missing');
+      echarts.registerMap('china', json);
+      geoMapReady=true;
+    })
+    .catch(err=>{
+      geoMapInitPromise=null;
+      throw err;
+    });
+  return geoMapInitPromise;
+}
+
+function initGeoChart(){
+  const el=document.getElementById('geoChart');
+  if(!el||typeof echarts==='undefined') return null;
+  if(!geoChart) geoChart=echarts.init(el);
+  return geoChart;
+}
+
+function renderGeoInset(data){
+  const inset=(data&&data.inset)||[];
+  const wrap=document.getElementById('geoInset');
+  const grid=document.getElementById('geoInsetGrid');
+  wrap.classList.toggle('has-inset',inset.length>0);
+  if(!inset.length){
+    grid.innerHTML='';
+    return;
+  }
+  grid.innerHTML=inset.map(it=>
+    `<span class="geo-inset-chip ${esc(it.status||'')}" data-tid="${escAttr(it.tid||'')}" `+
+    `onclick="drillToSinglePath('${escAttr(it.tid||'')}')" title="点击查看跳级拓扑">`+
+    `${esc(it.label||it.tid||'')}${it.break_label?' · '+esc(it.break_label):''}</span>`
+  ).join('');
+}
+
+function renderGeo(data, updateBadge=true){
+  const chart=initGeoChart();
+  if(!chart){
+    document.getElementById('topoDetail').textContent='地图组件未加载（请检查 /vendor/）';
+    return;
+  }
+  ensureGeoMap().then(()=>{
+    const targets=(data&&data.targets)||[];
+    const src=(data&&data.source)||null;
+    const onMap=targets.filter(t=>t.geo&&t.geo.lon!=null&&t.geo.lat!=null);
+    if(!selectedTid||!targets.find(t=>t.tid===selectedTid)){
+      selectedTid=(onMap[0]||targets[0]||{}).tid||null;
+    }
+    const hi=selectedTid;
+    const scatter=onMap.map(t=>{
+      const g=t.geo;
+      const st=t.status||'gray';
+      const isHi=t.tid===hi;
+      return {
+        name: t.label||t.tid,
+        tid: t.tid,
+        value: [g.lon, g.lat, st==='red'?3:(st==='orange'?2:1)],
+        itemStyle: {
+          color: colorForStatus(st),
+          shadowBlur: isHi?18:6,
+          shadowColor: colorForStatus(st),
+          borderColor: isHi?'#fff':'rgba(255,255,255,.35)',
+          borderWidth: isHi?2:1,
+        },
+        symbolSize: isHi?16:(st==='red'?14:10),
+        label: {
+          show: isHi||st==='red',
+          formatter: t.break_label?`${t.label}\n${t.break_label}`:`{b}`,
+          color: '#e2e8f0',
+          fontSize: 10,
+        },
+      };
+    });
+    const breaks=onMap.filter(t=>t.break_geo&&t.break_geo.lon!=null)
+      .map(t=>({
+        name: (t.label||'')+' 断点',
+        tid: t.tid,
+        value: [t.break_geo.lon, t.break_geo.lat, 1],
+        itemStyle: {color:'#fca5a5', borderColor:'#ef4444', borderWidth:2},
+        symbol: 'diamond',
+        symbolSize: 12,
+      }));
+    const lines=[];
+    if(src&&src.lon!=null&&src.lat!=null){
+      onMap.forEach(t=>{
+        if(!t.geo) return;
+        lines.push({
+          coords: [[src.lon, src.lat], [t.geo.lon, t.geo.lat]],
+          lineStyle: {
+            color: colorForStatus(t.status),
+            width: t.tid===hi?2.5:1,
+            opacity: t.tid===hi?0.85:0.35,
+            curveness: 0.22,
+          },
+        });
+      });
+    }
+    chart.setOption({
+      backgroundColor: 'transparent',
+      geo: {
+        map: 'china',
+        roam: true,
+        zoom: 1.15,
+        label: {show:false},
+        itemStyle: {
+          areaColor: 'rgba(8,20,40,.85)',
+          borderColor: 'rgba(34,211,238,.25)',
+          borderWidth: 1,
+        },
+        emphasis: {
+          itemStyle: {areaColor: 'rgba(34,211,238,.12)'},
+          label: {show:false},
+        },
+      },
+      tooltip: {
+        trigger: 'item',
+        formatter(p){
+          const d=p.data||{};
+          if(d.tid){
+            const row=targets.find(x=>x.tid===d.tid)||{};
+            let s=`<b>${esc(row.label||d.name||'')}</b>`;
+            if(row.break_label) s+=`<br>${esc(row.break_label)}`;
+            if(row.summary_text) s+=`<br><span style="opacity:.75">${esc(row.summary_text)}</span>`;
+            s+='<br><span style="opacity:.6">点击 → 单路径</span>';
+            return s;
+          }
+          return esc(p.name||'');
+        },
+      },
+      series: [
+        {
+          type: 'map',
+          map: 'china',
+          geoIndex: 0,
+          silent: true,
+          itemStyle: {opacity: 0},
+        },
+        {
+          type: 'lines',
+          coordinateSystem: 'geo',
+          data: lines,
+          effect: {show: lines.length>0, period: 6, trailLength: 0.15, symbolSize: 3},
+          lineStyle: {width: 1, opacity: 0.6, curveness: 0.22},
+        },
+        {
+          type: 'scatter',
+          coordinateSystem: 'geo',
+          data: scatter,
+          z: 3,
+        },
+        {
+          type: 'effectScatter',
+          coordinateSystem: 'geo',
+          data: breaks,
+          rippleEffect: {brushType: 'stroke', scale: 3},
+          z: 4,
+        },
+      ],
+    }, true);
+    chart.off('click');
+    chart.on('click', params=>{
+      const tid=(params.data&&params.data.tid)||null;
+      if(tid) drillToSinglePath(tid);
+    });
+    renderGeoInset(data);
+    const stats=(data&&data.stats)||{};
+    document.getElementById('topoDetail').innerHTML=
+      `<div>地理视图 — 主图 ${stats.on_map||onMap.length} 个目标`+
+      `${src?(' · 弧线源 '+esc(src.label||src.city||'监控主机')):' · 未配置 monitor_geo（仅散点）'}`+
+      ` · 内网 ${stats.private||(data.inset||[]).length}</div>`+
+      `<div style="margin-top:4px;font-size:11px;color:var(--dim)">`+
+      `点击地图目标进入单路径跳级拓扑；断点仅在公网 IP 可定位时标注</div>`;
+    if(updateBadge){
+      const poolInfo=getRotatePool((pathsData&&pathsData.paths)||[]);
+      const idx=Math.max(0,poolInfo.pool.findIndex(x=>x.tid===selectedTid));
+      updateRotateBadge(poolInfo,idx);
+    }
+  }).catch(err=>{
+    document.getElementById('topoDetail').textContent='地图加载失败: '+err.message;
+  });
+}
+
 function renderTopo(data){
+  if(topoMode==='geo'){
+    renderGeo(geoData||{targets:[]});
+    return;
+  }
   if(topoMode==='merged'){
     renderMergedTopo(data);
     return;
@@ -1010,7 +1258,9 @@ function selectPath(tid){
 
 async function refreshPaths(){
   try{
-    pathsData=await api('paths');
+    const [paths,geo]=await Promise.all([api('paths'), api('geo')]);
+    pathsData=paths;
+    geoData=geo;
     renderTopo(pathsData);
     refreshRotateState(false);
   }catch(_){}
@@ -1120,6 +1370,7 @@ function connectSSE(){
 }
 connectSSE();
 initExplainBanner();
+syncCenterPanelMode();
 loadAll();
 requestAnimationFrame(()=>markScrollable());
 refreshTimer=setInterval(loadAll,15000);

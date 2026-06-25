@@ -11,8 +11,10 @@ block_cipher = None
 
 # ── 数据文件 ────────────────────────────────────────────────────────────
 datas = [
-    # 应用图标 + 告警音效
+    # 应用图标 + 告警音效 + 可选 ip2region_v4.xdb（离线 GeoIP，纯本地查表）
     ('assets', 'assets'),
+    # 态势大屏地理视图：ECharts + 中国 GeoJSON（禁止 CDN 降级）
+    ('src/web/vendor', 'src/web/vendor'),
 ]
 
 # customtkinter 内置了主题和图片资源，必须打包进去

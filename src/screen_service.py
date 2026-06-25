@@ -12,6 +12,12 @@ from typing import Any, Callable, Optional
 
 from src.trace_policy import summarize_for_display
 
+try:
+    from src.geo_resolver import GeoResolver, parse_manual_geo
+except ImportError:
+    GeoResolver = None  # type: ignore
+    parse_manual_geo = None  # type: ignore
+
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[tuple, tuple[float, Any]] = {}
 
@@ -766,6 +772,200 @@ def build_events(web, *, window: str = "today", limit: int = 30) -> list[dict]:
         if len(merged) >= limit:
             break
     return merged
+
+
+def _break_hop_info(summary: dict | None) -> dict | None:
+    ba = (summary or {}).get("break_at")
+    if not isinstance(ba, dict):
+        return None
+    hop = ba.get("hop")
+    ip = (ba.get("ip") or "").strip()
+    if hop is None and not ip:
+        return None
+    return {
+        "hop": hop,
+        "ip": ip or None,
+        "error": (ba.get("error") or "").strip() or None,
+    }
+
+
+def _break_label(summary: dict | None) -> str | None:
+    ba = (summary or {}).get("break_at")
+    if not isinstance(ba, dict) or ba.get("hop") is None:
+        return None
+    hop = ba.get("hop")
+    ip = (ba.get("ip") or "").strip()
+    if ip and ip != "*":
+        return f"断点约第 {hop} 跳 · {ip}"
+    return f"断点约第 {hop} 跳"
+
+
+def build_geo(
+        web,
+        *,
+        window: str = "today",
+        limit: int = 50,
+        resolver: Any | None = None,
+) -> dict:
+    """Geographic scatter payload for /api/screen/geo."""
+    if GeoResolver is None:
+        raise RuntimeError("geo_resolver unavailable")
+    res = resolver or getattr(web, "_geo_resolver", None) or GeoResolver()
+    with web._lock:
+        targets = []
+        for tid, t in web._targets.items():
+            d = dict(t)
+            d.setdefault("tid", tid)
+            targets.append(d)
+        target_geos = dict(getattr(web, "_target_geos", {}) or {})
+        monitor_geo = getattr(web, "_monitor_geo", None)
+
+    open_map: dict[str, dict] = {}
+    ds = web._data_store
+    tids = [t["tid"] for t in targets if t.get("tid")]
+    if ds and tids:
+        try:
+            open_map = ds.get_open_incidents(tids)
+        except Exception:
+            open_map = {}
+
+    def _prio(t):
+        st = t.get("status") or "gray"
+        rank = {"red": 0, "orange": 1, "gray": 2, "green": 3, "paused": 4}
+        return (rank.get(st, 5), t.get("label") or t.get("tid") or "")
+
+    ordered = sorted(targets, key=_prio)[: max(1, min(limit, 100))]
+    rows: list[dict] = []
+    inset: list[dict] = []
+
+    for t in ordered:
+        tid = t.get("tid") or ""
+        if not tid or not web._history_data_available(tid):
+            continue
+        ip = t.get("ip") or ""
+        status = t.get("status") or "gray"
+        open_inc = open_map.get(tid)
+        trace, _source = _read_traceroute(web, tid, ip, open_inc)
+        hops = (trace or {}).get("hops") or []
+        summary = summarize_for_display(
+            hops,
+            tcp_checks=(trace or {}).get("tcp_checks"),
+            status=status,
+            ping_type=t.get("ping_type"),
+            probe_success=t.get("probe_success"),
+            failure_reason=t.get("failure_reason"),
+        )
+        resolve_ip = (trace or {}).get("resolve_ip") or ip
+        manual_geo = target_geos.get(tid) or t.get("geo")
+        placed = res.resolve_target(
+            ip=ip, resolve_ip=resolve_ip, manual_geo=manual_geo)
+        break_hop = _break_hop_info(summary)
+        break_geo = None
+        if break_hop and break_hop.get("ip"):
+            break_geo = res.resolve_break_geo(break_hop["ip"])
+        row = {
+            "tid": tid,
+            "label": t.get("label") or tid,
+            "ip": ip,
+            "resolve_ip": resolve_ip,
+            "status": status,
+            "kind": placed["kind"],
+            "geo": placed.get("geo"),
+            "break_hop": break_hop,
+            "break_geo": break_geo,
+            "break_label": _break_label(summary),
+            "summary_text": (summary or {}).get("text") or "",
+        }
+        rows.append(row)
+        if placed["kind"] == "private":
+            inset.append({
+                "tid": tid,
+                "label": row["label"],
+                "status": status,
+                "break_label": row["break_label"],
+            })
+
+    src = parse_manual_geo(monitor_geo) if parse_manual_geo else None
+    map_count = sum(1 for r in rows if r.get("geo"))
+    return {
+        "window": window,
+        "updated_at": int(time.time()),
+        "source": src,
+        "targets": rows,
+        "inset": inset,
+        "stats": {
+            "total": len(rows),
+            "on_map": map_count,
+            "private": len(inset),
+            "unlocated": sum(
+                1 for r in rows
+                if r.get("kind") == "public" and not r.get("geo")),
+        },
+    }
+
+
+def demo_geo() -> dict:
+    return {
+        "window": "today",
+        "updated_at": int(time.time()),
+        "demo": True,
+        "source": {
+            "lat": 31.2304,
+            "lon": 121.4737,
+            "label": "监控主机 · 上海",
+            "city": "上海",
+        },
+        "targets": [
+            {
+                "tid": "demo-red",
+                "label": "电信DNS",
+                "ip": "202.98.198.167",
+                "resolve_ip": "202.98.198.167",
+                "status": "red",
+                "kind": "public",
+                "geo": {"lat": 30.5728, "lon": 104.0668,
+                        "city": "成都", "region": "四川"},
+                "break_hop": {"hop": 7, "ip": "202.98.198.167",
+                              "error": "timeout"},
+                "break_geo": {"lat": 30.5728, "lon": 104.0668,
+                              "city": "成都", "region": "四川"},
+                "break_label": "断点约第 7 跳 · 202.98.198.167",
+                "summary_text": "最后可达 第6跳 → 第7跳起中断",
+            },
+            {
+                "tid": "demo-green",
+                "label": "百度",
+                "ip": "220.181.38.148",
+                "resolve_ip": "220.181.38.148",
+                "status": "green",
+                "kind": "public",
+                "geo": {"lat": 39.9042, "lon": 116.4074,
+                        "city": "北京", "region": "北京"},
+                "break_hop": None,
+                "break_geo": None,
+                "break_label": None,
+                "summary_text": "路径完整",
+            },
+            {
+                "tid": "demo-private",
+                "label": "内网OA",
+                "ip": "10.0.0.50",
+                "resolve_ip": "10.0.0.50",
+                "status": "orange",
+                "kind": "private",
+                "geo": None,
+                "break_hop": {"hop": 3, "ip": "10.0.0.9", "error": None},
+                "break_geo": None,
+                "break_label": "断点约第 3 跳 · 10.0.0.9",
+                "summary_text": "内网路径异常",
+            },
+        ],
+        "inset": [
+            {"tid": "demo-private", "label": "内网OA",
+             "status": "orange", "break_label": "断点约第 3 跳 · 10.0.0.9"},
+        ],
+        "stats": {"total": 3, "on_map": 2, "private": 1, "unlocated": 0},
+    }
 
 
 def demo_overview() -> dict:

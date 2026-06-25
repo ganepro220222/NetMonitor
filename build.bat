@@ -17,7 +17,7 @@ if errorlevel 1 (
 for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo  Python: %%v
 
 echo.
-echo  [1/4] Using .venv Python to ensure clean isolated build...
+echo  [1/5] Using .venv Python to ensure clean isolated build...
 set VENV_PY=.venv\Scripts\python.exe
 
 if not exist "%VENV_PY%" (
@@ -28,7 +28,7 @@ if not exist "%VENV_PY%" (
 
 %VENV_PY% -m pip install pyinstaller --quiet
 
-echo  [2/4] Checking environment...
+echo  [2/5] Checking environment...
 %VENV_PY% check_build_env.py
 if errorlevel 1 (
     echo.
@@ -36,12 +36,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo  [3/4] Generating icon and cleaning old build...
+echo  [3/5] Generating icon and cleaning old build...
 %VENV_PY% -c "from src.icon_generator import ensure_icon; ensure_icon()" 2>nul
 if exist "build" rmdir /s /q "build"
 if exist "dist"  rmdir /s /q "dist"
 
-echo  [4/4] Building... (2-5 minutes)
+echo  [4/5] Offline GeoIP database (optional, local-only at runtime)...
+%VENV_PY% scripts\download_ip2region.py
+if errorlevel 1 (
+    echo  [WARN] ip2region.xdb not downloaded — map still works with manual geo.
+)
+
+echo  [5/5] Building... (2-5 minutes)
 echo.
 %VENV_PY% -m PyInstaller build_exe.spec --clean --noconfirm
 if errorlevel 1 (

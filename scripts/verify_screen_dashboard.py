@@ -8,6 +8,7 @@ sys.path.insert(0, ROOT)
 
 from src.screen_service import (
     build_events,
+    build_geo,
     build_merged_graph,
     build_overview,
     build_paths,
@@ -16,12 +17,14 @@ from src.screen_service import (
     compute_health_score,
     compute_risk_score,
     demo_events,
+    demo_geo,
     demo_overview,
     invalidate_screen_cache,
     parse_window,
     should_merge_target_hop,
     _path_graph,
 )
+from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo
 from src.traceroute_summary import summarize_break
 from src.web_server import WebServer
 
@@ -236,6 +239,71 @@ def test_build_overview_paths():
     return ok
 
 
+def test_geo_resolver():
+    res = GeoResolver()
+    manual = parse_manual_geo({"lat": 31.2, "lon": 121.5, "city": "上海"})
+    ok_manual = manual and manual["lat"] == 31.2
+    priv = res.resolve_target(ip="10.0.0.1", resolve_ip="10.0.0.1", manual_geo=None)
+    pub = res.resolve_target(
+        ip="202.98.198.167", resolve_ip="202.98.198.167",
+        manual_geo={"lat": 30.5, "lon": 104.0})
+    ok = (
+        ok_manual
+        and is_private_ip("10.0.0.1")
+        and is_public_ip("202.98.198.167")
+        and priv["kind"] == "private"
+        and pub["kind"] == "manual"
+    )
+    xdb = GeoResolver.resolve_xdb_path(ROOT)
+    if xdb and os.path.isfile(xdb):
+        rx = GeoResolver(xdb)
+        baidu = rx.lookup_public_ip("220.181.38.148")
+        ok = ok and baidu is not None and baidu.get("lat") is not None
+        print(f"geo_resolver xdb={os.path.basename(xdb)} baidu={baidu}")
+    print(f"geo_resolver -> {ok}")
+    return ok
+
+
+def test_demo_geo_shape():
+    d = demo_geo()
+    ok = (
+        d.get("demo") is True
+        and isinstance(d.get("targets"), list)
+        and len(d["targets"]) >= 2
+        and isinstance(d.get("inset"), list)
+        and "stats" in d
+        and any(t.get("break_geo") for t in d["targets"])
+    )
+    print(f"demo_geo shape -> {ok}")
+    return ok
+
+
+def test_build_geo():
+    w = WebServer(port=0)
+    w._running = True
+    w.set_screen_geo(
+        monitor_geo={"lat": 31.23, "lon": 121.47, "label": "监控主机"},
+        target_geos={"T1": {"lat": 39.9, "lon": 116.4, "city": "北京"}},
+        resolver=GeoResolver(),
+    )
+    w.update_target(
+        tid="T1", label="Beijing", ip="220.181.38.148", status="green",
+        latency_ms=5.0, jitter_ms=1.0, loss_rate=0.0, is_probe_result=True)
+    w.update_target(
+        tid="T2", label="LAN", ip="10.0.0.8", status="orange",
+        latency_ms=10.0, jitter_ms=1.0, loss_rate=0.1, is_probe_result=True)
+    payload = build_geo(w)
+    kinds = {r["tid"]: r["kind"] for r in payload.get("targets", [])}
+    ok = (
+        payload.get("source") is not None
+        and kinds.get("T1") == "manual"
+        and kinds.get("T2") == "private"
+        and len(payload.get("inset", [])) >= 1
+    )
+    print(f"build_geo -> {ok} kinds={kinds}")
+    return ok
+
+
 def test_http_routes():
     w = WebServer(port=0)
     if not getattr(w, "_app", None):
@@ -245,16 +313,26 @@ def test_http_routes():
         r_screen = c.get("/screen")
         r_demo = c.get("/api/screen/overview?demo=1")
         r_paths = c.get("/api/screen/paths?demo=1")
+        r_geo = c.get("/api/screen/geo?demo=1")
         r_ev = c.get("/api/screen/events?demo=1")
+        r_vendor = c.get("/vendor/echarts.min.js")
     body_ev = json.loads(r_ev.data)
+    body_geo = json.loads(r_geo.data)
     ok = (
         r_screen.status_code == 200
         and b"id=\"stage\"" in r_screen.data
+        and b"btnTopoGeo" in r_screen.data
+        and b"geoChart" in r_screen.data
         and r_demo.status_code == 200
         and json.loads(r_demo.data).get("demo") is True
         and r_paths.status_code == 200
         and bool(json.loads(r_paths.data).get("paths"))
         and bool(json.loads(r_paths.data).get("merged"))
+        and r_geo.status_code == 200
+        and body_geo.get("demo") is True
+        and isinstance(body_geo.get("targets"), list)
+        and r_vendor.status_code == 200
+        and len(r_vendor.data) > 1000
         and r_ev.status_code == 200
         and isinstance(body_ev.get("events"), list)
     )
@@ -307,8 +385,15 @@ def test_source_guards():
         and "route-compare" in html
         and "build_route_diff" in svc
         and "should_merge_target_hop" in svc
+        and "build_geo" in svc
+        and "demo_geo" in svc
         and "open_incident" in svc
         and "onRouteChangedSSE" in html
+        and "drillToSinglePath" in html
+        and "geo-mode" in html
+        and "/api/screen/geo" in ws
+        and 'route("/vendor/' in ws.replace(" ", "")
+        and "src/web/vendor" in open(os.path.join(ROOT, "build_exe.spec"), encoding="utf-8").read()
     )
     print(f"source guards + wiring -> {ok}")
     return ok
@@ -332,6 +417,9 @@ def main():
         ("summarize_break", test_summarize_break_wording()),
         ("break_kind", test_break_kind_display()),
         ("target_merge", test_target_merge_scheme_c()),
+        ("geo_resolver", test_geo_resolver()),
+        ("demo_geo", test_demo_geo_shape()),
+        ("build_geo", test_build_geo()),
         ("route_diff", test_route_diff()),
         ("demo_events", test_demo_events_shape()),
         ("merged_graph", test_merged_graph()),
