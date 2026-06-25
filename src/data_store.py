@@ -3829,6 +3829,33 @@ class DataStore:
 
         return outage_secs, outage_count
 
+    @staticmethod
+    def _sla_uptime_pct(period_secs: float, outage_secs: float,
+                        outage_count: int) -> float:
+        """SLA uptime % — never round a real outage up to 100.000%."""
+        ratio = max(0.0, (period_secs - outage_secs) / period_secs) * 100.0
+        if outage_count > 0 and outage_secs > 0:
+            for decimals in (4, 5, 6):
+                rounded = round(ratio, decimals)
+                if rounded < 100.0:
+                    return rounded
+            return 99.9999
+        return round(ratio, 3)
+
+    @staticmethod
+    def _sla_outage_metrics(period_secs: float, outage_secs: float,
+                            outage_count: int) -> dict:
+        """Shared outage/uptime fields for get_sla_stats and batch."""
+        return {
+            "uptime_pct": DataStore._sla_uptime_pct(
+                period_secs, outage_secs, outage_count),
+            "outage_count": outage_count,
+            "outage_seconds": (round(outage_secs, 1)
+                               if outage_count > 0 and outage_secs > 0
+                               else 0.0),
+            "outage_minutes": round(outage_secs / 60, 1),
+        }
+
     def get_dashboard_stats_batch(self, target_ids: list,
                                 start_ts, end_ts) -> dict:
         """
@@ -3978,16 +4005,14 @@ class DataStore:
             # so that a 7-day query made on day 1 isn't comparing against a full week.
             elapsed = min(end_ts, now) - start_ts
             period_secs = max(elapsed, 1)
-            uptime_pct  = round(
-                max(0.0, (period_secs - outage_secs) / period_secs) * 100, 3)
+            metrics = self._sla_outage_metrics(
+                period_secs, outage_secs, outage_count)
             return {
-                "uptime_pct":     uptime_pct,
+                **metrics,
                 "lat_avg":        lat_avg,
                 "lat_max":        lat_max,
                 "lat_p95":        lat_p95,
                 "p95_from_raw":   bool(merged.get("p95_from_raw")),
-                "outage_count":   outage_count,
-                "outage_minutes": round(outage_secs / 60, 1),
                 "sample_n":       total,
             }
         except Exception as e:
@@ -3995,6 +4020,7 @@ class DataStore:
             return {"uptime_pct": None, "lat_avg": None, "lat_max": None,
                     "lat_p95": None, "p95_from_raw": False,
                     "outage_count": 0,
+                    "outage_seconds": 0.0,
                     "outage_minutes": 0, "sample_n": 0}
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
@@ -4013,7 +4039,7 @@ class DataStore:
         walk as get_sla_stats().
 
         Returns {target_id: {uptime_pct, lat_avg, lat_max, lat_p95,
-        outage_count, outage_minutes, sample_n}}.  Targets present in
+        outage_count, outage_seconds, outage_minutes, sample_n}}.  Targets present in
         `target_ids` but absent from the DB get the "no data" defaults
         (uptime_pct=100.0, outage_count=0, sample_n=0).
         """
@@ -4121,16 +4147,14 @@ class DataStore:
                 outage_secs, outage_count = self._compute_outage_stats(
                     float(start_ts), float(end_ts), status_at_start, events, now)
 
-                uptime_pct = round(
-                    max(0.0, (period_secs - outage_secs) / period_secs) * 100, 3)
+                metrics = self._sla_outage_metrics(
+                    period_secs, outage_secs, outage_count)
                 result[tid] = {
-                    "uptime_pct":     uptime_pct,
+                    **metrics,
                     "lat_avg":        lat_avg,
                     "lat_max":        lat_max,
                     "lat_p95":        lat_p95,
                     "p95_from_raw":   bool(lat.get("p95_from_raw")) if lat else False,
-                    "outage_count":   outage_count,
-                    "outage_minutes": round(outage_secs / 60, 1),
                     "sample_n":       total,
                 }
             return result

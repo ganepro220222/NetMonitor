@@ -6106,27 +6106,37 @@ function renderSLATable(){
         +'title="窗口内部分样本仅有小时聚合、无完整原始明细，P95 不可精确计算">N/A</span>';
     return '--';
   };
-  const pct=v=>{
+  const pct=(v,r)=>{
     if(v==null)return'<span style="color:var(--dim)">--</span>';
+    let dec=3;
+    if(r&&r.outage_count>0&&v>=99.995)dec=4;
+    if(r&&r.outage_count>0&&v>=99.9995)dec=5;
     const c=v>=99.9?"var(--green)":v>=99?"var(--orange)":"var(--red)";
-    return `<b style="color:${c}">${v.toFixed(3)}%</b>`;
+    return `<b style="color:${c}">${v.toFixed(dec)}%</b>`;
   };
-  const fmtMin=m=>{
-    if(!m)return'<span style="color:var(--green)">无中断</span>';
-    if(m<1)return `${Math.round(m*60)} 秒`;
-    if(m<60)return `${m.toFixed(1)} 分钟`;
-    return `${(m/60).toFixed(1)} 小时`;
+  const fmtOutage=r=>{
+    const cnt=r.outage_count||0;
+    let sec=r.outage_seconds;
+    if(sec==null)sec=(r.outage_minutes||0)*60;
+    if(cnt===0&&sec<=0)return'<span style="color:var(--green)">无中断</span>';
+    if(sec<60){
+      const label=(sec<10&&!Number.isInteger(sec))?`${sec.toFixed(1)} 秒`:`${Math.round(sec)} 秒`;
+      return `<span style="color:var(--orange)">${label}</span>`;
+    }
+    const m=sec/60;
+    if(m<60)return `<span style="color:var(--orange)">${m.toFixed(1)} 分钟</span>`;
+    return `<span style="color:var(--red)">${(m/60).toFixed(1)} 小时</span>`;
   };
   const tbody=rows.map(r=>{
     const bg=r.uptime_pct!=null&&r.uptime_pct<99?"rgba(239,68,68,.05)":"";
     return `<tr style="border-bottom:1px solid var(--border)${bg?";background:"+bg:""}">
       <td style="padding:9px 14px"><b style="color:var(--text)">${esc(r.label)}</b><br><span style="font-size:11px;color:var(--dim)">${esc(r.ip)}</span></td>
-      <td style="text-align:center;padding:9px 14px">${pct(r.uptime_pct)}</td>
+      <td style="text-align:center;padding:9px 14px">${pct(r.uptime_pct,r)}</td>
       <td style="text-align:right;padding:9px 14px;color:var(--text)">${ms(r.lat_avg)}</td>
       <td style="text-align:right;padding:9px 14px;color:var(--text)">${msP95(r.lat_p95,r)}</td>
       <td style="text-align:right;padding:9px 14px;color:var(--dim)">${ms(r.lat_max)}</td>
       <td style="text-align:center;padding:9px 14px;color:${r.outage_count?"var(--red)":"var(--green)"};">${r.outage_count} 次</td>
-      <td style="text-align:right;padding:9px 14px">${fmtMin(r.outage_minutes)}</td>
+      <td style="text-align:right;padding:9px 14px">${fmtOutage(r)}</td>
     </tr>`;
   }).join("")||'<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--dim)">暂无数据（监控时间不足或该周期无探测记录）</td></tr>';
   document.getElementById("sla-tbody").innerHTML=tbody;
@@ -6769,6 +6779,7 @@ class WebServer:
             "lat_max": None,
             "lat_p95": None,
             "outage_count": 0,
+            "outage_seconds": 0.0,
             "outage_minutes": 0,
             "sample_n": 0,
         }
@@ -7769,6 +7780,7 @@ class WebServer:
                     "均延时(ms)": s["lat_avg"], "P95延时(ms)": s["lat_p95"],
                     "最大延时(ms)": s["lat_max"],
                     "故障次数": s["outage_count"],
+                    "累计中断(秒)": s.get("outage_seconds", 0),
                     "累计中断(分钟)": s["outage_minutes"],
                 })
             try:
