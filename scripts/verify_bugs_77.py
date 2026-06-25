@@ -69,8 +69,8 @@ def test_source_sla_ms_only_null_is_dash():
             "function exportSLAExcel()", 1)[0]
     ok = (
         re.search(r'const ms\s*=\s*v\s*=>\s*v\s*==\s*null\s*\?', block) is not None
-        and "v===0" not in block.split("const fmtMin")[0]
-        and "fmtMin" in block
+        and "v===0" not in block.split("const fmtOutage")[0]
+        and "fmtOutage" in block
     )
     print(f"Bug77 source SLA ms() null-only dash -> {ok}")
     return ok
