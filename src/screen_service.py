@@ -132,11 +132,37 @@ def _read_traceroute(web, tid: str, ip: str,
     return None, "none"
 
 
+def _norm_ip(ip: str | None) -> str:
+    return (ip or "").strip().lower()
+
+
+def _last_hop_with_ip(hops: list | None) -> dict | None:
+    for h in reversed(hops or []):
+        ip = _norm_ip(h.get("ip"))
+        if ip and ip != "*":
+            return h
+    return None
+
+
+def should_merge_target_hop(hops: list | None, target_ip: str,
+                            summary: dict | None = None) -> bool:
+    """Scheme C: merge last hop with target when IPs match; else keep separate."""
+    _ = summary  # reserved for future heuristics; IP match is the primary rule
+    target = _norm_ip(target_ip)
+    if not target:
+        return False
+    last = _last_hop_with_ip(hops)
+    if not last:
+        return False
+    return _norm_ip(last.get("ip")) == target
+
+
 def _path_graph(hops: list, tid: str, label: str, status: str,
-                summary: dict) -> dict:
+                summary: dict, *, target_ip: str = "") -> dict:
     nodes = [{"id": "source", "type": "source", "label": "监控主机"}]
     edges = []
     prev = "source"
+    last_nid_with_ip = None
     for h in hops or []:
         hip = h.get("ip") or "*"
         nid = f"hop:{hip}"
@@ -153,16 +179,29 @@ def _path_graph(hops: list, tid: str, label: str, status: str,
         edge_status = "red" if st in ("break", "after") else status
         edges.append({"from": prev, "to": nid, "status": edge_status})
         prev = nid
-    tgt = f"target:{tid}"
-    nodes.append({
-        "id": tgt,
-        "type": "target",
-        "tid": tid,
-        "label": label,
-        "status": status,
-    })
-    edges.append({"from": prev, "to": tgt, "status": status})
-    return {"nodes": nodes, "edges": edges, "summary": summary}
+        if hip and hip != "*":
+            last_nid_with_ip = nid
+    merge = should_merge_target_hop(hops, target_ip, summary)
+    if merge and last_nid_with_ip:
+        for n in nodes:
+            if n["id"] == last_nid_with_ip:
+                n["is_target"] = True
+                n["target_label"] = label
+                n["tid"] = tid
+                n["target_status"] = status
+                break
+    else:
+        tgt = f"target:{tid}"
+        nodes.append({
+            "id": tgt,
+            "type": "target",
+            "tid": tid,
+            "label": label,
+            "status": status,
+        })
+        edges.append({"from": prev, "to": tgt, "status": status})
+    return {"nodes": nodes, "edges": edges, "summary": summary,
+            "target_merged": merge}
 
 
 def _hop_node_id(h: dict) -> str:
@@ -236,16 +275,29 @@ def build_merged_graph(paths: list[dict]) -> dict:
             edge_st = st if st in ("break", "after", "filtered") else "ok"
             _add_edge(prev, nid, tid, edge_st)
             prev = nid
-        tgt = f"target:{tid}"
-        _add_node(
-            tgt,
-            type="target",
-            tid=tid,
-            label=p.get("label") or tid,
-            status=p.get("status") or "gray",
-            target_tids=[tid],
-        )
-        _add_edge(prev, tgt, tid, p.get("status") or "gray")
+        resolve_ip = p.get("resolve_ip") or p.get("ip") or ""
+        summary = p.get("summary") or {}
+        if should_merge_target_hop(p.get("hops"), resolve_ip, summary):
+            last = _last_hop_with_ip(p.get("hops"))
+            if last:
+                nid = _hop_node_id(last)
+                if nid in nodes:
+                    ent = nodes[nid]
+                    ent["is_target"] = True
+                    ent["target_label"] = p.get("label") or tid
+                    ent["tid"] = tid
+                    ent["target_status"] = p.get("status") or "gray"
+        else:
+            tgt = f"target:{tid}"
+            _add_node(
+                tgt,
+                type="target",
+                tid=tid,
+                label=p.get("label") or tid,
+                status=p.get("status") or "gray",
+                target_tids=[tid],
+            )
+            _add_edge(prev, tgt, tid, p.get("status") or "gray")
 
     return {
         "node_order": order,
@@ -309,7 +361,8 @@ def build_paths(web, *, window: str = "today", limit: int = 12) -> dict:
                 pending = web._tracer_cache.get(tid) is None
             trace_status = "pending" if pending and source == "none" else "none"
         graph = _path_graph(
-            hops, tid, t.get("label") or tid, status, summary)
+            hops, tid, t.get("label") or tid, status, summary,
+            target_ip=(trace or {}).get("resolve_ip") or ip)
         route_changed = bool((trace or {}).get("route_changed"))
         route_diff = None
         prev_hops: list = []
@@ -325,6 +378,8 @@ def build_paths(web, *, window: str = "today", limit: int = 12) -> dict:
             "tid": tid,
             "label": t.get("label") or tid,
             "ip": ip,
+            "resolve_ip": (trace or {}).get("resolve_ip") or ip,
+            "target_merged": graph.get("target_merged", False),
             "status": status,
             "incident_id": (open_inc or {}).get("incident_id"),
             "trace_status": trace_status,
@@ -755,11 +810,14 @@ def demo_paths() -> dict:
         "changed_hops": [2],
         "text": "Hop3: 202.98.198.166→202.98.198.167",
     }
-    graph = _path_graph(hops, "demo-red", "电信DNS", "red", summary)
+    graph = _path_graph(hops, "demo-red", "电信DNS", "red", summary,
+                        target_ip="202.98.198.167")
     paths = [{
             "tid": "demo-red",
             "label": "电信DNS",
             "ip": "202.98.198.167",
+            "resolve_ip": "202.98.198.167",
+            "target_merged": graph.get("target_merged", False),
             "status": "red",
             "trace_status": "completed",
             "route_changed": True,
@@ -782,13 +840,14 @@ def demo_paths() -> dict:
                 {"hop": 2, "ip": "220.181.38.148", "status": "ok", "rtt_ms": 12.0},
             ],
             "summary": {"reached": True, "text": "路径完整", "break_kind": "none"},
-            "graph": _path_graph(
-                [{"hop": 1, "ip": "10.0.0.1", "status": "ok"},
-                 {"hop": 2, "ip": "220.181.38.148", "status": "ok"}],
-                "demo-green", "百度", "green",
-                {"reached": True, "text": "路径完整", "break_kind": "none"}),
+            "resolve_ip": "220.181.38.148",
             "demo": True,
         }]
+    green_graph = _path_graph(
+        paths[1]["hops"], "demo-green", "百度", "green",
+        paths[1]["summary"], target_ip="220.181.38.148")
+    paths[1]["graph"] = green_graph
+    paths[1]["target_merged"] = green_graph.get("target_merged", False)
     return {
         "window": "today",
         "origin": {"id": "source", "label": "监控主机", "type": "source"},

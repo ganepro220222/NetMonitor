@@ -799,6 +799,11 @@ function renderMergedTopo(data){
     const n=nodesById[nid]||{id:nid};
     if(nid==='source'){
       visuals.push({kind:'source', status:'ok', label:n.label||'监控主机', hopNum:0});
+    } else if(n.is_target){
+      visuals.push({
+        kind:'target', status:n.target_status||n.status||'green', pulse:(n.target_status||n.status)==='red',
+        label:(n.target_label||n.label||'')+(n.ip?(' · '+n.ip):''),
+      });
     } else if(n.type==='target'){
       visuals.push({
         kind:'target', status:n.status||'green', pulse:n.status==='red',
@@ -902,9 +907,10 @@ function renderSingleTopo(data, updateBadge=true){
   const pending=p.trace_status==='pending';
   document.getElementById('topoDetail').parentElement.classList.toggle('topo-pending',pending);
 
+  const merged=!!p.target_merged;
   const nodes=[];
   nodes.push({kind:'source', status:'ok', label:'监控主机', hopNum:0});
-  hops.forEach(h=>{
+  hops.forEach((h, idx)=>{
     const st=h.status||'ok';
     const isMarkPt=h.hop===breakHop&&breakKind!=='none';
     let tag='';
@@ -914,20 +920,25 @@ function renderSingleTopo(data, updateBadge=true){
     else if(isMarkPt&&breakKind==='endpoint'){ tag='应用层异常'; bk='endpoint'; }
     else if(st==='filtered') tag='ICMP过滤';
     else if(st==='break'||st==='after') tag='无响应';
-    nodes.push({
-      kind:'hop', status:st, hopNum:h.hop||'?',
-      label:hopLabel(h),
+    const isMergedTarget=merged && idx===hops.length-1;
+    const node={
+      kind:isMergedTarget?'target':'hop', status:isMergedTarget?(p.status||'green'):st,
+      hopNum:h.hop||'?',
+      label:isMergedTarget?((p.label||'目标')+' · '+(p.resolve_ip||p.ip||'')):hopLabel(h),
       rtt:h.rtt_ms!=null?Number(h.rtt_ms).toFixed(1):null,
       tag,
-      pulse:isMarkPt||st==='break'||st==='after',
+      pulse:isMergedTarget?(p.status==='red'):(isMarkPt||st==='break'||st==='after'),
       breakPoint:isMarkPt,
       breakKind:bk,
+    };
+    nodes.push(node);
+  });
+  if(!merged){
+    nodes.push({
+      kind:'target', status:p.status||'green', pulse:p.status==='red',
+      label:(p.label||'目标')+' · '+(p.ip||''),
     });
-  });
-  nodes.push({
-    kind:'target', status:p.status||'green', pulse:p.status==='red',
-    label:(p.label||'目标')+' · '+(p.ip||''),
-  });
+  }
 
   const layout=layoutSerpentine(nodes.length, 920, 480, 36);
   svg.setAttribute('viewBox',`0 0 ${layout.W} ${layout.totalH}`);
@@ -988,7 +999,9 @@ function renderSingleTopo(data, updateBadge=true){
     routeNote+
     breakNote+
     `<div style="margin-top:6px">${esc(detail)}</div>`+
-    `<div style="margin-top:4px;font-size:11px;color:var(--dim)">可视化 ${nodes.length} 个节点（含源/目标），与 traceroute ${hops.length} 跳一致</div>`;
+    `<div style="margin-top:4px;font-size:11px;color:var(--dim)">${merged
+      ? `可视化 ${nodes.length} 个节点（源 + ${hops.length} 跳），最后一跳即监测目标`
+      : `可视化 ${nodes.length} 个节点（源 + ${hops.length} 跳 + 监测目标），traceroute 未在最后一跳到达目标 IP`}</div>`;
 }
 
 function selectPath(tid){

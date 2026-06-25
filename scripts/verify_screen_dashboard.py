@@ -19,6 +19,8 @@ from src.screen_service import (
     demo_overview,
     invalidate_screen_cache,
     parse_window,
+    should_merge_target_hop,
+    _path_graph,
 )
 from src.traceroute_summary import summarize_break
 from src.web_server import WebServer
@@ -107,6 +109,31 @@ def test_merged_graph():
         and any(n.get("id") == "hop:10.0.0.1" for n in mg.get("nodes", []))
     )
     print(f"build_merged_graph shared hop -> {ok}")
+    return ok
+
+
+def test_target_merge_scheme_c():
+    reached_hops = [
+        {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+        {"hop": 20, "ip": "47.108.166.19", "status": "ok"},
+    ]
+    broken_hops = [
+        {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+        {"hop": 6, "ip": "219.1.1.1", "status": "break"},
+    ]
+    ok_merge = should_merge_target_hop(reached_hops, "47.108.166.19")
+    ok_split = not should_merge_target_hop(broken_hops, "202.98.198.167")
+    g = _path_graph(
+        reached_hops, "T", "台网", "green",
+        {"reached": True, "break_kind": "none"},
+        target_ip="47.108.166.19")
+    ok_graph = (
+        g.get("target_merged") is True
+        and not any(n.get("type") == "target" for n in g.get("nodes", []))
+        and any(n.get("is_target") for n in g.get("nodes", []))
+    )
+    ok = ok_merge and ok_split and ok_graph
+    print(f"target merge scheme C -> {ok} merge={ok_merge} split={ok_split} graph={ok_graph}")
     return ok
 
 
@@ -279,6 +306,7 @@ def test_source_guards():
         and "topOutages" in html
         and "route-compare" in html
         and "build_route_diff" in svc
+        and "should_merge_target_hop" in svc
         and "open_incident" in svc
         and "onRouteChangedSSE" in html
     )
@@ -303,6 +331,7 @@ def main():
         ("scores", test_score_helpers()),
         ("summarize_break", test_summarize_break_wording()),
         ("break_kind", test_break_kind_display()),
+        ("target_merge", test_target_merge_scheme_c()),
         ("route_diff", test_route_diff()),
         ("demo_events", test_demo_events_shape()),
         ("merged_graph", test_merged_graph()),

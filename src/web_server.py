@@ -2302,30 +2302,52 @@ function renderDiag(data,ip){
   const icmpBlocked=hasBreak&&tcpOk;
 
   // Build topology
+  const mergeTarget=(function(hopsList, resolveIp, monitorIp){
+    const target=(resolveIp||monitorIp||'').trim().toLowerCase();
+    if(!target||!hopsList||!hopsList.length) return false;
+    let lastHop=null;
+    for(let i=hopsList.length-1;i>=0;i--){
+      const hip=(hopsList[i].ip||'').trim().toLowerCase();
+      if(hip&&hip!=='*'){ lastHop=hopsList[i]; break; }
+    }
+    if(!lastHop) return false;
+    return (lastHop.ip||'').trim().toLowerCase()===target;
+  })(hops, data.resolve_ip, ip);
+  let lastIpIdx=-1;
+  for(let i=hops.length-1;i>=0;i--){
+    const hip=(hops[i].ip||'').trim();
+    if(hip&&hip!=='*'){ lastIpIdx=i; break; }
+  }
+  const diagTarget=targets[currentDiagTid]||{};
   let html='<div class="topo-wrap">';
   html+=`<div class="topo-node you"><div class="node-circle">💻</div>
     <div class="node-info"><div class="node-ip">本机</div></div></div>`;
 
-  hops.forEach(h=>{
+  hops.forEach((h,i)=>{
+    const isMergedTarget=mergeTarget&&i===lastIpIdx;
     const cls=h.status||'ok';
-    const addr=h.ip?(h.hostname&&h.hostname!==h.ip?`${h.hostname} [${h.ip}]`:h.ip):'*';
+    const addr=isMergedTarget
+      ? `${diagTarget.label||'目标'} · ${data.resolve_ip||ip}`
+      : (h.ip?(h.hostname&&h.hostname!==h.ip?`${h.hostname} [${h.ip}]`:h.ip):'*');
     const rtt=h.rtt_ms?`${h.rtt_ms} ms`:'*';
     const tag=(cls==='filtered')?'<span class="node-tag">ICMP过滤</span>':
                (cls==='break')?'<span class="node-tag">断路点</span>':'';
     html+=`<div class="topo-connector"><div class="connector-line"></div><div class="connector-arrow">▼</div></div>
-    <div class="topo-node ${cls}">
-      <div class="node-circle">${h.hop}</div>
+    <div class="topo-node ${isMergedTarget?'destination':cls}">
+      <div class="node-circle">${isMergedTarget?'🎯':h.hop}</div>
       <div class="node-info"><div class="node-ip">${esc(addr)}</div></div>
       <div class="node-rtt">${rtt}</div>${tag}
     </div>`;});
 
+  if(!mergeTarget){
   html+=`<div class="topo-connector"><div class="connector-line"></div><div class="connector-arrow">▼</div></div>
   <div class="topo-node destination">
     <div class="node-circle">🎯</div>
     <div class="node-info"><div class="node-ip">目标：${esc(data.resolve_ip||ip)}</div>
       ${data.ip&&data.ip!==data.resolve_ip?`<div class="node-host">原始：${esc(data.ip)}</div>`:''}
     </div>
-  </div></div>`;
+  </div>`;}
+  html+='</div>';
 
   // ICMP blocked note
   if(icmpBlocked)html+=`<div style="margin-top:12px;padding:10px 14px;border-radius:8px;
