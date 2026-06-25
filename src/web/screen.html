@@ -311,6 +311,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
           <div class="score-hint" id="riskHint"></div></div>
       </div>
       <div class="statgrid" id="riskStats"></div>
+      <div class="ptitle" style="padding:14px 0 2px;font-size:11px">多维态势雷达<span style="margin-left:auto;font-size:10px;color:var(--dim);font-weight:400;letter-spacing:0;text-transform:none">越靠外越健康</span></div>
+      <svg id="healthRadar" viewBox="0 0 320 232" preserveAspectRatio="xMidYMid meet" style="width:100%;display:block;max-height:248px"></svg>
     </div>
   </div>
 
@@ -710,6 +712,49 @@ function renderOverview(ov){
     const accent=cls==='green'?'var(--green)':cls==='orange'?'var(--orange)':cls==='red'?'var(--red)':'var(--cyan)';
     return `<div class="stat" style="--accent:${accent}"><div class="k">${k}</div><div class="v ${cls}">${v||0}</div></div>`;
   }).join('');
+  renderHealthRadar(ov);
+}
+
+/** Multi-dimensional posture radar — all axes derived from the overview
+ *  payload already on hand (no extra request). Outer = healthier. */
+function renderHealthRadar(ov){
+  const svg=document.getElementById('healthRadar'); if(!svg) return;
+  const c=ov.counts||{}; const tot=Math.max(c.targets||0,1);
+  const risk=(ov.risk&&ov.risk.score!=null)?ov.risk.score:0;
+  const health=(ov.health&&ov.health.score!=null)?ov.health.score:0;
+  const up=(ov.avg_uptime_pct!=null)?ov.avg_uptime_pct:100;
+  const clamp=v=>Math.max(0,Math.min(100,v));
+  const dims=[
+    ['连通率', (c.green||0)/tot*100],
+    ['可用率', up],
+    ['健康分', health*10],
+    ['低风险', 100-risk],
+    ['无故障', (1-(c.red||0)/tot)*100],
+  ].map(d=>[d[0],clamp(d[1])]);
+  const col=health>=8?'34,211,238':health>=6?'245,158,11':'239,68,68';
+  const cx=160, cy=110, R=78, n=dims.length;
+  const ang=i=>(-90+i*360/n)*Math.PI/180;
+  const pt=(i,r)=>[cx+Math.cos(ang(i))*r, cy+Math.sin(ang(i))*r];
+  const poly=(r,map)=>dims.map((_,i)=>pt(i,typeof r==='function'?r(i):r).map(v=>v.toFixed(1)).join(',')).join(' ');
+  let g='<defs><filter id="radarGlow" x="-40%" y="-40%" width="180%" height="180%">'
+    +'<feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/>'
+    +'<feMergeNode in="SourceGraphic"/></feMerge></filter></defs>';
+  [0.25,0.5,0.75,1].forEach(f=>{
+    g+=`<polygon points="${poly(R*f)}" fill="none" stroke="rgba(34,211,238,${f===1?0.22:0.08})" stroke-width="1"/>`;
+  });
+  dims.forEach((d,i)=>{
+    const [ex,ey]=pt(i,R);
+    g+=`<line x1="${cx}" y1="${cy}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" stroke="rgba(34,211,238,.13)"/>`;
+    const [lx,ly]=pt(i,R+20);
+    g+=`<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="var(--dim)" font-size="11" `
+      +`text-anchor="middle" dominant-baseline="middle">${d[0]} `
+      +`<tspan fill="rgb(${col})" font-weight="700">${Math.round(d[1])}</tspan></text>`;
+  });
+  g+=`<polygon points="${poly(i=>R*dims[i][1]/100)}" fill="rgba(${col},.20)" `
+    +`stroke="rgb(${col})" stroke-width="2" stroke-linejoin="round" filter="url(#radarGlow)"/>`;
+  dims.forEach((d,i)=>{const [px,py]=pt(i,R*d[1]/100);
+    g+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="3" fill="rgb(${col})"/>`;});
+  svg.innerHTML=g;
 }
 
 function colorForStatus(st){
