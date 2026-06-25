@@ -124,10 +124,18 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:radial-gradient(circle at 35% 30%,rgba(34,211,238,.2),rgba(5,11,24,.9) 65%);
   box-shadow:0 0 24px rgba(34,211,238,.28),inset 0 0 20px rgba(34,211,238,.08);
   animation:ringGlow 3s ease-in-out infinite}
-.ring::before{content:"";position:absolute;inset:-6px;border-radius:50%;
-  border:1px dashed rgba(34,211,238,.35);animation:ringSpin 18s linear infinite}
-.ring::after{content:"";position:absolute;inset:6px;border-radius:50%;
-  border:1px solid rgba(255,255,255,.06)}
+.ring::before{content:"";position:absolute;inset:-9px;border-radius:50%;
+  border:1px dashed rgba(34,211,238,.30);animation:ringSpin 18s linear infinite}
+.ring::after{content:"";position:absolute;inset:-5px;border-radius:50%;
+  background:conic-gradient(
+    var(--arc,var(--cyan)) 0turn,
+    var(--arc,var(--cyan)) calc(var(--pct,0)*1turn),
+    rgba(100,116,139,.12) calc(var(--pct,0)*1turn),
+    rgba(100,116,139,.12) 1turn);
+  -webkit-mask:radial-gradient(closest-side,transparent calc(100% - 7px),#000 calc(100% - 6px));
+          mask:radial-gradient(closest-side,transparent calc(100% - 7px),#000 calc(100% - 6px));
+  transition:--pct .9s ease;filter:drop-shadow(0 0 4px var(--arc,var(--cyan)))}
+@property --pct{syntax:'<number>';inherits:false;initial-value:0}
 @keyframes ringGlow{0%,100%{box-shadow:0 0 24px rgba(34,211,238,.28),inset 0 0 20px rgba(34,211,238,.08)}
   50%{box-shadow:0 0 32px rgba(34,211,238,.4),inset 0 0 26px rgba(34,211,238,.12)}}
 @keyframes ringSpin{to{transform:rotate(360deg)}}
@@ -142,12 +150,31 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .v.green{color:var(--green)} .v.orange{color:var(--orange)} .v.red{color:var(--red)}
 .center{grid-row:2;grid-column:2;display:flex;flex-direction:column;min-height:0}
 .center.panel{--pc:var(--purple)}
-#topoSvg{width:100%;flex:1;min-height:0;display:block;border-radius:0;
-  background:
-    radial-gradient(ellipse at 50% 40%,rgba(34,211,238,.06),transparent 60%),
-    rgba(3,8,18,.75);
+.topo-wrap{position:relative;flex:1;min-height:0;display:flex;
   border:1px solid rgba(34,211,238,.15);
-  box-shadow:0 0 40px rgba(34,211,238,.04) inset,0 4px 24px rgba(0,0,0,.3)}
+  box-shadow:0 0 40px rgba(34,211,238,.04) inset,0 4px 24px rgba(0,0,0,.3);
+  background:
+    radial-gradient(ellipse at 50% 42%,rgba(34,211,238,.07),transparent 62%),
+    rgba(3,8,18,.78)}
+.topo-bg{position:absolute;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+/* concentric command-platform rings */
+.topo-bg::before{content:"";position:absolute;left:50%;top:50%;width:520px;height:520px;
+  transform:translate(-50%,-50%);border-radius:50%;
+  background:
+    repeating-radial-gradient(circle at center,
+      transparent 0 64px,rgba(34,211,238,.05) 64px 65px);
+  -webkit-mask:radial-gradient(circle at center,#000 58%,transparent 72%);
+          mask:radial-gradient(circle at center,#000 58%,transparent 72%)}
+/* sweeping radar beam */
+.topo-bg::after{content:"";position:absolute;left:50%;top:50%;width:520px;height:520px;
+  transform:translate(-50%,-50%);border-radius:50%;
+  background:conic-gradient(from 0deg,rgba(34,211,238,.16),transparent 22%,transparent 100%);
+  -webkit-mask:radial-gradient(circle at center,#000 56%,transparent 70%);
+          mask:radial-gradient(circle at center,#000 56%,transparent 70%);
+  animation:radarSweep 7s linear infinite;opacity:.7}
+@keyframes radarSweep{to{transform:translate(-50%,-50%) rotate(360deg)}}
+#topoSvg{position:relative;z-index:1;width:100%;flex:1;min-height:0;display:block;
+  background:transparent;border:0}
 .topo-detail{margin-top:10px;font-size:12px;color:var(--dim);min-height:36px;padding:10px 12px;
   background:linear-gradient(90deg,rgba(15,23,42,.65),rgba(8,16,32,.45));
   border:1px solid rgba(30,58,95,.4);border-left:3px solid rgba(34,211,238,.45)}
@@ -278,7 +305,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
         <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
         <span class="rotate-badge hidden" id="rotateBadge"></span>
       </div>
-      <svg id="topoSvg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="topo-wrap"><div class="topo-bg"></div><svg id="topoSvg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg></div>
       <div class="topo-detail" id="topoDetail">选择节点或等待路径数据...</div>
     </div>
   </div>
@@ -607,11 +634,19 @@ function renderOverview(ov){
   const riskRing=document.getElementById('riskRing');
   const riskScore=(ov.risk&&ov.risk.score!=null)?ov.risk.score:0;
   const riskCol=riskScore>=60?'var(--red)':riskScore>=30?'var(--orange)':'var(--cyan)';
-  riskRing.style.borderColor=riskCol;
-  riskRing.style.boxShadow=`0 0 24px ${riskCol}44,inset 0 0 20px ${riskCol}14`;
+  riskRing.style.borderColor='rgba(148,163,184,.20)';
+  riskRing.style.boxShadow=`0 0 22px ${riskCol}33,inset 0 0 18px ${riskCol}10`;
+  riskRing.style.color=riskCol;
+  riskRing.style.setProperty('--arc',riskCol);
+  riskRing.style.setProperty('--pct',Math.max(0,Math.min(1,riskScore/100)));
   const healthRing=document.getElementById('healthRing');
-  healthRing.style.borderColor='var(--green)';
-  healthRing.style.boxShadow='0 0 24px rgba(34,197,94,.28),inset 0 0 20px rgba(34,197,94,.08)';
+  const healthScore=(ov.health&&ov.health.score!=null)?ov.health.score:0;
+  const healthCol=healthScore>=8?'var(--green)':healthScore>=6?'var(--orange)':'var(--red)';
+  healthRing.style.borderColor='rgba(148,163,184,.20)';
+  healthRing.style.boxShadow=`0 0 22px ${healthCol==='var(--green)'?'rgba(34,197,94,.3)':healthCol==='var(--orange)'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'},inset 0 0 18px rgba(255,255,255,.04)`;
+  healthRing.style.color=healthCol;
+  healthRing.style.setProperty('--arc',healthCol);
+  healthRing.style.setProperty('--pct',Math.max(0,Math.min(1,healthScore/10)));
   document.getElementById('countsHint').textContent=
     `节点 ${c.targets||0} · 正常 ${c.green||0} · 告警 ${c.red||0} · 未恢复 ${ov.open_incidents||0}`;
   document.getElementById('riskStats').innerHTML=[
