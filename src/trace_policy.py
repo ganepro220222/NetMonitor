@@ -207,6 +207,152 @@ def _tcp_checks_ok(tcp_checks: list | None) -> bool:
     return any(c.get("success") for c in tcp_checks)
 
 
+def _open_tcp_ports(tcp_checks: list | None) -> list[int]:
+    out: list[int] = []
+    for c in tcp_checks or []:
+        if c.get("success") and c.get("port") is not None:
+            out.append(int(c["port"]))
+    return out
+
+
+def _probe_indicates_ok(*, probe_success: bool | None,
+                        status: str | None) -> bool:
+    if probe_success is not None:
+        return bool(probe_success)
+    return (status or "").strip().lower() == "green"
+
+
+def classify_path_break(hops: list | None, *,
+                        tcp_checks: list | None = None,
+                        ping_type: str | None = None,
+                        probe_success: bool | None = None,
+                        status: str | None = None,
+                        failure_reason: str | None = None) -> dict:
+    """Classify ICMP-traceroute darkness vs the target's own probe semantics.
+
+    Shared by ``summarize_for_display`` (big screen) and ``summarize_for_alert``
+    (webhook).  Returns ``break_kind``:
+
+    * ``none``          — no hop break/after in the path
+    * ``icmp_filtered`` — path goes dark but service probe / aux TCP says OK
+    * ``real``          — path dark and probes also failing (network outage)
+    * ``endpoint``      — HTTP/DNS app-layer failure; hop mark is reference only
+    """
+    hops = hops or []
+    has_break = _hops_have_break(hops)
+    probe_ok = _probe_indicates_ok(probe_success=probe_success, status=status)
+    if not has_break:
+        return {
+            "break_kind": "none",
+            "icmp_filtered": False,
+            "service_ok": probe_ok,
+        }
+
+    pt = (ping_type or "icmp").strip().lower() or "icmp"
+    tcp_ok = _tcp_checks_ok(tcp_checks)
+    layer = failure_layer(pt, failure_reason or "")
+
+    # Live probe green → ICMP blind spot regardless of node type (fixes DNS).
+    if probe_ok:
+        return {
+            "break_kind": "icmp_filtered",
+            "icmp_filtered": True,
+            "service_ok": True,
+            "hint": pt,
+        }
+
+    # HTTP/DNS red with endpoint-layer failure — do not treat as network break.
+    if pt in ("http", "https", "dns") and layer == "endpoint":
+        return {
+            "break_kind": "endpoint",
+            "icmp_filtered": False,
+            "service_ok": False,
+            "failure_detail": describe_failure(failure_reason),
+        }
+
+    # ICMP/TCP nodes, or network-layer timeout on any type: aux TCP is tie-breaker.
+    if tcp_ok:
+        return {
+            "break_kind": "icmp_filtered",
+            "icmp_filtered": True,
+            "service_ok": False,
+            "hint": "tcp_aux",
+        }
+
+    return {
+        "break_kind": "real",
+        "icmp_filtered": False,
+        "service_ok": False,
+    }
+
+
+def _service_hint(cls: dict, ping_type: str | None,
+                  tcp_checks: list | None) -> str:
+    hint = cls.get("hint")
+    if cls.get("service_ok"):
+        if hint == "dns":
+            return "（DNS 查询正常）"
+        if hint in ("http", "https"):
+            return "（HTTP 监测正常）"
+        if hint == "icmp":
+            return "（ICMP 监测正常）"
+    ports = _open_tcp_ports(tcp_checks)
+    if ports:
+        return f"（{'/'.join(str(p) for p in ports[:4])} 端口通）"
+    if hint == "tcp_aux":
+        return "（辅助端口检测仍通）"
+    if cls.get("service_ok"):
+        return "（监测仍通）"
+    return "（辅助端口检测仍通）"
+
+
+def summarize_for_display(hops: list, *,
+                          tcp_checks: list | None = None,
+                          status: str | None = None,
+                          ping_type: str | None = None,
+                          probe_success: bool | None = None,
+                          failure_reason: str | None = None) -> dict:
+    """Topology / big-screen summary: keep hop location, classify break kind."""
+    base = summarize_break(hops or [])
+    cls = classify_path_break(
+        hops,
+        tcp_checks=tcp_checks,
+        ping_type=ping_type,
+        probe_success=probe_success,
+        status=status,
+        failure_reason=failure_reason,
+    )
+    kind = cls["break_kind"]
+    base["break_kind"] = kind
+    base["icmp_filtered"] = cls.get("icmp_filtered", False)
+    base["service_ok"] = cls.get("service_ok")
+
+    if kind == "none":
+        return base
+
+    break_at = base.get("break_at")
+    hop_n = (break_at or {}).get("hop", "?")
+
+    if kind == "icmp_filtered":
+        hint = _service_hint(cls, ping_type, tcp_checks)
+        base["text"] = (
+            f"traceroute 在第{hop_n}跳后不可见，目标可能过滤 ICMP{hint}；"
+            f"不等于路径故障"
+        )
+    elif kind == "endpoint":
+        detail = cls.get("failure_detail") or "应用层异常"
+        base["text"] = (
+            f"{detail}；traceroute 在第{hop_n}跳后 ICMP 不可见，"
+            f"路径信息仅供参考"
+        )
+    elif kind == "real" and base.get("text"):
+        base["text"] = (
+            f"{base['text']}（辅助端口检测也不通，疑似真实路径问题）"
+        )
+
+    return base
+
+
 def summarize_for_alert(hops: list, *,
                         ping_type: str | None,
                         failure_reason: str | None,
@@ -216,11 +362,19 @@ def summarize_for_alert(hops: list, *,
         return trace_skip_summary(ping_type, failure_reason)
 
     base = summarize_break(hops or [])
+    cls = classify_path_break(
+        hops,
+        tcp_checks=tcp_checks,
+        ping_type=ping_type,
+        probe_success=False,
+        status="red",
+        failure_reason=failure_reason,
+    )
 
-    if _hops_have_break(hops) and _tcp_checks_ok(tcp_checks):
+    if cls["break_kind"] == "icmp_filtered":
         text = (
             "目标可能过滤 ICMP，traceroute 显示的断点不一定代表服务中断"
-            "（辅助端口检测仍通）。"
+            f"{_service_hint(cls, ping_type, tcp_checks)}。"
         )
         if base.get("text"):
             text = f"{text} 原始：{base['text']}"

@@ -424,6 +424,50 @@ class _TracerouteScheduler:
                 except Exception:
                     pass   # never crash the scheduler thread over a push failure
 
+        # Screen dashboard: path-break / route-change SSE (read-only layer).
+        if committed and self._push_fn:
+            still_current = (self._current_generation(tid) == start_gen)
+            if still_current:
+                with self._targets_lock:
+                    cur_target = self._targets.get(tid)
+                if (cur_target is None
+                        or cur_target.get("ip") != start_ip):
+                    still_current = False
+            if still_current:
+                try:
+                    from src.screen_service import invalidate_screen_cache
+                    from src.traceroute_summary import summarize_break
+                    invalidate_screen_cache()
+                    label = (target_info.get("label", tid)
+                             if isinstance(target_info, dict) else tid)
+                    if route_changed:
+                        old_ips = _stable_ips(old_entry.get("hops", [])) if old_entry else []
+                        new_ips = _stable_ips(hops)
+                        from src.screen_service import build_route_diff
+                        diff = build_route_diff(
+                            (old_entry or {}).get("hops"), hops)
+                        self._push_fn(json.dumps({
+                            "type": "route_changed",
+                            "tid": tid,
+                            "label": label,
+                            "ip": start_ip,
+                            "old_ips": old_ips,
+                            "new_ips": new_ips,
+                            "route_diff": diff,
+                        }))
+                    brk = summarize_break(hops)
+                    tgt_st = (cur_target or {}).get("status") or ""
+                    if brk.get("break_at") and tgt_st in ("red", "orange"):
+                        self._push_fn(json.dumps({
+                            "type": "trace_break",
+                            "tid": tid,
+                            "label": label,
+                            "ip": start_ip,
+                            "summary": brk,
+                        }))
+                except Exception:
+                    pass
+
         if committed and self._result_callback:
             label = (target_info.get("label", tid)
                      if isinstance(target_info, dict) else tid)
@@ -1216,6 +1260,7 @@ body.theme-dark{
 <header>
   <span class="logo">🌐</span><span class="site-title">网络连通性监测</span>
   <div class="hdr-right">
+    <button id="screen-btn" onclick="window.open('/screen','_blank')" title="打开态势大屏（独立窗口）">🖥</button>
     <button id="sel-btn" onclick="openCardSel()" title="自定义显示的卡片">⊞</button>
     <button id="snd-btn" onclick="toggleSound()" title="告警声音">🔔</button>
     <button id="fullscreen-btn" onclick="toggleFullscreen()" title="大屏全屏模式（F11）">⛶</button>
@@ -6712,6 +6757,18 @@ class WebServer:
                 self._scheduler.request_now(tid)
         self._scheduler.set_targets(snap)
         self._broadcaster.push(json.dumps({"type": "update", "target": data}))
+        try:
+            from src.screen_service import invalidate_screen_cache
+            invalidate_screen_cache()
+            if old_status in ("red", "orange") and status == "green":
+                self._broadcaster.push(json.dumps({
+                    "type": "trace_heal",
+                    "tid": tid,
+                    "label": label,
+                    "ip": ip,
+                }))
+        except Exception:
+            pass
 
     def remove_target(self, tid: str):
         with self._lock:
@@ -6733,6 +6790,11 @@ class WebServer:
             self._scheduler.bump_generation(tid)
             self._tracer_cache.pop(tid, None)
         self._broadcaster.push(json.dumps({"type": "remove", "tid": tid}))
+        try:
+            from src.screen_service import invalidate_screen_cache
+            invalidate_screen_cache()
+        except Exception:
+            pass
 
     def begin_target_history_wipe(self, tid: str) -> None:
         """Mark a target as mid-wipe so history APIs return empty until done.
@@ -7224,6 +7286,93 @@ class WebServer:
         @app.route("/")
         def index():
             return DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+        @app.route("/screen")
+        def screen_page():
+            import pathlib
+            from flask import send_file
+            fp = (pathlib.Path(__file__).parent / "web" / "screen.html").resolve()
+            if not fp.is_file():
+                return "screen page missing", 404
+            return send_file(fp, mimetype="text/html; charset=utf-8",
+                             max_age=0)
+
+        def _screen_demo():
+            return (request.args.get("demo") or "").strip().lower() in (
+                "1", "true", "yes")
+
+        @app.route("/api/screen/overview")
+        def api_screen_overview():
+            from src import screen_service as ss
+            window = (request.args.get("window") or "today").strip().lower()
+            if window not in ("1h", "today", "7d"):
+                window = "today"
+            if _screen_demo():
+                return json.dumps(ss.demo_overview(), ensure_ascii=False), 200, {
+                    "Content-Type": "application/json"}
+            try:
+                payload = ss.build_overview(self, window=window)
+            except Exception as e:
+                logging.getLogger(__name__).warning("[screen/overview] %s", e)
+                payload = ss.demo_overview()
+                payload["error"] = str(e)
+            return json.dumps(payload, ensure_ascii=False), 200, {
+                "Content-Type": "application/json"}
+
+        @app.route("/api/screen/paths")
+        def api_screen_paths():
+            from src import screen_service as ss
+            window = (request.args.get("window") or "today").strip().lower()
+            if _screen_demo():
+                return json.dumps(ss.demo_paths(), ensure_ascii=False), 200, {
+                    "Content-Type": "application/json"}
+            try:
+                payload = ss.build_paths(self, window=window)
+            except Exception as e:
+                logging.getLogger(__name__).warning("[screen/paths] %s", e)
+                payload = {"window": window, "origin": {}, "paths": [],
+                           "error": str(e)}
+            return json.dumps(payload, ensure_ascii=False), 200, {
+                "Content-Type": "application/json"}
+
+        @app.route("/api/screen/topn")
+        def api_screen_topn():
+            from src import screen_service as ss
+            window = (request.args.get("window") or "today").strip().lower()
+            if _screen_demo():
+                return json.dumps(ss.demo_topn(), ensure_ascii=False), 200, {
+                    "Content-Type": "application/json"}
+            try:
+                payload = ss.build_topn(self, window=window)
+            except Exception as e:
+                logging.getLogger(__name__).warning("[screen/topn] %s", e)
+                payload = {"window": window, "lowest_sla": [],
+                           "highest_latency": [], "most_outages": [],
+                           "error": str(e)}
+            return json.dumps(payload, ensure_ascii=False), 200, {
+                "Content-Type": "application/json"}
+
+        @app.route("/api/screen/events")
+        def api_screen_events():
+            from src import screen_service as ss
+            window = (request.args.get("window") or "today").strip().lower()
+            if window not in ("1h", "today", "7d"):
+                window = "today"
+            try:
+                limit = int(request.args.get("limit") or 30)
+            except (TypeError, ValueError):
+                limit = 30
+            limit = max(1, min(limit, 100))
+            if _screen_demo():
+                rows = ss.demo_events()
+            else:
+                try:
+                    rows = ss.build_events(self, window=window, limit=limit)
+                except Exception as e:
+                    logging.getLogger(__name__).warning("[screen/events] %s", e)
+                    rows = []
+            return json.dumps({"events": rows}, ensure_ascii=False), 200, {
+                "Content-Type": "application/json"}
 
         @app.route("/api/status")
         def api_status():

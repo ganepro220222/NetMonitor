@@ -6,82 +6,253 @@
 <title>网络链路态势大屏</title>
 <style>
 :root{
-  --bg:#050b18;--panel:#0a1628;--border:#1e3a5f;--text:#e2e8f0;--dim:#94a3b8;
+  --bg:#030712;--panel:#0a1628;--border:#1e3a5f;--text:#e2e8f0;--dim:#94a3b8;
   --cyan:#22d3ee;--green:#22c55e;--orange:#f59e0b;--red:#ef4444;--purple:#a78bfa;
+  --panel-cut:12px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:"Segoe UI","Microsoft YaHei",sans-serif}
-#stage{width:1920px;height:1080px;transform-origin:0 0;position:absolute;background:
-  radial-gradient(ellipse at 50% 0%,rgba(34,211,238,.08),transparent 55%),
-  linear-gradient(180deg,#050b18 0%,#0a1020 100%)}
-.grid{display:grid;grid-template-columns:420px 1fr 420px;grid-template-rows:72px 1fr 220px;
-  gap:12px;padding:12px;height:100%}
-.panel{background:rgba(10,22,40,.82);border:1px solid var(--border);border-radius:10px;
-  position:relative;overflow:hidden;box-shadow:0 0 24px rgba(34,211,238,.06) inset}
-.panel::before,.panel::after{content:"";position:absolute;width:14px;height:14px;border:2px solid var(--cyan);opacity:.45}
-.panel::before{top:6px;left:6px;border-right:none;border-bottom:none}
-.panel::after{bottom:6px;right:6px;border-left:none;border-top:none}
-.ptitle{font-size:13px;font-weight:700;color:var(--cyan);letter-spacing:.08em;padding:12px 14px 8px;
-  border-bottom:1px solid rgba(30,58,95,.6)}
-.pbody{padding:12px 14px;height:calc(100% - 42px);overflow:auto}
-.topbar{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;padding:0 8px}
-.topbar h1{font-size:22px;font-weight:800;background:linear-gradient(90deg,var(--cyan),var(--purple));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:.06em}
-.topmeta{font-size:12px;color:var(--dim);display:flex;gap:18px;align-items:center}
-.btn{background:rgba(34,211,238,.12);border:1px solid rgba(34,211,238,.35);color:var(--cyan);
-  padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;text-decoration:none}
-.btn:hover{background:rgba(34,211,238,.22)}
-.winbtn{padding:4px 10px;margin-left:4px;border-radius:4px;border:1px solid var(--border);
-  background:transparent;color:var(--dim);cursor:pointer;font-size:11px}
-.winbtn.active{border-color:var(--cyan);color:var(--cyan);background:rgba(34,211,238,.1)}
-.gauge{display:flex;align-items:center;gap:14px;margin-bottom:14px}
-.ring{width:72px;height:72px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-size:18px;font-weight:800;border:3px solid var(--cyan);box-shadow:0 0 18px rgba(34,211,238,.25)}
-.statgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.stat{background:rgba(15,23,42,.6);border:1px solid rgba(30,58,95,.5);border-radius:8px;padding:10px}
-.stat .k{font-size:11px;color:var(--dim)} .stat .v{font-size:20px;font-weight:700;margin-top:4px}
+#stage{width:1920px;height:1080px;transform-origin:0 0;position:absolute;overflow:hidden;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%,rgba(34,211,238,.14),transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 100%,rgba(167,139,250,.08),transparent 50%),
+    radial-gradient(ellipse 50% 35% at 0% 80%,rgba(34,197,94,.05),transparent 45%),
+    linear-gradient(180deg,#030712 0%,#060d1a 45%,#0a1020 100%)}
+#stage::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;
+  background-image:
+    linear-gradient(rgba(34,211,238,.04) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(34,211,238,.04) 1px,transparent 1px);
+  background-size:48px 48px;
+  mask-image:radial-gradient(ellipse 85% 75% at 50% 45%,#000 20%,transparent 100%)}
+#stage::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,transparent 0%,rgba(34,211,238,.03) 50%,transparent 100%);
+  animation:stageScan 6s ease-in-out infinite}
+@keyframes stageScan{0%,100%{transform:translateY(-100%);opacity:0}45%{opacity:1}100%{transform:translateY(100%)}}
+.grid{display:grid;grid-template-columns:420px 1fr 420px;grid-template-rows:100px 1fr 220px;
+  gap:14px;padding:14px;height:100%;position:relative;z-index:1}
+.panel{
+  --pc:var(--cyan);
+  position:relative;overflow:hidden;
+  background:
+    linear-gradient(145deg,rgba(34,211,238,.07) 0%,transparent 42%),
+    linear-gradient(180deg,rgba(12,24,44,.92),rgba(5,11,22,.88));
+  border:1px solid rgba(34,211,238,.18);
+  clip-path:polygon(
+    0 var(--panel-cut),var(--panel-cut) 0,
+    calc(100% - var(--panel-cut)) 0,100% var(--panel-cut),
+    100% calc(100% - var(--panel-cut)),calc(100% - var(--panel-cut)) 100%,
+    var(--panel-cut) 100%,0 calc(100% - var(--panel-cut)));
+  box-shadow:0 0 0 1px rgba(0,0,0,.4) inset,0 12px 40px rgba(0,0,0,.35),
+    0 0 24px rgba(34,211,238,.04) inset}
+.panel::before{content:"";position:absolute;top:0;left:18%;right:18%;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(34,211,238,.55),transparent);
+  opacity:.85}
+.panel::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:
+    linear-gradient(135deg,rgba(34,211,238,.12),transparent 28%),
+    linear-gradient(315deg,rgba(167,139,250,.08),transparent 24%);
+  mask:linear-gradient(#000,transparent 55%)}
+.panel .corner{position:absolute;width:22px;height:22px;pointer-events:none;z-index:2;
+  color:rgba(34,211,238,.55)}
+.panel .corner svg{width:100%;height:100%;filter:drop-shadow(0 0 4px rgba(34,211,238,.5))}
+.panel .c-tl{top:4px;left:4px}.panel .c-tr{top:4px;right:4px;transform:scaleX(-1)}
+.panel .c-bl{bottom:4px;left:4px;transform:scaleY(-1)}.panel .c-br{bottom:4px;right:4px;transform:scale(-1,-1)}
+.ptitle{font-size:13px;font-weight:700;color:var(--cyan);letter-spacing:.12em;text-transform:uppercase;
+  padding:11px 16px 9px;display:flex;align-items:center;gap:10px;position:relative;z-index:1;
+  border-bottom:1px solid rgba(34,211,238,.12);
+  background:linear-gradient(90deg,rgba(34,211,238,.1),transparent 70%)}
+.ptitle::before{content:"";width:4px;height:14px;border-radius:2px;flex-shrink:0;
+  background:linear-gradient(180deg,var(--cyan),var(--purple));
+  box-shadow:0 0 10px rgba(34,211,238,.55)}
+.pbody{padding:12px 14px;height:calc(100% - 42px);overflow:auto;position:relative;z-index:1;
+  overflow-x:hidden;scrollbar-width:thin;scrollbar-color:transparent transparent}
+.pbody.has-scroll:hover,.tline.has-scroll:hover{scrollbar-color:rgba(34,211,238,.42) rgba(8,16,32,.88)}
+.pbody::-webkit-scrollbar,.tline::-webkit-scrollbar{width:6px;height:6px}
+.pbody::-webkit-scrollbar-track,.tline::-webkit-scrollbar-track{background:transparent;border-radius:999px}
+.pbody.has-scroll:hover::-webkit-scrollbar-track,.tline.has-scroll:hover::-webkit-scrollbar-track{
+  background:rgba(8,16,32,.75);margin:4px 0}
+.pbody::-webkit-scrollbar-thumb,.tline::-webkit-scrollbar-thumb{
+  border-radius:999px;background:transparent;border:1px solid transparent;box-shadow:none}
+.pbody.has-scroll:hover::-webkit-scrollbar-thumb,.tline.has-scroll:hover::-webkit-scrollbar-thumb{
+  background:linear-gradient(180deg,rgba(34,211,238,.55),rgba(167,139,250,.45));
+  border-color:rgba(34,211,238,.25);box-shadow:0 0 8px rgba(34,211,238,.2)}
+.pbody.has-scroll:hover::-webkit-scrollbar-thumb:hover,.tline.has-scroll:hover::-webkit-scrollbar-thumb:hover{
+  background:linear-gradient(180deg,rgba(34,211,238,.75),rgba(167,139,250,.6));
+  box-shadow:0 0 12px rgba(34,211,238,.35)}
+.pbody::-webkit-scrollbar-corner,.tline::-webkit-scrollbar-corner{background:transparent}
+.topbar{grid-column:1/-1;display:flex;align-items:stretch;justify-content:space-between;
+  padding:12px 22px 12px 16px;min-height:100px}
+.topbar.panel{--panel-cut:16px;background:
+  linear-gradient(90deg,rgba(34,211,238,.12),transparent 38%,transparent 62%,rgba(167,139,250,.08)),
+  linear-gradient(180deg,rgba(8,18,36,.96),rgba(5,11,22,.92))}
+.topbar.panel::after{opacity:.28;mask-image:linear-gradient(90deg,transparent 0%,#000 42%)}
+.topbar.panel .corner{display:none}
+.topbar-brand{position:relative;z-index:5;padding:4px 0 2px 40px;display:flex;flex-direction:column;justify-content:center;min-width:0}
+.topbar-brand::before{content:"";position:absolute;left:8px;top:50%;transform:translateY(-50%);
+  width:4px;height:56px;border-radius:2px;
+  background:linear-gradient(180deg,var(--cyan),var(--purple));
+  box-shadow:0 0 12px rgba(34,211,238,.55)}
+.topbar-actions{display:flex;align-items:flex-start;gap:8px;flex-shrink:0;padding-top:6px}
+.topbar h1{font-size:26px;font-weight:800;line-height:1.2;margin:0;
+  background:linear-gradient(92deg,#e0f2fe,var(--cyan),var(--purple));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:.06em;
+  filter:drop-shadow(0 0 18px rgba(34,211,238,.25))}
+.topbar h1 .sub{display:block;font-size:11px;font-weight:600;letter-spacing:.22em;margin-top:6px;
+  -webkit-text-fill-color:rgba(34,211,238,.5);background:none;line-height:1.3}
+.topmeta{font-size:12px;color:var(--dim);display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+.topmeta span{padding:3px 10px;border-radius:999px;background:rgba(15,23,42,.55);
+  border:1px solid rgba(30,58,95,.45)}
+.btn{background:linear-gradient(180deg,rgba(34,211,238,.16),rgba(34,211,238,.06));
+  border:1px solid rgba(34,211,238,.4);color:#a5f3fc;padding:6px 14px;border-radius:4px;
+  cursor:pointer;font-size:12px;text-decoration:none;transition:all .2s;
+  box-shadow:0 0 12px rgba(34,211,238,.12)}
+.btn:hover{background:linear-gradient(180deg,rgba(34,211,238,.28),rgba(34,211,238,.12));
+  box-shadow:0 0 20px rgba(34,211,238,.25)}
+.winbtn{padding:5px 12px;margin-left:4px;border-radius:3px;border:1px solid rgba(30,58,95,.65);
+  background:rgba(8,16,32,.6);color:var(--dim);cursor:pointer;font-size:11px;transition:all .2s}
+.winbtn:hover{border-color:rgba(34,211,238,.35);color:#cbd5e1}
+.winbtn.active{border-color:var(--cyan);color:var(--cyan);
+  background:linear-gradient(180deg,rgba(34,211,238,.18),rgba(34,211,238,.05));
+  box-shadow:0 0 14px rgba(34,211,238,.2),inset 0 0 12px rgba(34,211,238,.08)}
+.gauge{display:flex;align-items:center;gap:16px;margin-bottom:16px;padding:10px;
+  background:linear-gradient(135deg,rgba(15,23,42,.5),transparent);
+  border:1px solid rgba(30,58,95,.35);clip-path:polygon(0 8px,8px 0,calc(100% - 8px) 0,100% 8px,100% 100%,0 100%)}
+.ring{width:78px;height:78px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:800;position:relative;flex-shrink:0;
+  border:3px solid var(--cyan);
+  background:radial-gradient(circle at 35% 30%,rgba(34,211,238,.2),rgba(5,11,24,.9) 65%);
+  box-shadow:0 0 24px rgba(34,211,238,.28),inset 0 0 20px rgba(34,211,238,.08);
+  animation:ringGlow 3s ease-in-out infinite}
+.ring::before{content:"";position:absolute;inset:-6px;border-radius:50%;
+  border:1px dashed rgba(34,211,238,.35);animation:ringSpin 18s linear infinite}
+.ring::after{content:"";position:absolute;inset:6px;border-radius:50%;
+  border:1px solid rgba(255,255,255,.06)}
+@keyframes ringGlow{0%,100%{box-shadow:0 0 24px rgba(34,211,238,.28),inset 0 0 20px rgba(34,211,238,.08)}
+  50%{box-shadow:0 0 32px rgba(34,211,238,.4),inset 0 0 26px rgba(34,211,238,.12)}}
+@keyframes ringSpin{to{transform:rotate(360deg)}}
+.statgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat{background:linear-gradient(135deg,rgba(15,23,42,.75),rgba(8,16,32,.5));
+  border:1px solid rgba(30,58,95,.45);padding:10px 10px 10px 14px;position:relative;overflow:hidden;
+  clip-path:polygon(0 6px,6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%)}
+.stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent,var(--cyan));opacity:.85}
+.stat .k{font-size:10px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase}
+.stat .v{font-size:22px;font-weight:800;margin-top:4px;font-variant-numeric:tabular-nums;
+  text-shadow:0 0 20px currentColor}
 .v.green{color:var(--green)} .v.orange{color:var(--orange)} .v.red{color:var(--red)}
 .center{grid-row:2;grid-column:2;display:flex;flex-direction:column;min-height:0}
-#topoSvg{width:100%;flex:1;min-height:0;background:rgba(5,11,24,.5);border-radius:8px;
-  display:block}
-.topo-detail{margin-top:8px;font-size:12px;color:var(--dim);min-height:36px;padding:8px 10px;
-  background:rgba(15,23,42,.55);border-radius:8px;border:1px solid rgba(30,58,95,.4)}
-.toplist{display:flex;flex-direction:column;gap:8px}
-.toprow{display:flex;justify-content:space-between;font-size:12px;padding:6px 0;
-  border-bottom:1px dashed rgba(30,58,95,.4)}
+.center.panel{--pc:var(--purple)}
+#topoSvg{width:100%;flex:1;min-height:0;display:block;border-radius:0;
+  background:
+    radial-gradient(ellipse at 50% 40%,rgba(34,211,238,.06),transparent 60%),
+    rgba(3,8,18,.75);
+  border:1px solid rgba(34,211,238,.15);
+  box-shadow:0 0 40px rgba(34,211,238,.04) inset,0 4px 24px rgba(0,0,0,.3)}
+.topo-detail{margin-top:10px;font-size:12px;color:var(--dim);min-height:36px;padding:10px 12px;
+  background:linear-gradient(90deg,rgba(15,23,42,.65),rgba(8,16,32,.45));
+  border:1px solid rgba(30,58,95,.4);border-left:3px solid rgba(34,211,238,.45)}
+.toplist{display:flex;flex-direction:column;gap:6px}
+.toprow{display:grid;grid-template-columns:22px 1fr 72px 56px;gap:8px;align-items:center;
+  font-size:12px;padding:7px 8px;
+  background:rgba(8,16,32,.45);border:1px solid rgba(30,58,95,.25);border-radius:2px}
+.toprow:hover{background:rgba(34,211,238,.04);border-color:rgba(34,211,238,.15)}
+.top-rank{font-size:10px;font-weight:800;color:var(--cyan);opacity:.7;text-align:center}
+.top-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.top-bar-wrap{height:5px;background:rgba(15,23,42,.8);border-radius:999px;overflow:hidden;
+  border:1px solid rgba(30,58,95,.4)}
+.top-bar{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--cyan),var(--purple));
+  box-shadow:0 0 8px rgba(34,211,238,.45);transition:width .6s ease}
+.top-bar.lat{background:linear-gradient(90deg,var(--orange),var(--red))}
+.top-bar.outage{background:linear-gradient(90deg,var(--red),#7f1d1d)}
+.top-val{font-size:11px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums;color:#cbd5e1}
 .timeline{grid-column:1/-1}
-.tline{display:flex;flex-direction:column;gap:6px;max-height:160px;overflow:auto}
-.trow{display:grid;grid-template-columns:72px 120px 1fr;gap:10px;font-size:12px;padding:6px 8px;
-  border-radius:6px;background:rgba(15,23,42,.45);animation:fadeIn .4s ease}
-.trow.red{border-left:3px solid var(--red)} .trow.orange{border-left:3px solid var(--orange)}
+.tline{display:flex;flex-direction:column;gap:6px;max-height:160px;overflow:auto;overflow-x:hidden;
+  scrollbar-width:thin;scrollbar-color:transparent transparent;padding-right:2px}
+.trow{display:grid;grid-template-columns:72px 120px 1fr;gap:10px;font-size:12px;padding:8px 10px;
+  border-radius:2px;background:linear-gradient(90deg,rgba(15,23,42,.55),rgba(8,16,32,.35));
+  border:1px solid rgba(30,58,95,.3);animation:fadeIn .4s ease;transition:opacity .6s ease,transform .6s ease}
+.trow.pinned{background:linear-gradient(90deg,rgba(127,29,29,.22),rgba(15,23,42,.55));
+  border-color:rgba(239,68,68,.35);animation:pulsePinned 2.4s ease-in-out infinite}
+.trow.route{border-left:3px solid var(--cyan);box-shadow:inset 4px 0 12px rgba(34,211,238,.08)}
+.trow.recovery{border-left:3px solid var(--green);animation:recoveryIn .8s ease}
+.trow.recovery-flash{border-left:3px solid var(--green);animation:recoveryFlash 3s ease forwards}
+.trow.recovery-flash.fade-out{opacity:0;transform:translateX(8px)}
+.trow.webhook{border-left:3px solid var(--orange)}
+.trow .etype{font-size:10px;color:var(--dim);margin-left:6px;opacity:.85}
+.trow.red{border-left:3px solid var(--red);box-shadow:inset 4px 0 12px rgba(239,68,68,.08)}
+.trow.orange{border-left:3px solid var(--orange);box-shadow:inset 4px 0 12px rgba(245,158,11,.06)}
 .trow.green{border-left:3px solid var(--green)}
+@keyframes pulsePinned{0%,100%{box-shadow:inset 4px 0 12px rgba(239,68,68,.08)}50%{box-shadow:inset 4px 0 18px rgba(239,68,68,.18)}}
+@keyframes recoveryIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:none}}
+@keyframes recoveryFlash{0%{background:rgba(34,197,94,.18)}100%{background:linear-gradient(90deg,rgba(15,23,42,.55),rgba(8,16,32,.35))}}
+.route-compare{margin-top:8px;padding:10px 12px;border-radius:4px;
+  background:linear-gradient(90deg,rgba(8,47,73,.55),rgba(15,23,42,.45));
+  border:1px solid rgba(34,211,238,.35);animation:routePulse 2.2s ease-in-out infinite}
+.route-compare .rc-title{font-size:11px;font-weight:700;color:var(--cyan);margin-bottom:8px;letter-spacing:.06em}
+.route-compare .rc-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11px;margin-bottom:6px}
+.route-compare .rc-label{color:var(--dim);min-width:42px}
+.route-compare .rc-hop{padding:2px 8px;border-radius:999px;background:rgba(15,23,42,.65);
+  border:1px solid rgba(30,58,95,.45);font-variant-numeric:tabular-nums}
+.route-compare .rc-hop.changed{border-color:rgba(34,211,238,.65);color:#a5f3fc;
+  box-shadow:0 0 10px rgba(34,211,238,.25);animation:hopChanged 1.4s ease-in-out infinite}
+@keyframes routePulse{0%,100%{border-color:rgba(34,211,238,.35)}50%{border-color:rgba(34,211,238,.65)}}
+@keyframes hopChanged{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+.topo-pending #topoSvg{border-color:rgba(245,158,11,.45);
+  box-shadow:0 0 30px rgba(245,158,11,.12) inset,0 4px 24px rgba(0,0,0,.3);
+  animation:pendingScan 2s ease-in-out infinite}
+@keyframes pendingScan{0%,100%{filter:brightness(1)}50%{filter:brightness(1.08)}}
+.explain-banner{margin-top:8px;padding:6px 12px;font-size:11px;color:#bae6fd;
+  background:linear-gradient(90deg,rgba(8,47,73,.75),rgba(15,23,42,.55));
+  border:1px solid rgba(34,211,238,.35);border-radius:2px;letter-spacing:.04em;max-width:720px}
+.explain-banner.hidden{display:none}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .pulse{animation:pulse 1.6s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
 .flow{stroke-dasharray:8 6;animation:flow 1.2s linear infinite}
 @keyframes flow{to{stroke-dashoffset:-28}}
+@keyframes breakRipple{0%{transform:scale(.75);opacity:.9}100%{transform:scale(1.65);opacity:0}}
+@keyframes breakRing{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.08);opacity:.72}}
+@keyframes breakEdge{0%,100%{stroke-opacity:.85}50%{stroke-opacity:1}}
+.break-ripple{animation:breakRipple 2.2s ease-out infinite;transform-box:fill-box;transform-origin:center}
+.break-ring{animation:breakRing 1.4s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
+.break-edge{animation:breakEdge 1s ease-in-out infinite;stroke-width:4.5}
+.break-node .break-tag-bg{fill:rgba(239,68,68,.35);stroke:#ef4444;stroke-width:1.2}
+.icmp-blind-node .icmp-tag-bg{fill:rgba(245,158,11,.35);stroke:#f59e0b;stroke-width:1.2}
+.endpoint-node .endpoint-tag-bg{fill:rgba(167,139,250,.28);stroke:#a78bfa;stroke-width:1.2}
+.icmp-ripple{animation:breakRipple 2.8s ease-out infinite;transform-box:fill-box;transform-origin:center}
+.icmp-ring{animation:breakRing 1.8s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
+.icmp-edge{animation:breakEdge 1.4s ease-in-out infinite;stroke-width:3.5}
+.rotate-badge{font-size:11px;color:var(--cyan);padding:5px 12px;border-radius:2px;
+  border:1px solid rgba(34,211,238,.35);
+  background:linear-gradient(90deg,rgba(34,211,238,.12),rgba(34,211,238,.04));
+  margin-left:auto;letter-spacing:.04em;
+  box-shadow:0 0 12px rgba(34,211,238,.1)}
+.rotate-badge.fault{color:#fca5a5;border-color:rgba(239,68,68,.45);
+  background:linear-gradient(90deg,rgba(239,68,68,.14),rgba(239,68,68,.04))}
+.score-hint{font-size:10px;color:var(--dim);margin-top:6px;line-height:1.45;max-width:260px;opacity:.85}
+.topo-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px;width:100%}
 .hidden{display:none}
 </style>
 </head>
 <body>
 <div id="stage">
 <div class="grid">
-  <div class="topbar panel" style="border-radius:10px">
-    <div>
-      <h1>网络链路态势大屏</h1>
-      <div class="topmeta" style="margin-top:6px">
+  <div class="topbar panel">
+    <div class="topbar-brand">
+      <h1>网络链路态势大屏<span class="sub">NETWORK LINK OPERATIONS CENTER</span></h1>
+      <div class="topmeta">
         <span id="clock">--</span>
         <span id="refreshHint">加载中...</span>
         <span id="countsHint">--</span>
       </div>
+      <div class="explain-banner hidden" id="explainBanner"></div>
     </div>
-    <div>
+    <div class="topbar-actions">
       <button class="winbtn active" data-w="today" onclick="setWindow('today',this)">今日</button>
       <button class="winbtn" data-w="1h" onclick="setWindow('1h',this)">近1小时</button>
       <button class="winbtn" data-w="7d" onclick="setWindow('7d',this)">近7天</button>
-      <a class="btn" href="/" style="margin-left:10px">返回控制台</a>
-      <button class="btn" onclick="toggleFs()" style="margin-left:6px">全屏</button>
+      <a class="btn" href="/">返回控制台</a>
+      <button class="btn" onclick="toggleFs()">全屏</button>
     </div>
   </div>
 
@@ -91,7 +262,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
       <div class="gauge">
         <div class="ring" id="riskRing">--</div>
         <div><div style="font-size:11px;color:var(--dim)">风险指数</div>
-          <div id="riskGrade" style="font-size:16px;font-weight:700;margin-top:4px">--</div></div>
+          <div id="riskGrade" style="font-size:16px;font-weight:700;margin-top:4px">--</div>
+          <div class="score-hint" id="riskHint"></div></div>
       </div>
       <div class="statgrid" id="riskStats"></div>
     </div>
@@ -100,6 +272,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   <div class="panel center">
     <div class="ptitle">动态链路拓扑</div>
     <div class="pbody" style="display:flex;flex-direction:column;height:calc(100% - 42px)">
+      <div class="topo-toolbar">
+        <button class="winbtn active" id="btnTopoSingle" onclick="setTopoMode('single',this)">单路径</button>
+        <button class="winbtn" id="btnTopoMerged" onclick="setTopoMode('merged',this)">合并拓扑</button>
+        <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
+        <span class="rotate-badge hidden" id="rotateBadge"></span>
+      </div>
       <svg id="topoSvg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg>
       <div class="topo-detail" id="topoDetail">选择节点或等待路径数据...</div>
     </div>
@@ -109,14 +287,17 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
     <div class="ptitle">网络健康 · TOP</div>
     <div class="pbody">
       <div class="gauge">
-        <div class="ring" id="healthRing" style="border-color:var(--green);box-shadow:0 0 18px rgba(34,197,94,.25)">--</div>
+        <div class="ring" id="healthRing">--</div>
         <div><div style="font-size:11px;color:var(--dim)">健康评分</div>
-          <div id="healthGrade" style="font-size:16px;font-weight:700;margin-top:4px">--</div></div>
+          <div id="healthGrade" style="font-size:16px;font-weight:700;margin-top:4px">--</div>
+          <div class="score-hint" id="healthHint"></div></div>
       </div>
       <div class="ptitle" style="padding:8px 0;font-size:11px">SLA 最低 TOP5</div>
       <div class="toplist" id="topSla"></div>
       <div class="ptitle" style="padding:8px 0;font-size:11px">P95 最高 TOP5</div>
       <div class="toplist" id="topLat"></div>
+      <div class="ptitle" style="padding:8px 0;font-size:11px">中断最多 TOP5</div>
+      <div class="toplist" id="topOutages"></div>
     </div>
   </div>
 
@@ -128,10 +309,30 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 </div>
 <script>
 const DEMO=new URLSearchParams(location.search).get('demo')==='1';
+const EXPLAIN=DEMO||new URLSearchParams(location.search).get('explain')==='1';
 let WINDOW='today';
 let pathsData=null;
 let selectedTid=null;
+let topoMode='single';
 let refreshTimer=null;
+let rotateTimer=null;
+let rotatePausedUntil=0;
+let rotateIdx=0;
+let rotatePoolKey='';
+let routeCompareByTid={};
+const EVENT_TYPE_LABEL={
+  open_incident:'未恢复', incident_open:'故障', recovery:'恢复',
+  route_changed:'路径', webhook_fail:'Webhook', paused:'暂停', resumed:'恢复监测',
+  status_change:'状态',
+};
+const ROTATE={
+  enabled:true,
+  normalMs:20000,
+  faultMs:8000,
+  manualPauseMs:30000,
+  recoverDelayMs:5000,
+  minPaths:2,
+};
 
 function fitStage(){
   const s=Math.min(innerWidth/1920,innerHeight/1080);
@@ -140,7 +341,77 @@ function fitStage(){
   el.style.left=((innerWidth-1920*s)/2)+'px';
   el.style.top=((innerHeight-1080*s)/2)+'px';
 }
-addEventListener('resize',fitStage); fitStage();
+addEventListener('resize',()=>{fitStage();markScrollable();}); fitStage();
+
+function markScrollable(root){
+  (root||document).querySelectorAll('.pbody,.tline').forEach(el=>{
+    const needs=el.scrollHeight>el.clientHeight+1||el.scrollWidth>el.clientWidth+1;
+    el.classList.toggle('has-scroll',needs);
+  });
+}
+
+function initExplainBanner(){
+  if(!EXPLAIN) return;
+  const el=document.getElementById('explainBanner');
+  el.classList.remove('hidden');
+  el.textContent=DEMO
+    ? '演示模式 — 样例数据展示故障、路径变化、恢复与时间线；SSE 已关闭，仍按窗口轮询'
+    : '讲解模式 — 关注左侧风险/右侧 TOP/中部拓扑与底部事件时间线的联动';
+}
+
+function formatDur(sec){
+  sec=Number(sec)||0;
+  if(sec<60) return Math.round(sec)+'s';
+  if(sec<3600) return Math.round(sec/60)+'m';
+  return (sec/3600).toFixed(1)+'h';
+}
+
+function eventRowClass(r){
+  const t=r.type||'';
+  if(r.pinned||t==='open_incident') return 'pinned';
+  if(t==='route_changed') return 'route';
+  if(t==='recovery') return 'recovery';
+  if(t==='webhook_fail') return 'webhook';
+  return r.level==='red'?'red':(r.level==='orange'?'orange':'green');
+}
+
+function renderRouteHopRow(label, ips, changedSet){
+  const hops=(ips||[]).map((ip,i)=>{
+    const cls=changedSet.has(i)?'rc-hop changed':'rc-hop';
+    const txt=(ip&&ip!=='*')?esc(ip):'*';
+    return `<span class="${cls}">${i+1}:${txt}</span>`;
+  }).join('<span style="color:var(--dim);margin:0 2px">→</span>');
+  return `<div class="rc-row"><span class="rc-label">${label}</span>${hops||'<span class="rc-hop">—</span>'}</div>`;
+}
+
+function renderRouteCompare(diff){
+  if(!diff||!(diff.old_ips||diff.new_ips)) return '';
+  const changed=new Set(diff.changed_hops||[]);
+  return `<div class="route-compare">`+
+    `<div class="rc-title">↔ 路径变化 · ${esc(diff.text||'路由切换')}</div>`+
+    renderRouteHopRow('旧', diff.old_ips, changed)+
+    renderRouteHopRow('新', diff.new_ips, changed)+
+    `</div>`;
+}
+
+function getRouteCompareForPath(p){
+  const live=routeCompareByTid[p.tid];
+  if(live&&Date.now()<live.until) return live.diff||{old_ips:live.old_ips,new_ips:live.new_ips,changed_hops:[]};
+  return p.route_diff||null;
+}
+
+function flashRecoveryEvent(m){
+  const el=document.getElementById('eventLine');
+  if(!el||!m) return;
+  const row=document.createElement('div');
+  row.className='trow green recovery-flash';
+  row.innerHTML=`<span>${new Date().toLocaleTimeString('zh-CN',{hour12:false})}</span>`+
+    `<span>${esc(m.label||m.tid||'')}</span>`+
+    `<span>已恢复 · 链路恢复正常<span class="etype">恢复</span></span>`;
+  el.prepend(row);
+  setTimeout(()=>row.classList.add('fade-out'),2200);
+  setTimeout(()=>row.remove(),3200);
+}
 
 function tickClock(){
   document.getElementById('clock').textContent=
@@ -168,8 +439,10 @@ async function loadAll(){
     renderOverview(ov);
     pathsData=paths;
     renderTopo(paths);
+    refreshRotateState(false);
     renderTop(top);
     renderEvents(ev);
+    requestAnimationFrame(()=>markScrollable());
     document.getElementById('refreshHint').textContent=
       '更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
   }catch(e){
@@ -178,18 +451,176 @@ async function loadAll(){
   }
 }
 
+function setTopoMode(mode,btn){
+  topoMode=mode;
+  document.getElementById('btnTopoSingle').classList.toggle('active',mode==='single');
+  document.getElementById('btnTopoMerged').classList.toggle('active',mode==='merged');
+  if(pathsData) renderTopo(pathsData);
+  syncAutoRotate();
+}
+
+function toggleAutoRotate(btn){
+  ROTATE.enabled=!ROTATE.enabled;
+  btn.classList.toggle('active',ROTATE.enabled);
+  syncAutoRotate();
+}
+
+function getRotatePool(paths){
+  const list=paths||[];
+  const reds=list.filter(p=>p.status==='red');
+  if(reds.length) return {pool:reds, mode:'fault', label:'告警'};
+  const oranges=list.filter(p=>p.status==='orange');
+  if(oranges.length) return {pool:oranges, mode:'fault', label:'警告'};
+  const normal=list.filter(p=>p.status!=='paused'&&p.status!=='gray');
+  return {pool:normal.length?normal:list, mode:'normal', label:'正常'};
+}
+
+function poolKey(pool){return pool.map(p=>p.tid).join('|');}
+
+function updateRotateBadge(poolInfo, idx){
+  const el=document.getElementById('rotateBadge');
+  if(!ROTATE.enabled||topoMode!=='single'||!poolInfo||poolInfo.pool.length<ROTATE.minPaths){
+    el.classList.add('hidden');
+    return;
+  }
+  const i=Math.max(0,Math.min(idx,poolInfo.pool.length-1));
+  const cur=poolInfo.pool[i]||{};
+  el.classList.remove('hidden');
+  el.classList.toggle('fault',poolInfo.mode==='fault');
+  const paused=Date.now()<rotatePausedUntil?' · 已暂停':'';
+  el.textContent=`自动轮播 · ${poolInfo.label} ${i+1}/${poolInfo.pool.length} · ${cur.label||cur.tid||''}${paused} · ${poolInfo.mode==='fault'?Math.round(ROTATE.faultMs/1000):Math.round(ROTATE.normalMs/1000)}s`;
+}
+
+function stopRotateTimer(){
+  clearInterval(rotateTimer);
+  rotateTimer=null;
+}
+
+function startRotateTimer(poolInfo){
+  stopRotateTimer();
+  const ms=poolInfo.mode==='fault'?ROTATE.faultMs:ROTATE.normalMs;
+  rotateTimer=setInterval(()=>{
+    if(Date.now()<rotatePausedUntil){
+      updateRotateBadge(poolInfo,rotateIdx);
+      return;
+    }
+    const fresh=getRotatePool((pathsData&&pathsData.paths)||[]);
+    if(!fresh.pool.length) return;
+    if(poolKey(fresh.pool)!==rotatePoolKey){
+      refreshRotateState(true);
+      return;
+    }
+    rotateIdx=(rotateIdx+1)%fresh.pool.length;
+    selectedTid=fresh.pool[rotateIdx].tid;
+    renderSingleTopo(pathsData,false);
+    updateRotateBadge(fresh,rotateIdx);
+  },ms);
+}
+
+/** Update pool/badge; only restart the interval when ``restartTimer`` or pool changed. */
+function refreshRotateState(restartTimer=false){
+  const paths=(pathsData&&pathsData.paths)||[];
+  const poolInfo=getRotatePool(paths);
+  if(!ROTATE.enabled||topoMode!=='single'||poolInfo.pool.length<ROTATE.minPaths){
+    stopRotateTimer();
+    rotatePoolKey='';
+    updateRotateBadge(null,0);
+    return;
+  }
+  const key=poolKey(poolInfo.pool);
+  if(key!==rotatePoolKey){
+    rotatePoolKey=key;
+    rotateIdx=0;
+    restartTimer=true;
+    if(!poolInfo.pool.find(p=>p.tid===selectedTid)){
+      selectedTid=poolInfo.pool[0].tid;
+      if(pathsData) renderSingleTopo(pathsData,false);
+    }
+  }else{
+    rotateIdx=Math.max(0,poolInfo.pool.findIndex(p=>p.tid===selectedTid));
+  }
+  updateRotateBadge(poolInfo,rotateIdx);
+  if(restartTimer||!rotateTimer){
+    startRotateTimer(poolInfo);
+  }
+}
+
+function syncAutoRotate(){
+  refreshRotateState(true);
+}
+
+function pauseAutoRotate(ms){
+  rotatePausedUntil=Date.now()+(ms||ROTATE.manualPauseMs);
+}
+
+function focusPath(tid,{pauseMs=0,render=true}={}){
+  if(!tid) return;
+  selectedTid=tid;
+  if(pauseMs) rotatePausedUntil=Date.now()+pauseMs;
+  const poolInfo=getRotatePool((pathsData&&pathsData.paths)||[]);
+  rotateIdx=Math.max(0,poolInfo.pool.findIndex(p=>p.tid===tid));
+  if(render&&pathsData) renderSingleTopo(pathsData,false);
+  updateRotateBadge(poolInfo,rotateIdx);
+}
+
+function onTraceFaultSSE(m){
+  if(!m||!m.tid||topoMode!=='single') return;
+  focusPath(m.tid,{pauseMs:3000,render:true});
+  syncAutoRotate();
+}
+
+function onTraceHealSSE(m){
+  pauseAutoRotate(ROTATE.recoverDelayMs);
+  flashRecoveryEvent(m);
+  setTimeout(()=>syncAutoRotate(),ROTATE.recoverDelayMs+100);
+}
+
+function onRouteChangedSSE(m){
+  if(!m||!m.tid) return;
+  routeCompareByTid[m.tid]={
+    diff:m.route_diff||{old_ips:m.old_ips||[],new_ips:m.new_ips||[],text:'路径变化'},
+    until:Date.now()+45000,
+  };
+  focusPath(m.tid,{pauseMs:5000,render:true});
+  syncAutoRotate();
+}
+
+function renderScoreHints(ov){
+  const meta=ov.score_meta||{};
+  const inp=ov.score_inputs||{};
+  const rh=document.getElementById('riskHint');
+  const hh=document.getElementById('healthHint');
+  if(meta.risk){
+    rh.textContent=`${meta.risk.formula} · red ${inp.red||0} · 未恢复 ${inp.open_incidents||0}`;
+  }
+  if(meta.health){
+    hh.textContent=`${meta.health.formula} · 正常比 ${((inp.green_ratio||0)*100).toFixed(1)}%`;
+  }
+}
 function renderOverview(ov){
+  renderScoreHints(ov);
   const c=ov.counts||{};
   document.getElementById('riskRing').textContent=(ov.risk&&ov.risk.score!=null)?ov.risk.score:'--';
   document.getElementById('riskGrade').textContent=(ov.risk&&ov.risk.grade)||'--';
   document.getElementById('healthRing').textContent=(ov.health&&ov.health.score!=null)?ov.health.score:'--';
   document.getElementById('healthGrade').textContent=(ov.health&&ov.health.grade)||'--';
+  const riskRing=document.getElementById('riskRing');
+  const riskScore=(ov.risk&&ov.risk.score!=null)?ov.risk.score:0;
+  const riskCol=riskScore>=60?'var(--red)':riskScore>=30?'var(--orange)':'var(--cyan)';
+  riskRing.style.borderColor=riskCol;
+  riskRing.style.boxShadow=`0 0 24px ${riskCol}44,inset 0 0 20px ${riskCol}14`;
+  const healthRing=document.getElementById('healthRing');
+  healthRing.style.borderColor='var(--green)';
+  healthRing.style.boxShadow='0 0 24px rgba(34,197,94,.28),inset 0 0 20px rgba(34,197,94,.08)';
   document.getElementById('countsHint').textContent=
     `节点 ${c.targets||0} · 正常 ${c.green||0} · 告警 ${c.red||0} · 未恢复 ${ov.open_incidents||0}`;
   document.getElementById('riskStats').innerHTML=[
     ['正常','green',c.green],['警告','orange',c.orange],['告警','red',c.red],
     ['Webhook失败','orange',ov.webhook_failures||0]
-  ].map(([k,cls,v])=>`<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${v||0}</div></div>`).join('');
+  ].map(([k,cls,v])=>{
+    const accent=cls==='green'?'var(--green)':cls==='orange'?'var(--orange)':cls==='red'?'var(--red)':'var(--cyan)';
+    return `<div class="stat" style="--accent:${accent}"><div class="k">${k}</div><div class="v ${cls}">${v||0}</div></div>`;
+  }).join('');
 }
 
 function colorForStatus(st){
@@ -242,77 +673,158 @@ function renderHopNode(pt, meta){
   const {x,y}=pt;
   const st=meta.status||'ok';
   const col=hopStatusColor(st);
+  const isReal=meta.breakKind==='real';
+  const isIcmpBlind=meta.breakKind==='icmp_filtered';
+  const isEndpoint=meta.breakKind==='endpoint';
+  const isHighlight=isReal||isIcmpBlind||isEndpoint||!!meta.breakPoint;
+  const accent=isReal?'#ef4444':(isIcmpBlind?'#f59e0b':(isEndpoint?'#a78bfa':col));
   const pulse=(st==='break'||meta.pulse)?' class="pulse"':'';
-  const r=meta.kind==='target'?26:(meta.kind==='source'?24:20);
+  let r=meta.kind==='target'?26:(meta.kind==='source'?24:20);
+  if(isReal||isIcmpBlind) r=32;
+  else if(isEndpoint) r=28;
+  else if(meta.kind==='target'&&meta.status==='red') r=28;
   const grad=meta.kind==='source'?'gradSource':(
     meta.kind==='target'?(meta.status==='red'?'gradBreak':'gradOk'):(
-    st==='break'||st==='after'?'gradBreak':(
-      st==='filtered'?'gradWarn':'gradOk')));
-  let g=`<g transform="translate(${x},${y})"${pulse}>`;
-  g+=`<circle r="${r+8}" fill="none" stroke="${col}" stroke-width="1" opacity=".25"/>`;
-  g+=`<circle r="${r}" fill="url(#${grad})" stroke="${col}" stroke-width="2.5" filter="url(#glow)"/>`;
+    isReal?'gradBreak':(
+      isEndpoint?'gradEndpoint':(
+      isIcmpBlind||st==='filtered'?'gradWarn':(
+        st==='break'||st==='after'?'gradBreak':'gradOk')))));
+  const glowFilter=isReal?'url(#breakGlow)':(isIcmpBlind?'url(#icmpGlow)':(isEndpoint?'url(#endpointGlow)':'url(#glow)'));
+  const nodeCls=isReal?' class="break-node"':(isIcmpBlind?' class="icmp-blind-node"':(isEndpoint?' class="endpoint-node"':''));
+  let g=`<g transform="translate(${x},${y})"${nodeCls}${pulse}>`;
+  if(isReal){
+    g+=`<circle r="${r+26}" fill="none" stroke="#ef4444" stroke-width="2" class="break-ripple"/>`;
+    g+=`<circle r="${r+26}" fill="none" stroke="#ef4444" stroke-width="1.5" class="break-ripple" style="animation-delay:.75s"/>`;
+    g+=`<circle r="${r+26}" fill="none" stroke="#ef4444" stroke-width="1" class="break-ripple" style="animation-delay:1.5s"/>`;
+    g+=`<circle r="${r+10}" fill="none" stroke="#fca5a5" stroke-width="3" class="break-ring"/>`;
+  } else if(isIcmpBlind){
+    g+=`<circle r="${r+22}" fill="none" stroke="#f59e0b" stroke-width="2" class="icmp-ripple"/>`;
+    g+=`<circle r="${r+22}" fill="none" stroke="#fbbf24" stroke-width="1.5" class="icmp-ripple" style="animation-delay:.9s"/>`;
+    g+=`<circle r="${r+8}" fill="none" stroke="#fde68a" stroke-width="2.5" class="icmp-ring"/>`;
+  }
+  g+=`<circle r="${r+8}" fill="none" stroke="${accent}" stroke-width="${isHighlight?2:1}" opacity="${isHighlight?0.55:0.25}"/>`;
+  g+=`<circle r="${r}" fill="url(#${grad})" stroke="${accent}" stroke-width="${isHighlight?3.5:2.5}" filter="${glowFilter}"/>`;
   if(meta.kind==='source'){
     g+=`<text y="5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">源</text>`;
   } else if(meta.kind==='target'){
     g+=`<text y="4" text-anchor="middle" fill="#fff" font-size="14">🎯</text>`;
+  } else if(isReal){
+    g+=`<text y="2" text-anchor="middle" fill="#fff" font-size="16" font-weight="800">⚠</text>`;
+  } else if(isIcmpBlind){
+    g+=`<text y="3" text-anchor="middle" fill="#fff" font-size="13" font-weight="800">ICMP</text>`;
+  } else if(isEndpoint){
+    g+=`<text y="3" text-anchor="middle" fill="#fff" font-size="12" font-weight="800">APP</text>`;
   } else {
     g+=`<text y="-2" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">${meta.hopNum}</text>`;
   }
   const lbl=esc(meta.label||'');
   const short=lbl.length>18?(lbl.slice(0,8)+'…'+lbl.slice(-8)):lbl;
-  g+=`<text y="${r+16}" text-anchor="middle" fill="#e2e8f0" font-size="9.5">${short}</text>`;
+  const lblCol=isReal?'#fecaca':(isIcmpBlind?'#fde68a':(isEndpoint?'#ddd6fe':'#e2e8f0'));
+  g+=`<text y="${r+18}" text-anchor="middle" fill="${lblCol}" font-size="${isHighlight?10.5:9.5}" font-weight="${isHighlight?700:400}">${short}</text>`;
   if(meta.rtt!=null && meta.kind==='hop'){
-    g+=`<text y="${r+28}" text-anchor="middle" fill="#94a3b8" font-size="9">${meta.rtt} ms</text>`;
+    g+=`<text y="${r+30}" text-anchor="middle" fill="#94a3b8" font-size="9">${meta.rtt} ms</text>`;
   }
   if(meta.tag){
-    g+=`<rect x="-28" y="${-r-18}" width="56" height="14" rx="4" fill="${col}" opacity=".25"/>`;
-    g+=`<text y="${-r-8}" text-anchor="middle" fill="${col}" font-size="8.5" font-weight="600">${esc(meta.tag)}</text>`;
+    const tw=(isReal||isIcmpBlind)?(isIcmpBlind?92:88):(isEndpoint?96:56);
+    const th=(isReal||isIcmpBlind||isEndpoint)?22:14;
+    const ty=-r-((isReal||isIcmpBlind||isEndpoint)?56:18);
+    const tagCls=isReal?'break-tag-bg':(isIcmpBlind?'icmp-tag-bg':(isEndpoint?'endpoint-tag-bg':''));
+    const tagFill=isReal?'rgba(239,68,68,.35)':(isIcmpBlind?'rgba(245,158,11,.35)':(isEndpoint?'rgba(167,139,250,.28)':col));
+    const tagStroke=isReal?'#ef4444':(isIcmpBlind?'#f59e0b':(isEndpoint?'#a78bfa':'none'));
+    const tagIcon=isReal?'⚠ ':((isIcmpBlind&&meta.tag.indexOf('ICMP')<0)?'🛡 ':((isEndpoint)?'◆ ':''));
+    g+=`<rect x="${-tw/2}" y="${ty}" width="${tw}" height="${th}" rx="5" class="${tagCls}" fill="${tagFill}" opacity="${isHighlight?1:.25}" stroke="${tagStroke}"/>`;
+    g+=`<text y="${ty + th / 2}" dominant-baseline="middle" text-anchor="middle" fill="${isHighlight?'#fff':col}" font-size="${isHighlight?10:8.5}" font-weight="700">${tagIcon}${esc(meta.tag)}</text>`;
   }
-  if(lbl) g+=`<title>${lbl}${meta.rtt!=null?' · '+meta.rtt+' ms':''}</title>`;
+  if(lbl) g+=`<title>${lbl}${meta.rtt!=null?' · '+meta.rtt+' ms':''}${meta.tag?' · '+meta.tag:''}</title>`;
   g+='</g>';
   return g;
 }
 
 function renderTopo(data){
-  const svg=document.getElementById('topoSvg');
-  const paths=(data&&data.paths)||[];
-  if(!paths.length){
-    svg.setAttribute('viewBox','0 0 920 480');
-    svg.innerHTML='<text x="460" y="240" fill="#64748b" text-anchor="middle" font-size="14">暂无路径数据</text>';
+  if(topoMode==='merged'){
+    renderMergedTopo(data);
     return;
   }
-  if(!selectedTid||!paths.find(p=>p.tid===selectedTid)) selectedTid=paths[0].tid;
-  const p=paths.find(x=>x.tid===selectedTid)||paths[0];
-  const hops=p.hops||[];
-  const summary=p.summary||{};
-  const breakHop=(summary.break_at&&summary.break_at.hop)||null;
+  renderSingleTopo(data);
+}
 
-  const nodes=[];
-  nodes.push({kind:'source', status:'ok', label:'监控主机', hopNum:0});
-  hops.forEach(h=>{
-    const st=h.status||'ok';
-    let tag='';
-    if(h.hop===breakHop) tag='疑似断点';
-    else if(st==='filtered') tag='ICMP过滤';
-    else if(st==='break') tag='无响应';
-    nodes.push({
-      kind:'hop', status:st, hopNum:h.hop||'?',
-      label:hopLabel(h),
-      rtt:h.rtt_ms!=null?Number(h.rtt_ms).toFixed(1):null,
-      tag, pulse:h.hop===breakHop,
-    });
+function renderMergedTopo(data){
+  const svg=document.getElementById('topoSvg');
+  const merged=(data&&data.merged)||{};
+  const order=merged.node_order||[];
+  const nodesById={};
+  (merged.nodes||[]).forEach(n=>{nodesById[n.id]=n;});
+  if(!order.length){
+    svg.setAttribute('viewBox','0 0 920 480');
+    svg.innerHTML='<text x="460" y="240" fill="#64748b" text-anchor="middle" font-size="14">暂无合并拓扑数据</text>';
+    return;
+  }
+  const visuals=[];
+  order.forEach(nid=>{
+    const n=nodesById[nid]||{id:nid};
+    if(nid==='source'){
+      visuals.push({kind:'source', status:'ok', label:n.label||'监控主机', hopNum:0});
+    } else if(n.type==='target'){
+      visuals.push({
+        kind:'target', status:n.status||'green', pulse:n.status==='red',
+        label:(n.label||n.tid||'')+(n.tid?(' · '+n.tid):''),
+      });
+    } else {
+      const st=n.status||'ok';
+      let tag='';
+      const share=(n.target_tids||[]).length;
+      if(share>1) tag=share+' 路共用';
+      else if(st==='break'||st==='after') tag='疑似断点';
+      else if(st==='filtered') tag='ICMP过滤';
+      visuals.push({
+        kind:'hop', status:st, hopNum:(n.label||'').replace(/^Hop\s*/,'')||'?',
+        label:(n.ip&&n.ip!=='*')?n.ip:'未知',
+        rtt:n.rtt_ms!=null?Number(n.rtt_ms).toFixed(1):null,
+        tag, pulse:st==='break'||st==='after',
+        breakPoint:st==='break'||st==='after',
+      });
+    }
   });
-  nodes.push({
-    kind:'target', status:p.status||'green', pulse:p.status==='red',
-    label:(p.label||'目标')+' · '+(p.ip||''),
-  });
-
-  const layout=layoutSerpentine(nodes.length, 920, 480, 36);
+  const layout=layoutSerpentine(visuals.length, 920, 480, 36);
   svg.setAttribute('viewBox',`0 0 ${layout.W} ${layout.totalH}`);
+  const pos={};
+  order.forEach((nid,i)=>{pos[nid]=layout.pts[i];});
+  let html=svgDefs();
+  html+=`<rect width="100%" height="100%" fill="url(#grid)" opacity=".6"/>`;
+  html+=`<rect x="12" y="8" width="220" height="28" rx="6" fill="rgba(15,23,42,.75)" stroke="rgba(34,211,238,.3)"/>`;
+  html+=`<text x="24" y="27" fill="#22d3ee" font-size="12" font-weight="600">合并 ${merged.path_count||0} 条 · 共用跳 ${merged.shared_hops||0}</text>`;
+  (merged.edges||[]).forEach(e=>{
+    const a=pos[e.from], b=pos[e.to];
+    if(!a||!b) return;
+    const col=hopStatusColor(e.status||'ok');
+    const isBreak=e.status==='break'||e.status==='after'||e.status==='red';
+    const dash=(e.status==='break'||e.status==='after')?' stroke-dasharray="6 4"':'';
+    const cls='flow'+(isBreak?' break-edge':'');
+    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${col}" stroke-width="${isBreak?4:2}" opacity=".75"${dash} class="${cls}"/>`;
+  });
+  layout.pts.forEach((pt,i)=>{html+=renderHopNode(pt, visuals[i]);});
+  svg.innerHTML=html;
+  document.getElementById('topoDetail').innerHTML=
+    `<div>多目标路径合并视图 — 相同 IP 的跳点合并为一个节点</div>`+
+    `<div style="margin-top:4px;font-size:11px;color:var(--dim)">共 ${visuals.length} 个节点 · ${(merged.edges||[]).length} 条边</div>`;
+}
 
-  let html=`<defs>
+function svgDefs(){
+  return `<defs>
     <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="breakGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="icmpGlow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="endpointGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3.5" result="b"/>
       <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <linearGradient id="gradSource" x1="0" y1="0" x2="0" y2="1">
@@ -327,21 +839,86 @@ function renderTopo(data){
     <linearGradient id="gradBreak" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#f87171"/><stop offset="100%" stop-color="#991b1b"/>
     </linearGradient>
+    <linearGradient id="gradEndpoint" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#c4b5fd"/><stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
       <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(30,58,95,.35)" stroke-width="1"/>
     </pattern>
   </defs>`;
+}
+
+function renderSingleTopo(data, updateBadge=true){
+  const svg=document.getElementById('topoSvg');
+  const paths=(data&&data.paths)||[];
+  if(!paths.length){
+    svg.setAttribute('viewBox','0 0 920 480');
+    svg.innerHTML='<text x="460" y="240" fill="#64748b" text-anchor="middle" font-size="14">暂无路径数据</text>';
+    if(updateBadge) updateRotateBadge(null,0);
+    return;
+  }
+  if(!selectedTid||!paths.find(p=>p.tid===selectedTid)) selectedTid=paths[0].tid;
+  const p=paths.find(x=>x.tid===selectedTid)||paths[0];
+  const hops=p.hops||[];
+  const summary=p.summary||{};
+  const breakKind=summary.break_kind||'none';
+  const breakHop=(summary.break_at&&summary.break_at.hop)||null;
+  const routeDiff=getRouteCompareForPath(p);
+  const pending=p.trace_status==='pending';
+  document.getElementById('topoDetail').parentElement.classList.toggle('topo-pending',pending);
+
+  const nodes=[];
+  nodes.push({kind:'source', status:'ok', label:'监控主机', hopNum:0});
+  hops.forEach(h=>{
+    const st=h.status||'ok';
+    const isMarkPt=h.hop===breakHop&&breakKind!=='none';
+    let tag='';
+    let bk=null;
+    if(isMarkPt&&breakKind==='real'){ tag='疑似断点'; bk='real'; }
+    else if(isMarkPt&&breakKind==='icmp_filtered'){ tag='ICMP 盲区'; bk='icmp_filtered'; }
+    else if(isMarkPt&&breakKind==='endpoint'){ tag='应用层异常'; bk='endpoint'; }
+    else if(st==='filtered') tag='ICMP过滤';
+    else if(st==='break'||st==='after') tag='无响应';
+    nodes.push({
+      kind:'hop', status:st, hopNum:h.hop||'?',
+      label:hopLabel(h),
+      rtt:h.rtt_ms!=null?Number(h.rtt_ms).toFixed(1):null,
+      tag,
+      pulse:isMarkPt||st==='break'||st==='after',
+      breakPoint:isMarkPt,
+      breakKind:bk,
+    });
+  });
+  nodes.push({
+    kind:'target', status:p.status||'green', pulse:p.status==='red',
+    label:(p.label||'目标')+' · '+(p.ip||''),
+  });
+
+  const layout=layoutSerpentine(nodes.length, 920, 480, 36);
+  svg.setAttribute('viewBox',`0 0 ${layout.W} ${layout.totalH}`);
+
+  let html=svgDefs();
   html+=`<rect width="100%" height="100%" fill="url(#grid)" opacity=".6"/>`;
   html+=`<rect x="12" y="8" width="160" height="28" rx="6" fill="rgba(15,23,42,.75)" stroke="rgba(34,211,238,.3)"/>`;
-  html+=`<text x="24" y="27" fill="#22d3ee" font-size="12" font-weight="600">共 ${hops.length} 跳 · ${esc(p.label||'')}</text>`;
+  html+=`<text x="24" y="27" fill="#22d3ee" font-size="12" font-weight="600">共 ${hops.length} 跳 · ${esc(p.label||'')}${p.route_changed?' · 路径变化':''}</text>`;
+  if(pending){
+    html+=`<rect x="760" y="8" width="148" height="28" rx="6" fill="rgba(120,53,15,.55)" stroke="rgba(245,158,11,.45)"/>`;
+    html+=`<text x="834" y="27" fill="#fde68a" text-anchor="middle" font-size="11" font-weight="700">追踪进行中…</text>`;
+  }
 
   for(let i=0;i<layout.pts.length-1;i++){
     const a=layout.pts[i], b=layout.pts[i+1];
-    const st=nodes[i+1].status||'ok';
-    const col=hopStatusColor(st);
-    const dash=(st==='break'||st==='after')?' stroke-dasharray="6 4"':'';
-    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${col}" stroke-width="2.5" opacity=".75"${dash} class="flow"/>`;
-    html+=`<circle cx="${(a.x+b.x)/2}" cy="${(a.y+b.y)/2}" r="2.5" fill="${col}" opacity=".9"/>`;
+    const nxt=nodes[i+1];
+    const st=nxt.status||'ok';
+    const isReal=nxt.breakKind==='real';
+    const isIcmp=nxt.breakKind==='icmp_filtered';
+    const isEp=nxt.breakKind==='endpoint';
+    const col=isReal?'#ef4444':(isIcmp?'#f59e0b':(isEp?'#a78bfa':hopStatusColor(st)));
+    const isHotEdge=isReal||isIcmp||isEp||st==='break'||st==='after';
+    const dash=(st==='break'||st==='after'||pending)?' stroke-dasharray="6 4"':'';
+    const cls='flow'+(isReal?' break-edge':(isIcmp?' icmp-edge':(pending?' pending-edge':'')));
+    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${col}" stroke-width="${isHotEdge?4.5:2.5}" opacity=".85"${dash} class="${cls}"/>`;
+    html+=`<circle cx="${(a.x+b.x)/2}" cy="${(a.y+b.y)/2}" r="${isHotEdge?4:2.5}" fill="${col}" opacity=".95"/>`;
   }
 
   layout.pts.forEach((pt,i)=>{
@@ -349,32 +926,95 @@ function renderTopo(data){
   });
 
   svg.innerHTML=html;
+  const poolInfo=getRotatePool(paths);
+  const idx=Math.max(0,poolInfo.pool.findIndex(x=>x.tid===selectedTid));
+  if(updateBadge) updateRotateBadge(poolInfo,idx);
   const tabs=paths.map(pp=>`<button class="winbtn${pp.tid===selectedTid?' active':''}" style="margin:0 4px 8px 0" onclick="selectPath('${escAttr(pp.tid)}')">${esc(pp.label)}</button>`).join('');
   const detail=(summary.text||'路径完整')+
-    (p.trace_status==='pending'?' · 追踪进行中（读缓存，不强制刷新）':'');
+    (pending?' · 追踪进行中（读缓存，不强制刷新）':'');
+  let routeNote=routeDiff?renderRouteCompare(routeDiff):'';
+  let breakNote='';
+  if(breakHop&&breakKind==='real'){
+    breakNote=`<div style="margin-top:6px;padding:8px 10px;border-radius:6px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);color:#fecaca;font-size:12px;font-weight:600">⚠ 疑似断点：第 ${breakHop} 跳${summary.break_at&&summary.break_at.ip?' · '+esc(summary.break_at.ip):''} — TCP 端口也不通</div>`;
+  } else if(breakHop&&breakKind==='icmp_filtered'){
+    let okHint='监测正常';
+    const pt=(p.ping_type||'').toLowerCase();
+    if(summary.service_ok&&pt==='dns') okHint='DNS 查询正常';
+    else if(summary.service_ok&&(pt==='http'||pt==='https')) okHint='HTTP 监测正常';
+    else {
+      const ports=(p.tcp_checks||[]).filter(c=>c.success).map(c=>c.port).slice(0,4);
+      if(ports.length) okHint=`${ports.join('/')} 端口检测正常`;
+    }
+    breakNote=`<div style="margin-top:6px;padding:8px 10px;border-radius:6px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.35);color:#bbf7d0;font-size:12px"><span style="font-weight:700;color:var(--green)">✓ ICMP 盲区（${esc(okHint)}）</span><br><span style="color:var(--dim);font-size:11px">traceroute 在第 ${breakHop} 跳后不可见，多为设备过滤 ICMP，不等于路径故障</span></div>`;
+  } else if(breakHop&&breakKind==='endpoint'){
+    breakNote=`<div style="margin-top:6px;padding:8px 10px;border-radius:6px;background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.35);color:#ddd6fe;font-size:12px"><span style="font-weight:700;color:#c4b5fd">◆ 应用层异常</span><br><span style="color:var(--dim);font-size:11px">第 ${breakHop} 跳后 ICMP 不可见，但故障原因在应用/DNS 层；路径拓扑仅供参考</span></div>`;
+  }
   document.getElementById('topoDetail').innerHTML=tabs+
+    routeNote+
+    breakNote+
     `<div style="margin-top:6px">${esc(detail)}</div>`+
     `<div style="margin-top:4px;font-size:11px;color:var(--dim)">可视化 ${nodes.length} 个节点（含源/目标），与 traceroute ${hops.length} 跳一致</div>`;
 }
 
-function selectPath(tid){selectedTid=tid; renderTopo(pathsData);}
+function selectPath(tid){
+  focusPath(tid,{pauseMs:ROTATE.manualPauseMs,render:true});
+}
+
+async function refreshPaths(){
+  try{
+    pathsData=await api('paths');
+    renderTopo(pathsData);
+    refreshRotateState(false);
+  }catch(_){}
+}
+
+async function refreshOverviewAndTop(){
+  try{
+    const [ov,top]=await Promise.all([api('overview'), api('topn')]);
+    renderOverview(ov);
+    renderTop(top);
+  }catch(_){}
+}
 
 function renderTop(top){
   const sla=(top.lowest_sla||[]).slice(0,5);
   const lat=(top.highest_latency||[]).slice(0,5);
-  document.getElementById('topSla').innerHTML=sla.length?sla.map(r=>
-    `<div class="toprow"><span>${esc(r.label)}</span><span>${r.uptime_pct!=null?r.uptime_pct.toFixed(3)+'%':'--'}</span></div>`).join('')
-    :'<div style="color:var(--dim);font-size:12px">暂无</div>';
-  document.getElementById('topLat').innerHTML=lat.length?lat.map(r=>
-    `<div class="toprow"><span>${esc(r.label)}</span><span>${r.lat_p95!=null?r.lat_p95+' ms':(r.lat_avg!=null?r.lat_avg+' ms':'--')}</span></div>`).join('')
-    :'<div style="color:var(--dim);font-size:12px">暂无</div>';
+  const out=(top.most_outages||[]).slice(0,5);
+  const maxLat=Math.max(1,...lat.map(r=>Number(r.lat_p95||r.lat_avg||0)));
+  const maxOut=Math.max(1,...out.map(r=>Number(r.outage_seconds||0)));
+  document.getElementById('topSla').innerHTML=sla.length?sla.map((r,i)=>{
+    const pct=Math.max(0,Math.min(100,Number(r.uptime_pct)||0));
+    return `<div class="toprow"><span class="top-rank">${i+1}</span><span class="top-name">${esc(r.label)}</span>`+
+      `<div class="top-bar-wrap"><div class="top-bar" style="width:${pct}%"></div></div>`+
+      `<span class="top-val">${r.uptime_pct!=null?r.uptime_pct.toFixed(2)+'%':'--'}</span></div>`;
+  }).join('')
+    :'<div style="color:var(--dim);font-size:12px;padding:8px">暂无</div>';
+  document.getElementById('topLat').innerHTML=lat.length?lat.map((r,i)=>{
+    const v=Number(r.lat_p95||r.lat_avg||0);
+    const pct=Math.max(4,Math.min(100,(v/maxLat)*100));
+    return `<div class="toprow"><span class="top-rank">${i+1}</span><span class="top-name">${esc(r.label)}</span>`+
+      `<div class="top-bar-wrap"><div class="top-bar lat" style="width:${pct}%"></div></div>`+
+      `<span class="top-val">${r.lat_p95!=null?r.lat_p95+' ms':(r.lat_avg!=null?r.lat_avg+' ms':'--')}</span></div>`;
+  }).join('')
+    :'<div style="color:var(--dim);font-size:12px;padding:8px">暂无</div>';
+  document.getElementById('topOutages').innerHTML=out.length?out.map((r,i)=>{
+    const sec=Number(r.outage_seconds||0);
+    const cnt=Number(r.outage_count||0);
+    const pct=Math.max(4,Math.min(100,(sec/maxOut)*100));
+    return `<div class="toprow"><span class="top-rank">${i+1}</span><span class="top-name">${esc(r.label)}</span>`+
+      `<div class="top-bar-wrap"><div class="top-bar outage" style="width:${pct}%"></div></div>`+
+      `<span class="top-val">${cnt}次 · ${formatDur(sec)}</span></div>`;
+  }).join('')
+    :'<div style="color:var(--dim);font-size:12px;padding:8px">暂无</div>';
 }
 
 function renderEvents(ev){
   const rows=(ev&&ev.events)||ev||[];
   document.getElementById('eventLine').innerHTML=rows.length?rows.map(r=>{
-    const cls=r.level==='red'?'red':(r.level==='orange'?'orange':'green');
-    return `<div class="trow ${cls}"><span>${esc(r.time||'--')}</span><span>${esc(r.label||'')}</span><span>${esc(r.text||'')}</span></div>`;
+    const cls=eventRowClass(r);
+    const tag=EVENT_TYPE_LABEL[r.type]||'';
+    const etype=tag?`<span class="etype">${esc(tag)}</span>`:'';
+    return `<div class="trow ${cls}"><span>${esc(r.time||'--')}</span><span>${esc(r.label||'')}</span><span>${esc(r.text||'')}${etype}</span></div>`;
   }).join(''):'<div style="color:var(--dim);font-size:12px">暂无事件</div>';
 }
 
@@ -389,20 +1029,68 @@ function toggleFs(){
 function connectSSE(){
   if(DEMO) return;
   const es=new EventSource('/events');
-  let deb=null;
+  let debAll=null, debPaths=null;
   es.onmessage=e=>{
     try{
       const m=JSON.parse(e.data);
       if(m.type==='heartbeat') return;
-      clearTimeout(deb);
-      deb=setTimeout(loadAll,1200);
+      if(m.type==='trace_break'){
+        clearTimeout(debPaths);
+        debPaths=setTimeout(()=>{
+          refreshPaths().then(()=>onTraceFaultSSE(m));
+          refreshOverviewAndTop();
+        },400);
+        return;
+      }
+      if(m.type==='trace_heal'){
+        clearTimeout(debPaths);
+        debPaths=setTimeout(()=>{
+          refreshPaths().then(()=>onTraceHealSSE(m));
+          refreshOverviewAndTop();
+          api('events').then(renderEvents).catch(()=>{});
+        },400);
+        return;
+      }
+      if(m.type==='route_changed'){
+        clearTimeout(debPaths);
+        debPaths=setTimeout(()=>{
+          refreshPaths().then(()=>onRouteChangedSSE(m));
+          refreshOverviewAndTop();
+          api('events').then(renderEvents).catch(()=>{});
+        },400);
+        return;
+      }
+      if(m.type==='update'&&m.target&&topoMode==='single'){
+        const st=m.target.status;
+        if(st==='red'||st==='orange') onTraceFaultSSE(m.target);
+      }
+      clearTimeout(debAll);
+      debAll=setTimeout(loadAll,1200);
     }catch(_){}
   };
   es.onerror=()=>{es.close(); setTimeout(connectSSE,5000);};
 }
 connectSSE();
+initExplainBanner();
 loadAll();
+requestAnimationFrame(()=>markScrollable());
 refreshTimer=setInterval(loadAll,15000);
+
+(function decoratePanels(){
+  const svg='<svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">'+
+    '<path d="M2 26V10c0-5 2.5-8 8-8h18" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>'+
+    '<circle cx="8" cy="8" r="2" fill="currentColor" opacity=".9"/>'+
+    '<path d="M2 26h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity=".5"/></svg>';
+  document.querySelectorAll('.panel:not(.topbar)').forEach(p=>{
+    if(p.querySelector('.corner')) return;
+    ['c-tl','c-tr','c-bl','c-br'].forEach(cls=>{
+      const d=document.createElement('div');
+      d.className='corner '+cls;
+      d.innerHTML=svg;
+      p.appendChild(d);
+    });
+  });
+})();
 </script>
 </body>
 </html>

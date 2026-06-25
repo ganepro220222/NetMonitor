@@ -8,12 +8,16 @@ sys.path.insert(0, ROOT)
 
 from src.screen_service import (
     build_events,
+    build_merged_graph,
     build_overview,
     build_paths,
+    build_route_diff,
     build_topn,
     compute_health_score,
     compute_risk_score,
+    demo_events,
     demo_overview,
+    invalidate_screen_cache,
     parse_window,
 )
 from src.traceroute_summary import summarize_break
@@ -52,6 +56,130 @@ def test_summarize_break_wording():
     return ok
 
 
+def test_break_kind_display():
+    from src.trace_policy import classify_path_break, summarize_for_display
+    hops = [
+        {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+        {"hop": 2, "ip": "202.1.1.1", "status": "break"},
+    ]
+    icmp = summarize_for_display(
+        hops, tcp_checks=[{"port": 443, "success": True}],
+        ping_type="icmp", probe_success=False, status="red")
+    real = summarize_for_display(
+        hops, tcp_checks=[{"port": 443, "success": False}],
+        ping_type="icmp", probe_success=False, status="red")
+    dns_ok = summarize_for_display(
+        hops, tcp_checks=[{"port": 443, "success": False}],
+        ping_type="dns", probe_success=True, status="green")
+    http_ep = summarize_for_display(
+        hops, tcp_checks=[{"port": 443, "success": True}],
+        ping_type="http", probe_success=False, status="red",
+        failure_reason="status_500")
+    ok = (
+        icmp.get("break_kind") == "icmp_filtered"
+        and real.get("break_kind") == "real"
+        and dns_ok.get("break_kind") == "icmp_filtered"
+        and dns_ok.get("service_ok") is True
+        and http_ep.get("break_kind") == "endpoint"
+        and classify_path_break(
+            hops, ping_type="http", probe_success=False,
+            failure_reason="status_500")["break_kind"] == "endpoint"
+    )
+    print(f"break_kind icmp/real/dns/http -> {ok}")
+    return ok
+
+
+def test_merged_graph():
+    paths = [
+        {"tid": "A", "label": "A", "status": "green", "hops": [
+            {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+            {"hop": 2, "ip": "10.0.0.2", "status": "ok"},
+        ]},
+        {"tid": "B", "label": "B", "status": "red", "hops": [
+            {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+            {"hop": 2, "ip": "10.0.0.9", "status": "break"},
+        ]},
+    ]
+    mg = build_merged_graph(paths)
+    ok = (
+        mg.get("path_count") == 2
+        and mg.get("shared_hops") == 1
+        and any(n.get("id") == "hop:10.0.0.1" for n in mg.get("nodes", []))
+    )
+    print(f"build_merged_graph shared hop -> {ok}")
+    return ok
+
+
+def test_route_diff():
+    old = [{"hop": 1, "ip": "10.0.0.1"}, {"hop": 2, "ip": "1.1.1.1"}]
+    new = [{"hop": 1, "ip": "10.0.0.1"}, {"hop": 2, "ip": "8.8.8.8"}]
+    diff = build_route_diff(old, new)
+    ok = (
+        diff is not None
+        and diff["old_ips"] == ["10.0.0.1", "1.1.1.1"]
+        and diff["new_ips"] == ["10.0.0.1", "8.8.8.8"]
+        and 1 in diff["changed_hops"]
+        and "1.1.1.1" in diff["text"]
+    )
+    print(f"build_route_diff -> {ok} text={diff.get('text') if diff else None!r}")
+    return ok
+
+
+def test_demo_events_shape():
+    rows = demo_events()
+    types = {r.get("type") for r in rows}
+    ok = (
+        "open_incident" in types
+        and "route_changed" in types
+        and "recovery" in types
+        and any(r.get("route_diff") for r in rows if r.get("type") == "route_changed")
+    )
+    print(f"demo_events phase3 types -> {ok} types={types}")
+    return ok
+
+
+def test_build_events_db():
+    import tempfile
+    import time
+    from src.data_store import DataStore
+
+    td = tempfile.mkdtemp()
+    db = os.path.join(td, "screen_ev.db")
+    ds = DataStore(db_path=db)
+    ds._schema_ready.wait(timeout=5)
+    w = WebServer(port=0)
+    w._running = True
+    w._data_store = ds
+    w.update_target(
+        tid="T1", label="NodeA", ip="10.0.0.1", status="green",
+        latency_ms=5.0, jitter_ms=1.0, loss_rate=0.0, is_probe_result=True)
+    ts = time.time() - 120
+    ds.record_alert(
+        target_id="T1", label="NodeA", ip="10.0.0.1",
+        ts=ts, old_status="green", new_status="red", category="loss",
+        failure_reason="timeout")
+    ds.flush()
+    time.sleep(0.25)
+    w.update_target(
+        tid="T1", label="NodeA", ip="10.0.0.1", status="red",
+        latency_ms=None, jitter_ms=0.0, loss_rate=1.0,
+        probe_success=False, is_probe_result=True)
+    ev = build_events(w, window="today", limit=20)
+    ok = (
+        isinstance(ev, list)
+        and len(ev) >= 1
+        and any(e.get("type") in ("incident_open", "open_incident") for e in ev)
+    )
+    print(f"build_events db-backed -> {ok} types={[e.get('type') for e in ev]}")
+    return ok
+
+
+def test_invalidate_cache():
+    invalidate_screen_cache()
+    print("invalidate_screen_cache -> True")
+    return True
+
+
 def test_build_overview_paths():
     w = WebServer(port=0)
     w._running = True
@@ -71,7 +199,10 @@ def test_build_overview_paths():
         and ov["counts"]["red"] == 1
         and isinstance(paths.get("paths"), list)
         and len(paths["paths"]) >= 1
+        and isinstance(paths.get("merged"), dict)
+        and paths["merged"].get("path_count", 0) >= 1
         and "lowest_sla" in top
+        and "most_outages" in top
         and isinstance(ev, list)
     )
     print(f"build overview/paths/top/events -> {ok}")
@@ -96,6 +227,7 @@ def test_http_routes():
         and json.loads(r_demo.data).get("demo") is True
         and r_paths.status_code == 200
         and bool(json.loads(r_paths.data).get("paths"))
+        and bool(json.loads(r_paths.data).get("merged"))
         and r_ev.status_code == 200
         and isinstance(body_ev.get("events"), list)
     )
@@ -116,12 +248,16 @@ def test_topo_layout_covers_all_hops():
 
 def test_source_guards():
     svc_path = os.path.join(ROOT, "src", "screen_service.py")
+    tp_path = os.path.join(ROOT, "src", "trace_policy.py")
     ws_path = os.path.join(ROOT, "src", "web_server.py")
     html_path = os.path.join(ROOT, "src", "web", "screen.html")
     with open(svc_path, encoding="utf-8") as f:
         svc = f.read()
+    with open(tp_path, encoding="utf-8") as f:
+        tp = f.read()
     with open(ws_path, encoding="utf-8") as f:
         ws = f.read()
+    html = open(html_path, encoding="utf-8").read()
     ok = (
         os.path.isfile(html_path)
         and "request_now" not in svc
@@ -129,7 +265,22 @@ def test_source_guards():
         and 'route("/screen")' in ws.replace(" ", "")
         and "/api/screen/overview" in ws
         and "window.open('/screen'" in ws
-        and "layoutSerpentine" in open(html_path, encoding="utf-8").read()
+        and "layoutSerpentine" in html
+        and "syncAutoRotate" in html
+        and "break-ripple" in html
+        and "trace_break" in ws
+        and "trace_heal" in ws
+        and "route_changed" in ws
+        and "build_merged_graph" in svc
+        and "summarize_for_display" in svc
+        and "classify_path_break" in tp
+        and "endpoint-node" in html
+        and "invalidate_screen_cache" in svc
+        and "topOutages" in html
+        and "route-compare" in html
+        and "build_route_diff" in svc
+        and "open_incident" in svc
+        and "onRouteChangedSSE" in html
     )
     print(f"source guards + wiring -> {ok}")
     return ok
@@ -137,7 +288,11 @@ def test_source_guards():
 
 def test_demo_payload_shape():
     d = demo_overview()
-    ok = "risk" in d and "health" in d and isinstance(d.get("counts"), dict)
+    ok = (
+        "risk" in d and "health" in d
+        and isinstance(d.get("counts"), dict)
+        and "score_meta" in d
+    )
     print(f"demo overview shape -> {ok}")
     return ok
 
@@ -147,7 +302,13 @@ def main():
         ("parse_window", test_parse_window()),
         ("scores", test_score_helpers()),
         ("summarize_break", test_summarize_break_wording()),
+        ("break_kind", test_break_kind_display()),
+        ("route_diff", test_route_diff()),
+        ("demo_events", test_demo_events_shape()),
+        ("merged_graph", test_merged_graph()),
+        ("invalidate_cache", test_invalidate_cache()),
         ("builders", test_build_overview_paths()),
+        ("events_db", test_build_events_db()),
         ("topo_layout", test_topo_layout_covers_all_hops()),
         ("http", test_http_routes()),
         ("source", test_source_guards()),
