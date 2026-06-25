@@ -14,6 +14,7 @@ dist/
 *.spec
 
 # === 运行时本地生成的可写数据与日志（防止泄露监测 IP） ===
+config.json
 *.db
 *.db-wal
 *.db-shm
@@ -27,6 +28,9 @@ assets/alert_warning.wav
 assets/alert_alarm.wav
 assets/alert_recovery.wav
 assets/icon.ico
+
+# === 本地评审补丁文件（git am 应用后即可删除，不入库） ===
+*.patch
 
 # === IDE 与系统临时文件 ===
 .idea/
