@@ -67,20 +67,20 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   box-shadow:0 0 10px rgba(34,211,238,.55)}
 .pbody{padding:12px 14px;height:calc(100% - 42px);overflow:auto;position:relative;z-index:1;
   overflow-x:hidden;scrollbar-width:thin;scrollbar-color:transparent transparent}
-.pbody.has-scroll:hover,.tline.has-scroll:hover{scrollbar-color:rgba(34,211,238,.42) rgba(8,16,32,.88)}
-.pbody::-webkit-scrollbar,.tline::-webkit-scrollbar{width:6px;height:6px}
-.pbody::-webkit-scrollbar-track,.tline::-webkit-scrollbar-track{background:transparent;border-radius:999px}
-.pbody.has-scroll:hover::-webkit-scrollbar-track,.tline.has-scroll:hover::-webkit-scrollbar-track{
+.pbody.has-scroll:hover,.tline.has-scroll:hover,.topo-detail.has-scroll:hover{scrollbar-color:rgba(34,211,238,.42) rgba(8,16,32,.88)}
+.pbody::-webkit-scrollbar,.tline::-webkit-scrollbar,.topo-detail::-webkit-scrollbar{width:6px;height:6px}
+.pbody::-webkit-scrollbar-track,.tline::-webkit-scrollbar-track,.topo-detail::-webkit-scrollbar-track{background:transparent;border-radius:999px}
+.pbody.has-scroll:hover::-webkit-scrollbar-track,.tline.has-scroll:hover::-webkit-scrollbar-track,.topo-detail.has-scroll:hover::-webkit-scrollbar-track{
   background:rgba(8,16,32,.75);margin:4px 0}
-.pbody::-webkit-scrollbar-thumb,.tline::-webkit-scrollbar-thumb{
+.pbody::-webkit-scrollbar-thumb,.tline::-webkit-scrollbar-thumb,.topo-detail::-webkit-scrollbar-thumb{
   border-radius:999px;background:transparent;border:1px solid transparent;box-shadow:none}
-.pbody.has-scroll:hover::-webkit-scrollbar-thumb,.tline.has-scroll:hover::-webkit-scrollbar-thumb{
+.pbody.has-scroll:hover::-webkit-scrollbar-thumb,.tline.has-scroll:hover::-webkit-scrollbar-thumb,.topo-detail.has-scroll:hover::-webkit-scrollbar-thumb{
   background:linear-gradient(180deg,rgba(34,211,238,.55),rgba(167,139,250,.45));
   border-color:rgba(34,211,238,.25);box-shadow:0 0 8px rgba(34,211,238,.2)}
-.pbody.has-scroll:hover::-webkit-scrollbar-thumb:hover,.tline.has-scroll:hover::-webkit-scrollbar-thumb:hover{
+.pbody.has-scroll:hover::-webkit-scrollbar-thumb:hover,.tline.has-scroll:hover::-webkit-scrollbar-thumb:hover,.topo-detail.has-scroll:hover::-webkit-scrollbar-thumb:hover{
   background:linear-gradient(180deg,rgba(34,211,238,.75),rgba(167,139,250,.6));
   box-shadow:0 0 12px rgba(34,211,238,.35)}
-.pbody::-webkit-scrollbar-corner,.tline::-webkit-scrollbar-corner{background:transparent}
+.pbody::-webkit-scrollbar-corner,.tline::-webkit-scrollbar-corner,.topo-detail::-webkit-scrollbar-corner{background:transparent}
 .topbar{grid-column:1/-1;display:flex;align-items:stretch;justify-content:space-between;
   padding:12px 22px 12px 16px;min-height:100px}
 .topbar.panel{--panel-cut:16px;background:
@@ -180,10 +180,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 #topoSvg{position:relative;z-index:1;width:100%;flex:1;min-height:0;display:block;
   background:transparent;border:0}
 .topo-detail{margin-top:8px;font-size:12px;color:var(--dim);
-  min-height:52px;max-height:68px;overflow-y:auto;padding:8px 12px;
+  min-height:52px;max-height:min(34vh,280px);overflow-y:auto;overflow-x:hidden;
+  padding:8px 12px;
   background:linear-gradient(90deg,rgba(15,23,42,.65),rgba(8,16,32,.45));
   border:1px solid rgba(30,58,95,.4);border-left:3px solid rgba(34,211,238,.45);
-  flex-shrink:0}
+  flex-shrink:0;scrollbar-width:thin;scrollbar-color:transparent transparent}
+.center.panel.geo-mode .topo-detail{max-height:80px}
 .toplist{display:flex;flex-direction:column;gap:6px}
 .toprow{display:grid;grid-template-columns:22px 1fr 72px 56px;gap:8px;align-items:center;
   font-size:12px;padding:7px 8px;
@@ -430,7 +432,7 @@ function fitStage(){
 addEventListener('resize',()=>{fitStage();markScrollable();if(geoChart) geoChart.resize();}); fitStage();
 
 function markScrollable(root){
-  (root||document).querySelectorAll('.pbody,.tline').forEach(el=>{
+  (root||document).querySelectorAll('.pbody,.tline,.topo-detail').forEach(el=>{
     const needs=el.scrollHeight>el.clientHeight+1||el.scrollWidth>el.clientWidth+1;
     el.classList.toggle('has-scroll',needs);
   });
@@ -1798,6 +1800,7 @@ function renderSingleTopo(data, updateBadge=true){
     `<div style="margin-top:4px;font-size:11px;color:var(--dim)">${merged
       ? `可视化 ${nodes.length} 个节点（源 + ${hops.length} 跳），最后一跳即监测目标`
       : `可视化 ${nodes.length} 个节点（源 + ${hops.length} 跳 + 监测目标），traceroute 未在最后一跳到达目标 IP`}</div>`;
+  requestAnimationFrame(()=>markScrollable(document.getElementById('topoDetail')));
 }
 
 function selectPath(tid){
