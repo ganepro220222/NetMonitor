@@ -524,6 +524,8 @@ def test_source_guards():
         and "screen-window-btn" in html
         and "rotatePoolKeyInfo" in html
         and "ensureGeoMaps" in html
+        and "dataErrorBanner" in html
+        and "noteDataError" in html
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "world.json"))
         and os.path.getsize(os.path.join(ROOT, "src", "web", "vendor", "world.json")) > 10000
         and "geo-mode" in html
@@ -543,6 +545,60 @@ def test_demo_payload_shape():
         and "score_meta" in d
     )
     print(f"demo overview shape -> {ok}")
+    return ok
+
+
+def test_window_validation_normalizes():
+    """paths/topn/geo must coerce an unknown ?window to 'today'. Otherwise
+    build_topn caches by the raw window string -> unbounded _CACHE growth."""
+    import src.screen_service as ss
+    w = WebServer(port=0)
+    if not getattr(w, "_app", None):
+        print("window validation -> SKIP (Flask unavailable)")
+        return True
+    ss.invalidate_screen_cache()
+    with w._app.test_client() as c:
+        wins = [json.loads(c.get(f"/api/screen/{r}?window=junk-x").data).get("window")
+                for r in ("paths", "topn", "geo")]
+    # Layout-independent: the junk token must never reach any cache key
+    # (cache keys may carry extra components such as id(web)).
+    bad_keys = [k for k in ss._CACHE if any("junk" in str(x) for x in k)]
+    ok = wins == ["today", "today", "today"] and not bad_keys
+    print(f"window validation normalizes junk -> {ok} wins={wins} bad_keys={bad_keys}")
+    return ok
+
+
+def test_error_fallback_no_demo():
+    """On a real backend failure overview/geo must degrade to an empty
+    skeleton carrying ``error`` -- never demo data (which would paint fake
+    healthy nodes onto the live screen)."""
+    import src.screen_service as ss
+    w = WebServer(port=0)
+    if not getattr(w, "_app", None):
+        print("error fallback -> SKIP (Flask unavailable)")
+        return True
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    orig_ov, orig_geo = ss.build_overview, ss.build_geo
+    ss.build_overview = _boom
+    ss.build_geo = _boom
+    try:
+        with w._app.test_client() as c:
+            ov = json.loads(c.get("/api/screen/overview").data)
+            geo = json.loads(c.get("/api/screen/geo").data)
+    finally:
+        ss.build_overview, ss.build_geo = orig_ov, orig_geo
+    ok = (
+        bool(ov.get("error")) and ov.get("demo") is not True
+        and (ov.get("counts") or {}).get("targets") == 0
+        and (ov.get("risk") or {}).get("score") is None
+        and bool(geo.get("error")) and geo.get("demo") is not True
+        and geo.get("targets") == []
+        and (geo.get("stats") or {}).get("on_map") == 0
+    )
+    print(f"error fallback empty-skeleton not demo -> {ok}")
     return ok
 
 
@@ -569,6 +625,8 @@ def main():
         ("events_db", test_build_events_db()),
         ("topo_layout", test_topo_layout_covers_all_hops()),
         ("http", test_http_routes()),
+        ("window_valid", test_window_validation_normalizes()),
+        ("error_fallback", test_error_fallback_no_demo()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),
     ]

@@ -7369,8 +7369,18 @@ class WebServer:
                 payload = ss.build_overview(self, window=window)
             except Exception as e:
                 logging.getLogger(__name__).warning("[screen/overview] %s", e)
-                payload = ss.demo_overview()
-                payload["error"] = str(e)
+                # Degrade to an empty skeleton (NOT demo data) so a real
+                # backend failure never shows fabricated "healthy" nodes on
+                # the live screen; the frontend surfaces ``error`` as a banner.
+                payload = {
+                    "window": window, "error": str(e),
+                    "counts": {"targets": 0, "green": 0, "orange": 0,
+                               "red": 0, "paused": 0, "gray": 0, "online": 0},
+                    "open_incidents": 0, "webhook_failures": 0,
+                    "risk": {"score": None, "grade": "--"},
+                    "health": {"score": None, "grade": "--"},
+                    "avg_uptime_pct": None,
+                }
             return json.dumps(payload, ensure_ascii=False), 200, {
                 "Content-Type": "application/json"}
 
@@ -7378,6 +7388,8 @@ class WebServer:
         def api_screen_paths():
             from src import screen_service as ss
             window = (request.args.get("window") or "today").strip().lower()
+            if window not in ("1h", "today", "7d"):
+                window = "today"
             if _screen_demo():
                 return json.dumps(ss.demo_paths(), ensure_ascii=False), 200, {
                     "Content-Type": "application/json"}
@@ -7394,6 +7406,8 @@ class WebServer:
         def api_screen_topn():
             from src import screen_service as ss
             window = (request.args.get("window") or "today").strip().lower()
+            if window not in ("1h", "today", "7d"):
+                window = "today"
             if _screen_demo():
                 return json.dumps(ss.demo_topn(), ensure_ascii=False), 200, {
                     "Content-Type": "application/json"}
@@ -7433,6 +7447,8 @@ class WebServer:
         def api_screen_geo():
             from src import screen_service as ss
             window = (request.args.get("window") or "today").strip().lower()
+            if window not in ("1h", "today", "7d"):
+                window = "today"
             if _screen_demo():
                 return json.dumps(ss.demo_geo(), ensure_ascii=False), 200, {
                     "Content-Type": "application/json"}
@@ -7440,8 +7456,13 @@ class WebServer:
                 payload = ss.build_geo(self, window=window)
             except Exception as e:
                 logging.getLogger(__name__).warning("[screen/geo] %s", e)
-                payload = ss.demo_geo()
-                payload["error"] = str(e)
+                # Empty skeleton (NOT demo data) on real failure; see overview.
+                payload = {
+                    "window": window, "error": str(e),
+                    "source": None, "targets": [], "inset": [],
+                    "stats": {"total": 0, "on_map": 0,
+                              "private": 0, "unlocated": 0},
+                }
             return json.dumps(payload, ensure_ascii=False), 200, {
                 "Content-Type": "application/json"}
 

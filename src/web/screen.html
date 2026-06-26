@@ -236,6 +236,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:linear-gradient(90deg,rgba(8,47,73,.75),rgba(15,23,42,.55));
   border:1px solid rgba(34,211,238,.35);border-radius:2px;letter-spacing:.04em;max-width:720px}
 .explain-banner.hidden{display:none}
+.data-error-banner{margin-top:8px;padding:6px 12px;font-size:12px;color:#fecaca;font-weight:600;
+  background:linear-gradient(90deg,rgba(127,29,29,.85),rgba(15,23,42,.55));
+  border:1px solid rgba(239,68,68,.55);border-radius:2px;letter-spacing:.03em;max-width:860px}
+.data-error-banner.hidden{display:none}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .pulse{animation:pulse 1.6s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
@@ -300,6 +304,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
         <span id="countsHint">--</span>
       </div>
       <div class="explain-banner hidden" id="explainBanner"></div>
+      <div class="data-error-banner hidden" id="dataErrorBanner"></div>
     </div>
     <div class="topbar-actions">
       <button class="winbtn screen-window-btn active" data-w="today" onclick="setWindow('today',this)">今日</button>
@@ -503,6 +508,27 @@ function api(path){
     .then(r=>r.json());
 }
 
+/** Per-source backend-degradation tracking. A payload that carries an
+ *  ``error`` field means the server fell back to an empty skeleton (NOT demo
+ *  data); surface it as a red banner so the screen never passes off blanks
+ *  as a healthy network. */
+const dataErrors={};
+function noteDataError(map){
+  for(const k in map){
+    const p=map[k];
+    if(p&&p.error) dataErrors[k]=p.error; else delete dataErrors[k];
+  }
+  const el=document.getElementById('dataErrorBanner');
+  if(!el) return;
+  const msgs=[...new Set(Object.values(dataErrors))];
+  if(msgs.length){
+    el.textContent='⚠ 数据降级 · 部分后端聚合失败：'+msgs.slice(0,2).join(' / ')+(msgs.length>2?' 等':'');
+    el.classList.remove('hidden');
+  }else{
+    el.classList.add('hidden');
+  }
+}
+
 async function loadAll(){
   document.getElementById('refreshHint').textContent='刷新中...';
   try{
@@ -515,6 +541,7 @@ async function loadAll(){
     refreshRotateState(false);
     renderTop(top);
     renderEvents(ev);
+    noteDataError({overview:ov, paths:paths, topn:top, geo:geo});
     requestAnimationFrame(()=>markScrollable());
     document.getElementById('refreshHint').textContent=
       '更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
@@ -1620,6 +1647,7 @@ async function refreshPaths(){
     geoData=geo;
     renderTopo(pathsData);
     refreshRotateState(false);
+    noteDataError({paths:paths, geo:geo});
   }catch(_){}
 }
 
@@ -1628,6 +1656,7 @@ async function refreshOverviewAndTop(){
     const [ov,top]=await Promise.all([api('overview'), api('topn')]);
     renderOverview(ov);
     renderTop(top);
+    noteDataError({overview:ov, topn:top});
   }catch(_){}
 }
 
