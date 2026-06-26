@@ -555,6 +555,11 @@ function syncCenterPanelMode(){
   document.getElementById('centerPanel').classList.toggle('geo-mode',topoMode==='geo');
 }
 
+function clearTopoPending(){
+  const el=document.getElementById('topoDetail');
+  if(el&&el.parentElement) el.parentElement.classList.remove('topo-pending');
+}
+
 function setTopoMode(mode,btn){
   topoMode=mode;
   document.getElementById('btnTopoGeo').classList.toggle('active',mode==='geo');
@@ -1404,6 +1409,7 @@ function renderGeo(data, updateBadge=true){
 }
 
 function renderTopo(data){
+  if(topoMode!=='single') clearTopoPending();
   if(topoMode==='geo'){
     renderGeo(geoData||{targets:[]});
     return;
@@ -1526,6 +1532,7 @@ function renderSingleTopo(data, updateBadge=true){
   if(!paths.length){
     svg.setAttribute('viewBox','0 0 920 480');
     svg.innerHTML='<text x="460" y="240" fill="#64748b" text-anchor="middle" font-size="14">暂无路径数据</text>';
+    clearTopoPending();
     if(updateBadge) updateRotateBadge(null,0);
     return;
   }

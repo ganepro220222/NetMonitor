@@ -523,6 +523,7 @@ def test_source_guards():
         and "setGeoMapMode" in html
         and "screen-window-btn" in html
         and "rotatePoolKeyInfo" in html
+        and "clearTopoPending" in html
         and "ensureGeoMaps" in html
         and "dataErrorBanner" in html
         and "noteDataError" in html
