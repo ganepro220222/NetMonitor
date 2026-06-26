@@ -1076,7 +1076,7 @@ function computeGeoViewport(pts, mapMode){
     minLon=Math.min(minLon,lon); maxLon=Math.max(maxLon,lon);
     minLat=Math.min(minLat,lat); maxLat=Math.max(maxLat,lat);
   });
-  minLon-=pad; maxLon+=pad; minLat-=pad; maxLat-=pad;
+  minLon-=pad; maxLon+=pad; minLat-=pad; maxLat+=pad;
   if(mapMode==='china'){
     minLon=Math.max(72,minLon); maxLon=Math.min(136,maxLon);
     minLat=Math.max(17,minLat); maxLat=Math.min(55,maxLat);
