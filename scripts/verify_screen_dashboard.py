@@ -115,6 +115,53 @@ def test_merged_graph():
     return ok
 
 
+def test_merged_unknown_hops_not_shared():
+    """Unrelated timeout hops must not merge across targets (Bug 1)."""
+    paths = [
+        {"tid": "A", "label": "A", "status": "red", "hops": [
+            {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+            {"hop": 2, "ip": "*", "status": "break"},
+        ]},
+        {"tid": "B", "label": "B", "status": "red", "hops": [
+            {"hop": 1, "ip": "10.0.0.2", "status": "ok"},
+            {"hop": 2, "ip": "*", "status": "break"},
+        ]},
+    ]
+    mg = build_merged_graph(paths)
+    unk = [n for n in mg.get("nodes", []) if str(n.get("id", "")).startswith("hop:unk:")]
+    shared_unk = [n for n in unk if len(n.get("target_tids") or []) > 1]
+    ok = (
+        len(unk) == 2
+        and not shared_unk
+        and mg.get("shared_hops") == 0
+    )
+    print(f"merged unknown hops isolated -> {ok} unk={len(unk)} shared_hops={mg.get('shared_hops')}")
+    return ok
+
+
+def test_path_graph_distinct_timeout_hops():
+    """Repeated timeout hops must not collapse to hop:* self-loop (Bug 2)."""
+    hops = [
+        {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+        {"hop": 2, "ip": "*", "status": "after"},
+        {"hop": 3, "ip": "*", "status": "after"},
+    ]
+    g = _path_graph(
+        hops, "T", "目标", "red",
+        {"reached": False, "break_kind": "real"},
+        target_ip="203.0.113.9")
+    ids = {n["id"] for n in g.get("nodes", [])}
+    self_loops = [e for e in g.get("edges", []) if e.get("from") == e.get("to")]
+    ok = (
+        "hop:*" not in ids
+        and "hop:unk:T:2" in ids
+        and "hop:unk:T:3" in ids
+        and not self_loops
+    )
+    print(f"path graph timeout hops distinct -> {ok} self_loops={len(self_loops)}")
+    return ok
+
+
 def test_target_merge_scheme_c():
     reached_hops = [
         {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
@@ -419,6 +466,8 @@ def test_source_guards():
         and "onRouteChangedSSE" in html
         and "drillToSinglePath" in html
         and "setGeoMapMode" in html
+        and "screen-window-btn" in html
+        and "rotatePoolKeyInfo" in html
         and "ensureGeoMaps" in html
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "world.json"))
         and os.path.getsize(os.path.join(ROOT, "src", "web", "vendor", "world.json")) > 10000
@@ -456,6 +505,8 @@ def main():
         ("route_diff", test_route_diff()),
         ("demo_events", test_demo_events_shape()),
         ("merged_graph", test_merged_graph()),
+        ("merged_unk_isolated", test_merged_unknown_hops_not_shared()),
+        ("path_graph_timeouts", test_path_graph_distinct_timeout_hops()),
         ("invalidate_cache", test_invalidate_cache()),
         ("builders", test_build_overview_paths()),
         ("events_db", test_build_events_db()),

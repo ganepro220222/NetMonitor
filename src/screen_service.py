@@ -170,14 +170,17 @@ def _path_graph(hops: list, tid: str, label: str, status: str,
     prev = "source"
     last_nid_with_ip = None
     for h in hops or []:
-        hip = h.get("ip") or "*"
-        nid = f"hop:{hip}"
+        hip = (h.get("ip") or "").strip()
+        if hip and hip != "*":
+            nid = f"hop:{hip}"
+        else:
+            nid = f"hop:unk:{tid}:{h.get('hop', '?')}"
         if not any(n["id"] == nid for n in nodes):
             nodes.append({
                 "id": nid,
                 "type": "hop",
                 "label": f"Hop {h.get('hop', '?')}",
-                "ip": hip,
+                "ip": hip or "*",
                 "status": h.get("status") or "ok",
                 "rtt_ms": h.get("rtt_ms"),
             })
@@ -210,11 +213,14 @@ def _path_graph(hops: list, tid: str, label: str, status: str,
             "target_merged": merge}
 
 
-def _hop_node_id(h: dict) -> str:
+def _hop_node_id(h: dict, tid: str | None = None) -> str:
     hip = (h.get("ip") or "").strip()
     if hip and hip != "*":
         return f"hop:{hip}"
-    return f"hop:unk:{h.get('hop', '?')}"
+    hop_no = h.get("hop", "?")
+    if tid:
+        return f"hop:unk:{tid}:{hop_no}"
+    return f"hop:unk:{hop_no}"
 
 
 def build_merged_graph(paths: list[dict]) -> dict:
@@ -267,7 +273,7 @@ def build_merged_graph(paths: list[dict]) -> dict:
             set(nodes["source"]["target_tids"]) | {tid})
         prev = "source"
         for h in p.get("hops") or []:
-            nid = _hop_node_id(h)
+            nid = _hop_node_id(h, tid)
             st = h.get("status") or "ok"
             _add_node(
                 nid,
