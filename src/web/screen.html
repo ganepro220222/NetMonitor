@@ -447,7 +447,12 @@ function fitStage(){
 addEventListener('resize',()=>{fitStage();markScrollable();if(geoChart) geoChart.resize();}); fitStage();
 
 function markScrollable(root){
-  (root||document).querySelectorAll('.pbody,.tline,.topo-detail').forEach(el=>{
+  const base=root||document;
+  const els=[
+    ...(base.matches&&base.matches('.pbody,.tline,.topo-detail')?[base]:[]),
+    ...base.querySelectorAll('.pbody,.tline,.topo-detail'),
+  ];
+  els.forEach(el=>{
     const needs=el.scrollHeight>el.clientHeight+1||el.scrollWidth>el.clientWidth+1;
     el.classList.toggle('has-scroll',needs);
   });
@@ -1701,6 +1706,7 @@ function renderMergedTopo(data){
   document.getElementById('topoDetail').innerHTML=
     `<div>多目标路径合并视图 — 相同 IP 的跳点合并为一个节点</div>`+
     `<div style="margin-top:4px;font-size:11px;color:var(--dim)">共 ${visuals.length} 个节点 · ${(merged.edges||[]).length} 条边</div>`;
+  requestAnimationFrame(()=>markScrollable(document.getElementById('topoDetail')));
 }
 
 function estimateSvgTextWidth(text, fontSize=12){

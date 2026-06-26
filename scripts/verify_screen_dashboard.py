@@ -842,6 +842,19 @@ def test_maphint_db_warning_order():
     return ok
 
 
+def test_mark_scrollable_includes_root():
+    """markScrollable(root) must tag root when root is .topo-detail (querySelectorAll skips self)."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    ok = (
+        "base.matches" in html
+        and "base.matches('.pbody,.tline,.topo-detail')" in html
+        and "markScrollable(document.getElementById('topoDetail'))" in html
+    )
+    print(f"markScrollable root self -> {ok}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -874,6 +887,7 @@ def main():
         ("dns_cached", test_dns_resolution_cached()),
         ("dns_off_path", test_geo_dns_off_request_path()),
         ("maphint_db", test_maphint_db_warning_order()),
+        ("markscroll_root", test_mark_scrollable_includes_root()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),
