@@ -24,7 +24,8 @@ from src.screen_service import (
     should_merge_target_hop,
     _path_graph,
 )
-from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo, region_string_to_coords, build_manual_geo_from_fields
+from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo, region_string_to_coords, build_manual_geo_from_fields, resolve_probe_ipv4, resolve_hostname_ipv4
+from src.monitor_source_geo import detect_route_local_ipv4, resolve_monitor_source
 from src.traceroute_summary import summarize_break
 from src.web_server import WebServer
 
@@ -644,6 +645,44 @@ def test_error_fallback_no_demo():
     return ok
 
 
+def test_monitor_source_geo():
+    """Monitor source: manual wins; auto uses local or egress path."""
+    rx = GeoResolver(GeoResolver.resolve_xdb_path(ROOT))
+    manual = resolve_monitor_source(
+        rx, {"lat": 31.2, "lon": 121.5, "city": "上海", "label": "办公室"})
+    ok_manual = (
+        manual is not None
+        and manual.get("loc_source") == "manual"
+        and manual.get("lat") == 31.2
+    )
+    auto = resolve_monitor_source(rx, None, allow_egress_fetch=False)
+    route_ip = detect_route_local_ipv4()
+    ok_auto = auto is None or auto.get("loc_source") in ("local_ip", "egress_ip")
+    if route_ip and is_public_ip(route_ip):
+        ok_auto = ok_auto and auto is not None and auto.get("loc_source") == "local_ip"
+    print(f"monitor_source manual={ok_manual} auto={auto} route={route_ip} -> {ok_auto}")
+    return ok_manual and ok_auto
+
+
+def test_resolve_probe_ipv4():
+    """Targets: literals resolve; private stays unplaced; domains when DNS works."""
+    priv = resolve_probe_ipv4("10.0.0.1")
+    ok_priv = priv is None
+    ok_literal = resolve_probe_ipv4("8.8.8.8") == "8.8.8.8"
+    rx = GeoResolver(GeoResolver.resolve_xdb_path(ROOT))
+    placed = rx.resolve_target(ip="8.8.8.8", resolve_ip=None, manual_geo=None)
+    ok_placed = placed.get("kind") == "public" and bool(placed.get("geo"))
+    host_ip = resolve_hostname_ipv4("www.baidu.com")
+    ok_domain = True
+    if host_ip:
+        pd = rx.resolve_target(ip="www.baidu.com", resolve_ip=None, manual_geo=None)
+        ok_domain = pd.get("kind") == "public"
+    print(
+        f"resolve_probe_ipv4 priv={ok_priv} literal={ok_literal} "
+        f"8.8.8.8={ok_placed} baidu_dns={host_ip} baidu_geo={ok_domain}")
+    return ok_priv and ok_literal and ok_placed and ok_domain
+
+
 def test_build_manual_geo_from_fields():
     """UI geo parser: city lookup, lat/lon pair, empty clears."""
     empty = build_manual_geo_from_fields()
@@ -672,6 +711,8 @@ def main():
         ("china_suffix_coords", test_china_city_suffix_coords()),
         ("geo_resolver", test_geo_resolver()),
         ("geo_ui_fields", test_build_manual_geo_from_fields()),
+        ("monitor_source", test_monitor_source_geo()),
+        ("resolve_probe", test_resolve_probe_ipv4()),
         ("demo_geo", test_demo_geo_shape()),
         ("build_geo", test_build_geo()),
         ("build_geo_stats", test_build_geo_stats_private_vs_unlocated()),

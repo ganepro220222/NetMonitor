@@ -342,7 +342,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             frame,
-            text="用于地理大屏上监测源位置弧线；留空则不显示监测源",
+            text="用于地理大屏上监测源位置弧线；留空则自动探测（直连公网用本机 IP，内网 NAT 用公网出口 IP）",
             font=F(10), text_color="gray50", anchor="w").pack(
             fill="x", padx=14, pady=(4, 10))
 

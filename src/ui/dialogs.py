@@ -152,7 +152,7 @@ class _BaseDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             self._geo_frame,
-            text="用于地理大屏地图弧线；填写城市名可自动解析，也可直接填经纬度",
+            text="用于地理大屏地图弧线；填写城市名可自动解析，也可直接填经纬度；留空则按目标 IP/域名自动定位",
             font=F(9), text_color="gray50", anchor="w").pack(
             fill="x", padx=16, pady=(0, 4))
 

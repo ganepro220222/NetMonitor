@@ -14,9 +14,11 @@ from src.trace_policy import summarize_for_display
 
 try:
     from src.geo_resolver import GeoResolver, parse_manual_geo
+    from src.monitor_source_geo import resolve_monitor_source
 except ImportError:
     GeoResolver = None  # type: ignore
     parse_manual_geo = None  # type: ignore
+    resolve_monitor_source = None  # type: ignore
 
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[tuple, tuple[float, Any]] = {}
@@ -863,8 +865,18 @@ def build_geo(
         )
         resolve_ip = (trace or {}).get("resolve_ip") or ip
         manual_geo = target_geos.get(tid) or t.get("geo")
+        ptype = (t.get("ping_type") or "icmp").lower()
+        probe_order = None
+        if ptype == "dns":
+            dd = (t.get("dns_domain") or "").strip()
+            if dd:
+                probe_order = [dd, resolve_ip, ip]
         placed = res.resolve_target(
-            ip=ip, resolve_ip=resolve_ip, manual_geo=manual_geo)
+            ip=ip,
+            resolve_ip=resolve_ip,
+            manual_geo=manual_geo,
+            probe_order=probe_order,
+        )
         break_hop = _break_hop_info(summary)
         break_geo = None
         if break_hop and break_hop.get("ip"):
@@ -900,7 +912,10 @@ def build_geo(
                 "inset_kind": "unlocated",
             })
 
-    src = parse_manual_geo(monitor_geo) if parse_manual_geo else None
+    if resolve_monitor_source is not None:
+        src = resolve_monitor_source(res, monitor_geo)
+    else:
+        src = parse_manual_geo(monitor_geo) if parse_manual_geo else None
     map_count = sum(1 for r in rows if r.get("geo"))
     return {
         "window": window,

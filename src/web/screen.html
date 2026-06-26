@@ -1387,8 +1387,10 @@ function renderGeo(data, updateBadge=true){
     const insetCount=(data.inset||[]).length;
     const offMap=insetCount+hiddenOverseas.length;
     const srcHint=src
-      ? (' · 弧线源 '+esc(src.label||src.city||'监控主机'))
-      : (' · 未设置监控源位置（config.json → settings.monitor_geo，可选）');
+      ? (' · 弧线源 '+esc(src.label||src.city||'监控主机')+
+         (src.loc_source==='egress_ip'?'（公网出口）':
+          src.loc_source==='local_ip'?'（本机公网）':''))
+      : (' · 监控源未定位（可在全局设置手动指定，或检查网络/ip2region 数据库）');
     const mapLock=geoMapUserChoice
       ? (' · 地图已固定为「'+(geoMapUserChoice==='china'?'中国':'世界')+'」（再点同按钮恢复自动）')
       : ' · 地图随轮播在中/世界间自动切换';

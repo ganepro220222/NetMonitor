@@ -1,20 +1,25 @@
 """Offline geo resolution for the /screen geographic view.
 
-Priority:
-  1. Manual ``geo`` on target (or ``monitor_geo`` in settings) — always used.
-  2. Public IP + optional ip2region.xdb under assets/ — no CDN API, no network.
-  3. Private IP without manual geo — ``kind=private`` (logical inset, no fake coords).
+Target priority:
+  1. Manual ``geo`` on target — always used.
+  2. Resolved probe IPv4 (traceroute resolve_ip → configured ip/hostname →
+     DNS-monitor ``dns_domain``) + optional ip2region.xdb — offline lookup.
+  3. Private IP without manual geo — ``kind=private`` (logical inset).
+
+Monitor source (probe origin) is resolved separately in monitor_source_geo.py:
+  manual monitor_geo → local public route IP → optional egress-IP HTTP fetch.
 
 Intranet / air-gapped use:
   ip2region.xdb is a read-only local binary database (~11 MB on disk, similar
-  in RAM once loaded).  Lookups never open sockets; private IPs (10/172/192…)
-  skip the database entirely.  Removing the file disables auto public-IP
-  geolocation but does not affect monitoring or the map (manual geo still works).
+  in RAM once loaded).  Target lookups never open sockets; private IPs skip
+  the database.  Egress detection only runs when monitor_geo is unset and the
+  host has no direct public IPv4.
 """
 from __future__ import annotations
 
 import ipaddress
 import os
+import socket
 import struct
 import threading
 import time
@@ -269,6 +274,38 @@ def is_ip_literal(ip: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def resolve_hostname_ipv4(hostname: str) -> str | None:
+    """Resolve *hostname* to the first public IPv4, or None."""
+    host = (hostname or "").strip()
+    if not host or is_ip_literal(host):
+        return None
+    try:
+        results = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except (socket.gaierror, OSError):
+        return None
+    for item in results:
+        ip = (item[4][0] or "").strip()
+        if ip and is_public_ip(ip):
+            return ip
+    return None
+
+
+def resolve_probe_ipv4(*candidates: str | None) -> str | None:
+    """Pick the first usable public IPv4 from literals or resolvable hostnames."""
+    for raw in candidates:
+        probe = (raw or "").strip()
+        if not probe:
+            continue
+        if is_ip_literal(probe):
+            if is_public_ip(probe):
+                return probe
+            continue
+        resolved = resolve_hostname_ipv4(probe)
+        if resolved:
+            return resolved
+    return None
 
 
 def _norm_coord(val: Any) -> float | None:
@@ -633,6 +670,8 @@ class GeoResolver:
             ip: str,
             resolve_ip: str | None,
             manual_geo: dict | None,
+            alt_hosts: list[str] | None = None,
+            probe_order: list[str] | None = None,
     ) -> dict:
         """Return {kind, geo} for one target."""
         manual = parse_manual_geo(manual_geo)
@@ -641,15 +680,21 @@ class GeoResolver:
             g.setdefault("label", g.get("city") or g.get("region") or "手动")
             return {"kind": "manual", "geo": g}
 
-        probe = (resolve_ip or ip or "").strip()
-        if not is_ip_literal(probe):
+        if probe_order:
+            candidates = probe_order
+        else:
+            candidates = [resolve_ip, ip]
+            if alt_hosts:
+                candidates.extend(alt_hosts)
+        probe = resolve_probe_ipv4(*candidates)
+        if probe is None:
+            # Distinguish private literal vs unresolved hostname for inset kind.
+            literal = (resolve_ip or ip or "").strip()
+            if is_ip_literal(literal) and is_private_ip(literal):
+                return {"kind": "private", "geo": None}
+            if is_ip_literal(literal) and not is_public_ip(literal):
+                return {"kind": "private", "geo": None}
             return {"kind": "public", "geo": None}
-
-        if is_private_ip(probe):
-            return {"kind": "private", "geo": None}
-
-        if not is_public_ip(probe):
-            return {"kind": "private", "geo": None}
 
         geo = self.lookup_public_ip(probe)
         if geo:
