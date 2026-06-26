@@ -343,6 +343,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
         <button class="winbtn" id="btnTopoMerged" onclick="setTopoMode('merged',this)">合并拓扑</button>
         <button class="winbtn active" id="btnMapChina" onclick="setGeoMapMode('china',this)">中国</button>
         <button class="winbtn" id="btnMapWorld" onclick="setGeoMapMode('world',this)">世界</button>
+        <button class="winbtn" id="btnGeoFit" onclick="resetGeoViewport()" title="恢复地图全貌（清除手动缩放/聚焦）">全貌</button>
         <span class="rotate-badge hidden" id="geoMapHint" style="margin-left:0;font-size:10px;color:var(--dim);border:none;background:transparent"></span>
         <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
         <span class="rotate-badge hidden" id="rotateBadge"></span>
@@ -391,7 +392,12 @@ let geoData=null;
 let geoMapUserChoice=null;
 let geoRenderSeq=0;
 let geoViewportCache={key:'', mapMode:'', view:null};
+let geoViewportMode='overview';
+let geoUserRoam=false;
+let geoUserView=null;
+let geoRoamHooked=false;
 const CHINA_BBOX={minLon:73,maxLon:135,minLat:18,maxLat:54};
+const WORLD_BBOX={minLon:-168,maxLon:168,minLat:-52,maxLat:72};
 let selectedTid=null;
 let topoMode='geo';
 let refreshTimer=null;
@@ -702,10 +708,16 @@ function pauseAutoRotate(ms){
   rotatePausedUntil=Date.now()+(ms||ROTATE.manualPauseMs);
 }
 
-function focusPath(tid,{pauseMs=0,render=true}={}){
+function focusPath(tid,{pauseMs=0,render=true,focusMap=null}={}){
   if(!tid) return;
   selectedTid=tid;
   if(pauseMs) rotatePausedUntil=Date.now()+pauseMs;
+  if(focusMap!==false&&(focusMap||pauseMs>0)){
+    geoViewportMode='focus';
+    geoViewportCache={key:'', mapMode:'', view:null};
+    geoUserRoam=false;
+    geoUserView=null;
+  }
   const poolInfo=activeRotatePool();
   rotateIdx=Math.max(0,poolInfo.pool.findIndex(p=>p.tid===tid));
   if(render){
@@ -1060,6 +1072,68 @@ function collectGeoPoints(targets, src){
 
 /** Viewport fit uses target + monitor-source pins only — break hops must not
  *  zoom the map in/out when tracert data arrives on refresh. */
+function collectGeoFocusPoints(targets, src, focusTid){
+  const pts=[];
+  const row=(targets||[]).find(t=>t.tid===focusTid);
+  if(row&&row.geo&&row.geo.lon!=null&&row.geo.lat!=null){
+    pts.push([row.geo.lon, row.geo.lat]);
+  }
+  if(src&&src.lon!=null&&src.lat!=null) pts.push([src.lon, src.lat]);
+  return pts;
+}
+
+function geoViewportKey(mapMode, mode, focusTid, pts){
+  if(geoUserRoam) return mapMode+'|roam';
+  if(mode==='overview') return mapMode+'|overview';
+  const sig=(pts||[]).map(([lon,lat])=>lon.toFixed(2)+','+lat.toFixed(2)).sort().join(';');
+  return mapMode+'|focus|'+focusTid+'|'+sig;
+}
+
+function chinaOverviewViewport(){
+  const {minLon,maxLon,minLat,maxLat}=CHINA_BBOX;
+  return {
+    center:[104,35],
+    zoom:0.74,
+    aspectScale:0.82,
+    boundingCoords:[[minLon,maxLat],[maxLon,minLat]],
+  };
+}
+
+function worldOverviewViewport(){
+  const {minLon,maxLon,minLat,maxLat}=WORLD_BBOX;
+  return {
+    center:[10,16],
+    zoom:0.62,
+    aspectScale:0.75,
+    boundingCoords:[[minLon,maxLat],[maxLon,minLat]],
+  };
+}
+
+function resetGeoViewport(){
+  geoViewportMode='overview';
+  geoUserRoam=false;
+  geoUserView=null;
+  geoViewportCache={key:'', mapMode:'', view:null};
+  if(geoData) renderGeo(geoData,false);
+}
+
+function bindGeoRoam(chart){
+  if(geoRoamHooked||!chart) return;
+  geoRoamHooked=true;
+  chart.on('georoam',()=>{
+    const g=((chart.getOption()||{}).geo||[])[0]||{};
+    const mapMode=document.getElementById('btnMapWorld').classList.contains('active')?'world':'china';
+    geoUserRoam=true;
+    geoUserView={
+      mapMode,
+      center:g.center,
+      zoom:g.zoom,
+      aspectScale:g.aspectScale,
+      boundingCoords:g.boundingCoords,
+    };
+  });
+}
+
 function collectGeoViewportPoints(targets, src){
   const pts=[];
   (targets||[]).forEach(t=>{
@@ -1067,11 +1141,6 @@ function collectGeoViewportPoints(targets, src){
   });
   if(src&&src.lon!=null&&src.lat!=null) pts.push([src.lon, src.lat]);
   return pts;
-}
-
-function geoViewportKey(pts, mapMode){
-  const sig=(pts||[]).map(([lon,lat])=>lon.toFixed(2)+','+lat.toFixed(2)).sort().join(';');
-  return mapMode+'|'+sig;
 }
 
 function pointInChina(lon, lat){
@@ -1099,6 +1168,9 @@ function resolveGeoMapMode(targets, src, tid){
 
 function setGeoMapMode(mode, btn){
   geoMapUserChoice=(geoMapUserChoice===mode)?null:mode;
+  geoViewportMode='overview';
+  geoUserRoam=false;
+  geoUserView=null;
   geoViewportCache={key:'', mapMode:'', view:null};
   const effective=geoMapUserChoice||(geoData
     ? resolveGeoMapMode(mappableGeoTargets(geoData), geoData.source, selectedTid)
@@ -1116,12 +1188,10 @@ function syncGeoMapButtons(mode){
   document.getElementById('btnMapWorld').classList.toggle('active',mode==='world');
 }
 
-function computeGeoViewport(pts, mapMode){
-  const pad=mapMode==='china'?8:14;
+function computeGeoFocusViewport(pts, mapMode){
+  const pad=mapMode==='china'?6:10;
   if(!pts.length){
-    return mapMode==='china'
-      ? {center:[104,35], zoom:0.88, aspectScale:0.82}
-      : {center:[0,18], zoom:1.05, aspectScale:0.75};
+    return mapMode==='china'?chinaOverviewViewport():worldOverviewViewport();
   }
   let minLon=180,maxLon=-180,minLat=90,maxLat=-90;
   pts.forEach(([lon,lat])=>{
@@ -1130,9 +1200,9 @@ function computeGeoViewport(pts, mapMode){
   });
   minLon-=pad; maxLon+=pad; minLat-=pad; maxLat+=pad;
   if(mapMode==='china'){
-    minLon=Math.max(72,minLon); maxLon=Math.min(136,maxLon);
-    minLat=Math.max(17,minLat); maxLat=Math.min(55,maxLat);
-    const minLonSpan=20, minLatSpan=14;
+    minLon=Math.max(CHINA_BBOX.minLon,minLon); maxLon=Math.min(CHINA_BBOX.maxLon,maxLon);
+    minLat=Math.max(CHINA_BBOX.minLat,minLat); maxLat=Math.min(CHINA_BBOX.maxLat,maxLat);
+    const minLonSpan=10, minLatSpan=8;
     const cLon=(minLon+maxLon)/2, cLat=(minLat+maxLat)/2;
     if(maxLon-minLon<minLonSpan){
       const half=minLonSpan/2;
@@ -1142,20 +1212,23 @@ function computeGeoViewport(pts, mapMode){
       const half=minLatSpan/2;
       minLat=cLat-half; maxLat=cLat+half;
     }
-    minLon=Math.max(72,minLon); maxLon=Math.min(136,maxLon);
-    minLat=Math.max(17,minLat); maxLat=Math.min(55,maxLat);
+    minLon=Math.max(CHINA_BBOX.minLon,minLon); maxLon=Math.min(CHINA_BBOX.maxLon,maxLon);
+    minLat=Math.max(CHINA_BBOX.minLat,minLat); maxLat=Math.min(CHINA_BBOX.maxLat,maxLat);
+  } else {
+    minLon=Math.max(WORLD_BBOX.minLon,minLon); maxLon=Math.min(WORLD_BBOX.maxLon,maxLon);
+    minLat=Math.max(WORLD_BBOX.minLat,minLat); maxLat=Math.min(WORLD_BBOX.maxLat,maxLat);
   }
   const center=[(minLon+maxLon)/2,(minLat+maxLat)/2];
   const lonSpan=maxLon-minLon;
   const latSpan=maxLat-minLat;
-  const span=Math.max(lonSpan, latSpan*1.35, mapMode==='china'?16:22);
+  const span=Math.max(lonSpan, latSpan*1.35, mapMode==='china'?12:40);
   let zoom, aspectScale;
   if(mapMode==='china'){
-    zoom=Math.max(0.82, Math.min(1.35, 26/span));
+    zoom=Math.max(0.88, Math.min(1.45, 24/span));
     aspectScale=0.82;
   } else {
-    zoom=Math.min(2.2, (112/span)*0.94);
-    zoom=Math.max(lonSpan>120?0.88:1.05, zoom);
+    zoom=Math.min(2.0, (108/span)*0.96);
+    zoom=Math.max(lonSpan>100?0.78:0.92, zoom);
     aspectScale=0.75;
   }
   const out={center, zoom, aspectScale};
@@ -1163,9 +1236,16 @@ function computeGeoViewport(pts, mapMode){
   return out;
 }
 
+function resolveGeoViewport(viewPts, mapMode, mode, focusTid, onMap, src){
+  if(mode==='overview'){
+    return mapMode==='china'?chinaOverviewViewport():worldOverviewViewport();
+  }
+  const focusPts=collectGeoFocusPoints(onMap, src, focusTid);
+  return computeGeoFocusViewport(focusPts.length?focusPts:viewPts, mapMode);
+}
+
 function geoMapBox(mapMode){
-  if(mapMode!=='world') return {};
-  return {left:'2%', top:'2%', right:'2%', bottom:'2%'};
+  return {};
 }
 
 function geoPlaceLabel(g){
@@ -1229,22 +1309,40 @@ function renderGeo(data, updateBadge=true){
     const hiddenOverseas=mapMode==='china'?overseas:[];
     syncGeoMapButtons(mapMode);
     if(geoChart) geoChart.resize();
-    const viewPts=collectGeoViewportPoints(onMap, src);
-    const vKey=geoViewportKey(viewPts, mapMode);
-    const viewportChanged=vKey!==geoViewportCache.key||mapMode!==geoViewportCache.mapMode||!geoViewportCache.view;
-    if(viewportChanged){
-      geoViewportCache={key:vKey, mapMode, view:computeGeoViewport(viewPts, mapMode)};
-    }
-    const view=geoViewportCache.view;
-    const mapBox=geoMapBox(mapMode);
-    const mapName=mapMode==='china'?'china':'world';
-    const symBase=mapMode==='world'?12:10;
-    const symHi=mapMode==='world'?20:16;
+    bindGeoRoam(chart);
     let hi=selectedTid;
     if(!hi||!targets.find(t=>t.tid===hi)){
       hi=(onMap[0]||targets[0]||{}).tid||null;
       selectedTid=hi;
     }
+    if(geoViewportMode==='focus'&&Date.now()>=rotatePausedUntil){
+      geoViewportMode='overview';
+      geoViewportCache={key:'', mapMode:'', view:null};
+    }
+    const viewMode=geoUserRoam?'roam':geoViewportMode;
+    const viewPts=collectGeoViewportPoints(onMap, src);
+    const focusPts=viewMode==='focus'?collectGeoFocusPoints(mappable, src, hi):viewPts;
+    const vKey=geoViewportKey(mapMode, viewMode, hi, focusPts);
+    let viewportChanged=vKey!==geoViewportCache.key||mapMode!==geoViewportCache.mapMode||!geoViewportCache.view;
+    if(geoUserRoam&&geoUserView&&geoUserView.mapMode===mapMode){
+      viewportChanged=false;
+    }else if(viewportChanged){
+      geoViewportCache={
+        key:vKey,
+        mapMode,
+        view:resolveGeoViewport(viewPts, mapMode, viewMode, hi, mappable, src),
+      };
+    }
+    const view=(geoUserRoam&&geoUserView&&geoUserView.mapMode===mapMode)
+      ? geoUserView
+      : geoViewportCache.view;
+    const mapBox=geoMapBox(mapMode);
+    const mapName=mapMode==='china'?'china':'world';
+    const layoutSize=viewMode==='focus'
+      ? (mapMode==='china'?'108%':'112%')
+      : (mapMode==='china'?'114%':'122%');
+    const symBase=mapMode==='world'?12:10;
+    const symHi=mapMode==='world'?20:16;
     const hiOnMap=onMap.some(t=>t.tid===hi);
     let labelCount=0;
     const maxLabels=mapMode==='world'?4:6;
@@ -1336,7 +1434,7 @@ function renderGeo(data, updateBadge=true){
         roam: true,
         ...mapBox,
         layoutCenter: ['50%', '50%'],
-        layoutSize: mapMode==='china'?'110%':'104%',
+        layoutSize,
         center: view.center,
         zoom: view.zoom,
         aspectScale: view.aspectScale,
@@ -1401,7 +1499,7 @@ function renderGeo(data, updateBadge=true){
           z: 4,
         },
       ],
-    }, viewportChanged);
+    }, viewportChanged&&!geoUserRoam);
     chart.off('click');
     chart.on('click', params=>{
       const tid=(params.data&&params.data.tid)||null;
@@ -1424,12 +1522,15 @@ function renderGeo(data, updateBadge=true){
     const mapLock=geoMapUserChoice
       ? (' · 地图已固定为「'+(geoMapUserChoice==='china'?'中国':'世界')+'」（再点同按钮恢复自动）')
       : ' · 地图随轮播在中/世界间自动切换';
+    const viewHint=geoUserRoam
+      ? ' · 已手动缩放（点「全貌」恢复）'
+      : (viewMode==='focus'?' · 聚焦当前节点（暂停结束后恢复全貌）':' · 全国/全球全貌');
     document.getElementById('topoDetail').innerHTML=
       `<div>地理视图（${mapMode==='china'?'中国':'世界'}）— 主图 ${onMap.length} 个${srcHint}`+
       `${hiddenOverseas.length?' · 境外 '+hiddenOverseas.length+' 个（中国图见下方）':''}`+
-      `${offMap?' · 未上图 '+offMap+' 个（内网/未定位/境外）':''}${mapLock}</div>`+
+      `${offMap?' · 未上图 '+offMap+' 个（内网/未定位/境外）':''}${mapLock}${viewHint}</div>`+
       `<div style="margin-top:4px;font-size:11px;color:var(--dim)">`+
-      `${hiOnMap?'主图高亮':'下方 inset 高亮'}当前轮播节点；滚轮缩放 / 拖拽平移；点击目标进入单路径</div>`;
+      `${hiOnMap?'主图高亮':'下方 inset 高亮'}当前轮播节点；滚轮缩放 / 拖拽平移；点击目标进入单路径；点「全貌」恢复默认视口</div>`;
     if(updateBadge){
       const poolInfo=activeRotatePool();
       const idx=Math.max(0,poolInfo.pool.findIndex(x=>x.tid===hi));

@@ -555,7 +555,8 @@ def test_source_guards():
         and "build_merged_graph" in svc
         and "summarize_for_display" in svc
         and "classify_path_break" in tp
-        and "endpoint-node" in html
+        and "resetGeoViewport" in html
+        and "chinaOverviewViewport" in html
         and "invalidate_screen_cache" in svc
         and "topOutages" in html
         and "route-compare" in html
