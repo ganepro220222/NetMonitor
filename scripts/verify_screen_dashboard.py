@@ -24,7 +24,7 @@ from src.screen_service import (
     should_merge_target_hop,
     _path_graph,
 )
-from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo
+from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo, region_string_to_coords
 from src.traceroute_summary import summarize_break
 from src.web_server import WebServer
 
@@ -239,6 +239,30 @@ def test_build_overview_paths():
     return ok
 
 
+def test_overseas_coords():
+    hit = region_string_to_coords("United States|California|0|Google LLC|US")
+    ok_hit = hit is not None and hit[2] in ("region", "country", "city")
+    xdb = GeoResolver.resolve_xdb_path(ROOT)
+    ok_ip = True
+    ok_cf = True
+    if xdb and os.path.isfile(xdb):
+        rx = GeoResolver(xdb)
+        g = rx.lookup_public_ip("8.8.8.8")
+        ok_ip = bool(g is not None and g.get("lat") is not None and g.get("country"))
+        print(f"overseas 8.8.8.8 -> {g}")
+    rx2 = GeoResolver(xdb if xdb and os.path.isfile(xdb) else None)
+    cf = rx2.lookup_public_ip("1.1.1.1")
+    ok_cf = (
+        cf is not None
+        and cf.get("source") == "wellknown"
+        and cf.get("lon", 0) < 0
+    )
+    print(f"anycast 1.1.1.1 -> {cf}")
+    ok = ok_hit and ok_ip and ok_cf
+    print(f"overseas coords fallback -> {ok}")
+    return ok
+
+
 def test_geo_resolver():
     res = GeoResolver()
     manual = parse_manual_geo({"lat": 31.2, "lon": 121.5, "city": "上海"})
@@ -314,6 +338,7 @@ def test_http_routes():
         r_demo = c.get("/api/screen/overview?demo=1")
         r_paths = c.get("/api/screen/paths?demo=1")
         r_geo = c.get("/api/screen/geo?demo=1")
+        r_world = c.get("/vendor/world.json")
         r_ev = c.get("/api/screen/events?demo=1")
         r_vendor = c.get("/vendor/echarts.min.js")
     body_ev = json.loads(r_ev.data)
@@ -322,6 +347,7 @@ def test_http_routes():
         r_screen.status_code == 200
         and b"id=\"stage\"" in r_screen.data
         and b"btnTopoGeo" in r_screen.data
+        and b"btnMapWorld" in r_screen.data
         and b"geoChart" in r_screen.data
         and r_demo.status_code == 200
         and json.loads(r_demo.data).get("demo") is True
@@ -331,6 +357,8 @@ def test_http_routes():
         and r_geo.status_code == 200
         and body_geo.get("demo") is True
         and isinstance(body_geo.get("targets"), list)
+        and r_world.status_code == 200
+        and len(r_world.data) > 10000
         and r_vendor.status_code == 200
         and len(r_vendor.data) > 1000
         and r_ev.status_code == 200
@@ -390,6 +418,10 @@ def test_source_guards():
         and "open_incident" in svc
         and "onRouteChangedSSE" in html
         and "drillToSinglePath" in html
+        and "setGeoMapMode" in html
+        and "ensureGeoMaps" in html
+        and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "world.json"))
+        and os.path.getsize(os.path.join(ROOT, "src", "web", "vendor", "world.json")) > 10000
         and "geo-mode" in html
         and "/api/screen/geo" in ws
         and 'route("/vendor/' in ws.replace(" ", "")
@@ -417,6 +449,7 @@ def main():
         ("summarize_break", test_summarize_break_wording()),
         ("break_kind", test_break_kind_display()),
         ("target_merge", test_target_merge_scheme_c()),
+        ("overseas_coords", test_overseas_coords()),
         ("geo_resolver", test_geo_resolver()),
         ("demo_geo", test_demo_geo_shape()),
         ("build_geo", test_build_geo()),

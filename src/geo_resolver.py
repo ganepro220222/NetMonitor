@@ -21,8 +21,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Approximate city / province centroids for China (offline fallback).
-_CITY_COORDS: dict[str, tuple[float, float]] = {
+# Approximate place centroids (city / province / country names from ip2region).
+_PLACE_COORDS: dict[str, tuple[float, float]] = {
+    # ── 中国（省 / 市）──
     "北京": (39.9042, 116.4074),
     "上海": (31.2304, 121.4737),
     "天津": (39.3434, 117.3616),
@@ -78,7 +79,127 @@ _CITY_COORDS: dict[str, tuple[float, float]] = {
     "台湾": (25.0330, 121.5654),
     "香港": (22.3193, 114.1694),
     "澳门": (22.1987, 113.5439),
+    "中国": (35.8617, 104.1954),
+    # ── 海外主要国家 / 地区 / 城市（ip2region 英文段）──
+    "United States": (39.8283, -98.5795),
+    "USA": (39.8283, -98.5795),
+    "California": (36.7783, -119.4179),
+    "New York": (40.7128, -74.0060),
+    "Virginia": (37.4316, -78.6569),
+    "Washington": (47.7511, -120.7401),
+    "Texas": (31.9686, -99.9018),
+    "Oregon": (43.8041, -120.5542),
+    "Illinois": (40.6331, -89.3985),
+    "Florida": (27.6648, -81.5158),
+    "Japan": (36.2048, 138.2529),
+    "Tokyo": (35.6762, 139.6503),
+    "Osaka": (34.6937, 135.5023),
+    "Singapore": (1.3521, 103.8198),
+    "South Korea": (35.9078, 127.7669),
+    "Korea": (35.9078, 127.7669),
+    "Seoul": (37.5665, 126.9780),
+    "Germany": (51.1657, 10.4515),
+    "France": (46.2276, 2.2137),
+    "United Kingdom": (55.3781, -3.4360),
+    "UK": (55.3781, -3.4360),
+    "Netherlands": (52.1326, 5.2913),
+    "Ireland": (53.4129, -8.2439),
+    "Canada": (56.1304, -106.3468),
+    "Australia": (-25.2744, 133.7751),
+    "New Zealand": (-40.9006, 174.8860),
+    "India": (20.5937, 78.9629),
+    "Russia": (61.5240, 105.3188),
+    "Brazil": (-14.2350, -51.9253),
+    "Mexico": (23.6345, -102.5528),
+    "Thailand": (15.8700, 100.9925),
+    "Vietnam": (14.0583, 108.2772),
+    "Malaysia": (4.2105, 101.9758),
+    "Indonesia": (-0.7893, 113.9213),
+    "Philippines": (12.8797, 121.7740),
+    "United Arab Emirates": (23.4241, 53.8478),
+    "UAE": (23.4241, 53.8478),
+    "Dubai": (25.2048, 55.2708),
+    "Israel": (31.0461, 34.8516),
+    "Turkey": (38.9637, 35.2433),
+    "South Africa": (-30.5595, 22.9375),
+    "Italy": (41.8719, 12.5674),
+    "Spain": (40.4637, -3.7492),
+    "Sweden": (60.1282, 18.6435),
+    "Norway": (60.4720, 8.4689),
+    "Finland": (61.9241, 25.7482),
+    "Poland": (51.9194, 19.1451),
+    "Switzerland": (46.8182, 8.2275),
+    "Austria": (47.5162, 14.5501),
+    "Belgium": (50.5039, 4.4699),
+    "Czech": (49.8175, 15.4730),
+    "Hong Kong": (22.3193, 114.1694),
+    "Macao": (22.1987, 113.5439),
+    "Taiwan": (25.0330, 121.5654),
 }
+
+_ISO_COUNTRY: dict[str, tuple[float, float]] = {
+    "CN": (35.8617, 104.1954),
+    "US": (39.8283, -98.5795),
+    "JP": (36.2048, 138.2529),
+    "SG": (1.3521, 103.8198),
+    "KR": (35.9078, 127.7669),
+    "DE": (51.1657, 10.4515),
+    "FR": (46.2276, 2.2137),
+    "GB": (55.3781, -3.4360),
+    "UK": (55.3781, -3.4360),
+    "NL": (52.1326, 5.2913),
+    "IE": (53.4129, -8.2439),
+    "CA": (56.1304, -106.3468),
+    "AU": (-25.2744, 133.7751),
+    "NZ": (-40.9006, 174.8860),
+    "IN": (20.5937, 78.9629),
+    "RU": (61.5240, 105.3188),
+    "BR": (-14.2350, -51.9253),
+    "MX": (23.6345, -102.5528),
+    "TH": (15.8700, 100.9925),
+    "VN": (14.0583, 108.2772),
+    "MY": (4.2105, 101.9758),
+    "ID": (-0.7893, 113.9213),
+    "PH": (12.8797, 121.7740),
+    "AE": (23.4241, 53.8478),
+    "IL": (31.0461, 34.8516),
+    "TR": (38.9637, 35.2433),
+    "ZA": (-30.5595, 22.9375),
+    "IT": (41.8719, 12.5674),
+    "ES": (40.4637, -3.7492),
+    "SE": (60.1282, 18.6435),
+    "NO": (60.4720, 8.4689),
+    "FI": (61.9241, 25.7482),
+    "PL": (51.9194, 19.1451),
+    "CH": (46.8182, 8.2275),
+    "AT": (47.5162, 14.5501),
+    "BE": (50.5039, 4.4699),
+    "HK": (22.3193, 114.1694),
+    "TW": (25.0330, 121.5654),
+}
+
+# Anycast / public DNS — ip2region often returns a random PoP; use stable coords.
+_WELL_KNOWN_ANYCAST: dict[str, dict[str, Any]] = {
+    "1.1.1.1": {
+        "lat": 37.7622, "lon": -122.4396,
+        "city": "旧金山", "region": "加利福尼亚", "country": "United States",
+    },
+    "1.0.0.1": {
+        "lat": 37.7622, "lon": -122.4396,
+        "city": "旧金山", "region": "加利福尼亚", "country": "United States",
+    },
+    "8.8.8.8": {
+        "lat": 37.4056, "lon": -122.0775,
+        "city": "山景城", "region": "加利福尼亚", "country": "United States",
+    },
+    "8.8.4.4": {
+        "lat": 37.4056, "lon": -122.0775,
+        "city": "山景城", "region": "加利福尼亚", "country": "United States",
+    },
+}
+
+# Backward alias used in tests / external imports
+_CITY_COORDS = _PLACE_COORDS
 
 
 def is_private_ip(ip: str) -> bool:
@@ -111,6 +232,18 @@ def is_public_ip(ip: str) -> bool:
     return addr.version == 4 and not is_private_ip(ip)
 
 
+def is_ip_literal(ip: str) -> bool:
+    """True when *ip* is a literal IPv4/IPv6 address (not a hostname)."""
+    ip = (ip or "").strip()
+    if not ip:
+        return False
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
+
+
 def _norm_coord(val: Any) -> float | None:
     try:
         v = float(val)
@@ -139,18 +272,64 @@ def parse_manual_geo(raw: dict | None) -> dict | None:
     return out
 
 
-def region_string_to_coords(region: str) -> tuple[float, float] | None:
-    """Map ip2region region text to approximate lat/lon."""
+def _lookup_place(name: str) -> tuple[float, float] | None:
+    key = (name or "").strip()
+    if not key:
+        return None
+    if key in _PLACE_COORDS:
+        return _PLACE_COORDS[key]
+    low = key.lower()
+    for k, v in _PLACE_COORDS.items():
+        if k.lower() == low:
+            return v
+    for k, v in _PLACE_COORDS.items():
+        if len(k) >= 3 and (k in key or key in k):
+            return v
+    return None
+
+
+def parse_region_fields(region: str) -> dict[str, str]:
+    """Parse ip2region v4 segment: Country|Region|City|ISP|ISO."""
+    raw = [(p or "").strip() for p in (region or "").split("|")]
+    while len(raw) < 5:
+        raw.append("")
+    country, province, city, isp, iso = raw[:5]
+    if city == "0":
+        city = ""
+    return {
+        "country": country,
+        "region": province,
+        "city": city,
+        "isp": isp,
+        "iso": iso.upper() if iso else "",
+    }
+
+
+def region_string_to_coords(region: str) -> tuple[float, float, str] | None:
+    """Map ip2region region text to (lat, lon, precision)."""
     text = (region or "").strip()
     if not text:
         return None
+    fields = parse_region_fields(text)
+    # City → province/region → country → ISO
+    for key, precision in (
+        (fields["city"], "city"),
+        (fields["region"], "region"),
+        (fields["country"], "country"),
+    ):
+        hit = _lookup_place(key)
+        if hit:
+            return hit[0], hit[1], precision
+    iso = fields.get("iso") or ""
+    if len(iso) == 2 and iso in _ISO_COUNTRY:
+        lat, lon = _ISO_COUNTRY[iso]
+        return lat, lon, "country"
+    # Legacy: scan all pipe segments
     parts = [p.strip() for p in text.split("|") if p.strip() and p.strip() != "0"]
     for part in reversed(parts):
-        if part in _CITY_COORDS:
-            return _CITY_COORDS[part]
-    for name, coords in _CITY_COORDS.items():
-        if name in text:
-            return coords
+        hit = _lookup_place(part)
+        if hit:
+            return hit[0], hit[1], "region"
     return None
 
 
@@ -315,32 +494,37 @@ class GeoResolver:
         cached = self._cache_get(f"ip:{ip}")
         if cached is not self._CACHE_MISS:
             return cached
+        wk = _WELL_KNOWN_ANYCAST.get(ip)
+        if wk:
+            out = {
+                **wk,
+                "precision": "anycast",
+                "source": "wellknown",
+            }
+            self._cache_set(f"ip:{ip}", out)
+            return out
         region = None
         if self._xdb is not None:
             try:
                 region = self._xdb.search(ip)
             except Exception:
                 region = None
-        coords = region_string_to_coords(region or "") if region else None
-        if coords is None:
+        coords_hit = region_string_to_coords(region or "") if region else None
+        if coords_hit is None:
             self._cache_set(f"ip:{ip}", None)
             return None
-        lat, lon = coords
-        parts = [p.strip() for p in (region or "").split("|") if p.strip() and p.strip() != "0"]
-        # v4: 国家|省|市|ISP|ISO
-        if len(parts) >= 3:
-            city, region_name = parts[2], parts[1]
-        elif len(parts) >= 2:
-            city, region_name = parts[1], parts[0]
-        else:
-            city = parts[0] if parts else ""
-            region_name = ""
+        lat, lon, precision = coords_hit
+        fields = parse_region_fields(region or "")
+        city = fields["city"] or None
+        region_name = fields["region"] or None
+        country = fields["country"] or "中国"
         out = {
             "lat": lat,
             "lon": lon,
-            "city": city or None,
-            "region": region_name or None,
-            "country": parts[0] if parts else "中国",
+            "city": city,
+            "region": region_name,
+            "country": country,
+            "precision": precision,
             "source": "ip2region" if self._xdb else "offline",
         }
         self._cache_set(f"ip:{ip}", out)
@@ -361,6 +545,9 @@ class GeoResolver:
             return {"kind": "manual", "geo": g}
 
         probe = (resolve_ip or ip or "").strip()
+        if not is_ip_literal(probe):
+            return {"kind": "public", "geo": None}
+
         if is_private_ip(probe):
             return {"kind": "private", "geo": None}
 

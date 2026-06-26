@@ -883,6 +883,15 @@ def build_geo(
                 "label": row["label"],
                 "status": status,
                 "break_label": row["break_label"],
+                "inset_kind": "private",
+            })
+        elif placed["kind"] == "public" and not row.get("geo"):
+            inset.append({
+                "tid": tid,
+                "label": row["label"],
+                "status": status,
+                "break_label": row.get("break_label"),
+                "inset_kind": "unlocated",
             })
 
     src = parse_manual_geo(monitor_geo) if parse_manual_geo else None
@@ -947,6 +956,21 @@ def demo_geo() -> dict:
                 "summary_text": "路径完整",
             },
             {
+                "tid": "demo-overseas",
+                "label": "Google DNS",
+                "ip": "8.8.8.8",
+                "resolve_ip": "8.8.8.8",
+                "status": "green",
+                "kind": "public",
+                "geo": {"lat": 36.7783, "lon": -119.4179,
+                        "region": "California", "country": "United States",
+                        "precision": "region", "source": "ip2region"},
+                "break_hop": None,
+                "break_geo": None,
+                "break_label": None,
+                "summary_text": "海外目标 · 自动切换世界地图",
+            },
+            {
                 "tid": "demo-private",
                 "label": "内网OA",
                 "ip": "10.0.0.50",
@@ -964,7 +988,7 @@ def demo_geo() -> dict:
             {"tid": "demo-private", "label": "内网OA",
              "status": "orange", "break_label": "断点约第 3 跳 · 10.0.0.9"},
         ],
-        "stats": {"total": 3, "on_map": 2, "private": 1, "unlocated": 0},
+        "stats": {"total": 4, "on_map": 3, "private": 1, "unlocated": 0},
     }
 
 
