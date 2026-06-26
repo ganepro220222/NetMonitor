@@ -900,11 +900,17 @@ function hopLabel(h){
 
 /** Serpentine grid — every hop gets a slot; viewBox scales to row count. */
 function layoutSerpentine(count, W, H, pad){
-  const cols=Math.min(14, Math.max(6, Math.ceil(Math.sqrt(count*2.2))));
+  // Short paths span a single full-width row (no wasted side margin); longer
+  // paths wrap into a serpentine grid as before.
+  const cols=count<=8?Math.max(1,count)
+                     :Math.min(14, Math.max(6, Math.ceil(Math.sqrt(count*2.2))));
   const rows=Math.ceil(count/cols);
   const innerW=W-2*pad, innerH=H-2*pad;
   const cellW=innerW/cols, cellH=Math.max(72, innerH/rows);
   const totalH=pad*2+rows*cellH;
+  // Node size scales with available cell room: larger when sparse (few hops),
+  // smaller when dense (so a 2-hop path fills the panel and a 30-hop one fits).
+  const scale=Math.max(0.92, Math.min(1.45, Math.min(cellW/130, cellH/132)));
   const pts=[];
   for(let i=0;i<count;i++){
     const row=Math.floor(i/cols);
@@ -912,7 +918,7 @@ function layoutSerpentine(count, W, H, pad){
     const col=(row%2===0)?colInRow:(cols-1-colInRow);
     pts.push({x:pad+col*cellW+cellW/2, y:pad+row*cellH+cellH/2, row, col, idx:i});
   }
-  return {pts, W, totalH:Math.max(H, totalH), cols, rows, cellW, cellH};
+  return {pts, W, totalH:Math.max(H, totalH), cols, rows, cellW, cellH, scale};
 }
 
 function topoEdgePath(a, b){
@@ -994,6 +1000,8 @@ function renderHopNode(pt, meta, layout){
   if(isReal||isIcmpBlind) r=32;
   else if(isEndpoint) r=28;
   else if(meta.kind==='target'&&meta.status==='red') r=28;
+  const sc=(layout&&layout.scale)||1;
+  r=Math.round(r*sc);
   const grad=meta.kind==='source'?'gradSource':(
     meta.kind==='target'?(meta.status==='red'?'gradBreak':'gradOk'):(
     isReal?'gradBreak':(
@@ -1015,19 +1023,30 @@ function renderHopNode(pt, meta, layout){
   }
   g+=`<circle r="${r+8}" fill="none" stroke="${accent}" stroke-width="${isHighlight?2:1}" opacity="${isHighlight?0.55:0.25}"/>`;
   g+=`<circle r="${r}" fill="url(#${grad})" stroke="${accent}" stroke-width="${isHighlight?3.5:2.5}" filter="${glowFilter}"/>`;
+  let icon;
   if(meta.kind==='source'){
-    g+=`<text y="5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">源</text>`;
+    // monitoring host — a small monitor/display glyph
+    icon=`<rect x="-7" y="-6.5" width="14" height="9.5" rx="1.6" fill="none" stroke="#fff" stroke-width="1.5"/>`+
+         `<line x1="0" y1="3" x2="0" y2="6" stroke="#fff" stroke-width="1.3"/>`+
+         `<line x1="-4" y1="6.4" x2="4" y2="6.4" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>`;
   } else if(meta.kind==='target'){
-    g+=`<text y="4" text-anchor="middle" fill="#fff" font-size="14">🎯</text>`;
+    icon=`<circle r="6.5" fill="none" stroke="#fff" stroke-width="1.6"/>`+
+         `<circle r="2.4" fill="#fff"/>`;
   } else if(isReal){
-    g+=`<text y="2" text-anchor="middle" fill="#fff" font-size="16" font-weight="800">⚠</text>`;
+    icon=`<path d="M0,-7 L7.2,5.6 L-7.2,5.6 Z" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/>`+
+         `<line x1="0" y1="-2.4" x2="0" y2="1.8" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>`+
+         `<circle cy="4" r="1.05" fill="#fff"/>`;
   } else if(isIcmpBlind){
-    g+=`<text y="3" text-anchor="middle" fill="#fff" font-size="13" font-weight="800">ICMP</text>`;
+    icon=`<text y="3" text-anchor="middle" fill="#fff" font-size="13" font-weight="800">ICMP</text>`;
   } else if(isEndpoint){
-    g+=`<text y="3" text-anchor="middle" fill="#fff" font-size="12" font-weight="800">APP</text>`;
+    icon=`<text y="3" text-anchor="middle" fill="#fff" font-size="12" font-weight="800">APP</text>`;
   } else {
-    g+=`<text y="-2" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">${meta.hopNum}</text>`;
+    // intermediate hop — router glyph (device + link dots) above the hop number
+    icon=`<g transform="translate(0,-4.5)"><rect x="-6.5" y="-3.4" width="13" height="6.8" rx="1.6" fill="none" stroke="#fff" stroke-width="1.3"/>`+
+         `<circle cx="-3.1" cy="0" r="0.85" fill="#fff"/><circle cx="0" cy="0" r="0.85" fill="#fff"/><circle cx="3.1" cy="0" r="0.85" fill="#fff"/></g>`+
+         `<text y="10.5" text-anchor="middle" fill="#fff" font-size="9.5" font-weight="700">${meta.hopNum}</text>`;
   }
+  g+=`<g transform="scale(${sc.toFixed(3)})">${icon}</g>`;
   const lbl=esc(meta.label||'');
   const short=lbl.length>18?(lbl.slice(0,8)+'…'+lbl.slice(-8)):lbl;
   const lblCol=isReal?'#fecaca':(isIcmpBlind?'#fde68a':(isEndpoint?'#ddd6fe':'#e2e8f0'));
@@ -1048,7 +1067,7 @@ function renderHopNode(pt, meta, layout){
     const tagCls=isReal?'break-tag-bg':(isIcmpBlind?'icmp-tag-bg':(isEndpoint?'endpoint-tag-bg':''));
     const tagFill=isReal?'rgba(239,68,68,.35)':(isIcmpBlind?'rgba(245,158,11,.35)':(isEndpoint?'rgba(167,139,250,.28)':col));
     const tagStroke=isReal?'#ef4444':(isIcmpBlind?'#f59e0b':(isEndpoint?'#a78bfa':'none'));
-    const tagIcon=isReal?'⚠ ':((isIcmpBlind&&meta.tag.indexOf('ICMP')<0)?'🛡 ':((isEndpoint)?'◆ ':''));
+    const tagIcon=isReal?'△ ':((isIcmpBlind&&meta.tag.indexOf('ICMP')<0)?'◈ ':((isEndpoint)?'◆ ':''));
     g+=`<rect x="${tx}" y="${ty}" width="${tw}" height="${th}" rx="5" class="${tagCls}" fill="${tagFill}" opacity="${isHighlight?1:.25}" stroke="${tagStroke}"/>`;
     g+=`<text x="${tx+tw/2}" y="${ty + th / 2}" dominant-baseline="middle" text-anchor="middle" fill="${isHighlight?'#fff':col}" font-size="${isHighlight?10:8.5}" font-weight="700">${tagIcon}${esc(meta.tag)}</text>`;
   }
@@ -1700,7 +1719,8 @@ function renderMergedTopo(data){
     const isBreak=e.status==='break'||e.status==='after'||e.status==='red';
     const dash=(e.status==='break'||e.status==='after')?' stroke-dasharray="6 4"':'';
     const cls='flow'+(isBreak?' break-edge':'');
-    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${col}" stroke-width="${isBreak?4:2}" opacity=".75"${dash} class="${cls}"/>`;
+    const edgeStroke=isBreak?col:'url(#gradFlow)';
+    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${edgeStroke}" stroke-width="${isBreak?4:2}" opacity=".75"${dash} class="${cls}"/>`;
   });
   layout.pts.forEach((pt,i)=>{html+=renderHopNode(pt, visuals[i], layout);});
   svg.innerHTML=html;
@@ -1765,6 +1785,9 @@ function svgDefs(){
     </linearGradient>
     <linearGradient id="gradEndpoint" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#c4b5fd"/><stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="gradFlow" gradientUnits="objectBoundingBox" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7dd3fc"/><stop offset="100%" stop-color="#0e7490"/>
     </linearGradient>
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
       <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(30,58,95,.35)" stroke-width="1"/>
@@ -1850,7 +1873,8 @@ function renderSingleTopo(data, updateBadge=true){
     const isHotEdge=isReal||isIcmp||isEp||st==='break'||st==='after';
     const dash=(st==='break'||st==='after'||pending)?' stroke-dasharray="6 4"':'';
     const cls='flow'+(isReal?' break-edge':(isIcmp?' icmp-edge':(pending?' pending-edge':'')));
-    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${col}" stroke-width="${isHotEdge?4.5:2.5}" opacity=".85"${dash} class="${cls}"/>`;
+    const edgeStroke=isHotEdge?col:'url(#gradFlow)';
+    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${edgeStroke}" stroke-width="${isHotEdge?4.5:2.5}" opacity=".85"${dash} class="${cls}"/>`;
     html+=`<circle cx="${(a.x+b.x)/2}" cy="${(a.y+b.y)/2}" r="${isHotEdge?4:2.5}" fill="${col}" opacity=".95"/>`;
   }
 
