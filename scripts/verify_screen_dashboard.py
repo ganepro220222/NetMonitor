@@ -24,7 +24,7 @@ from src.screen_service import (
     should_merge_target_hop,
     _path_graph,
 )
-from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo, region_string_to_coords
+from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo, region_string_to_coords, build_manual_geo_from_fields
 from src.traceroute_summary import summarize_break
 from src.web_server import WebServer
 
@@ -644,6 +644,23 @@ def test_error_fallback_no_demo():
     return ok
 
 
+def test_build_manual_geo_from_fields():
+    """UI geo parser: city lookup, lat/lon pair, empty clears."""
+    empty = build_manual_geo_from_fields()
+    assert empty is None
+    by_city = build_manual_geo_from_fields(city="贵阳")
+    assert by_city and by_city.get("lat") and by_city.get("city") == "贵阳"
+    by_coords = build_manual_geo_from_fields(lat="31.2", lon="121.5", label="上海")
+    assert by_coords == parse_manual_geo({"lat": 31.2, "lon": 121.5, "label": "上海"})
+    try:
+        build_manual_geo_from_fields(lat="31.2")
+        assert False, "partial lat/lon should fail"
+    except ValueError:
+        pass
+    print("build_manual_geo_from_fields -> OK")
+    return True
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -654,6 +671,7 @@ def main():
         ("overseas_coords", test_overseas_coords()),
         ("china_suffix_coords", test_china_city_suffix_coords()),
         ("geo_resolver", test_geo_resolver()),
+        ("geo_ui_fields", test_build_manual_geo_from_fields()),
         ("demo_geo", test_demo_geo_shape()),
         ("build_geo", test_build_geo()),
         ("build_geo_stats", test_build_geo_stats_private_vs_unlocated()),

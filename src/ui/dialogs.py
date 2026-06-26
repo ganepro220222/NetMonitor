@@ -37,6 +37,7 @@ The scrollable body means:
 
 import re
 import customtkinter as ctk
+from src.geo_resolver import build_manual_geo_from_fields
 from src.ui.fonts import make as F
 from src.ui.fonts import bind_scrollbar_visibility
 
@@ -102,6 +103,84 @@ class _BaseDialog(ctk.CTkToplevel):
 
     def _clear_error(self):
         self._error_lbl.configure(text="")
+
+    # ── Optional geo section (screen map) ─────────────────────────────
+
+    def _build_geo_section(self, parent, initial_geo: dict | None = None):
+        ctk.CTkFrame(parent, height=1, fg_color="gray25").pack(
+            fill="x", padx=16, pady=(6, 0))
+        self._geo_header = ctk.CTkLabel(
+            parent,
+            text="▶  地图坐标（可选，留空使用 IP 自动定位）",
+            font=F(11), text_color="gray60", anchor="w", cursor="hand2")
+        self._geo_header.pack(fill="x", padx=16, pady=(6, 2))
+        self._geo_header.bind("<Button-1>", lambda e: self._toggle_geo())
+
+        self._geo_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self._geo_visible = False
+        init = initial_geo if isinstance(initial_geo, dict) else {}
+
+        self._geo_label = self._field(
+            self._geo_frame, "显示名称（可选）", "例如：办公室监测机")
+        if init.get("label"):
+            self._geo_label.insert(0, str(init["label"]))
+
+        self._geo_city = self._field(
+            self._geo_frame, "城市（可选）", "例如：贵阳、上海（可自动解析坐标）")
+        if init.get("city"):
+            self._geo_city.insert(0, str(init["city"]))
+
+        lat_row = ctk.CTkFrame(self._geo_frame, fg_color="transparent")
+        lat_row.pack(fill="x", padx=16, pady=(4, 0))
+        ctk.CTkLabel(lat_row, text="纬度", font=F(12), anchor="w").pack(
+            side="left", fill="x", expand=True)
+        ctk.CTkLabel(lat_row, text="经度", font=F(12), anchor="w").pack(
+            side="left", fill="x", expand=True)
+
+        entry_row = ctk.CTkFrame(self._geo_frame, fg_color="transparent")
+        entry_row.pack(fill="x", padx=16, pady=(2, 4))
+        self._geo_lat = ctk.CTkEntry(
+            entry_row, placeholder_text="26.65", font=F(12), height=30)
+        self._geo_lat.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self._geo_lon = ctk.CTkEntry(
+            entry_row, placeholder_text="106.63", font=F(12), height=30)
+        self._geo_lon.pack(side="left", fill="x", expand=True)
+        if init.get("lat") is not None:
+            self._geo_lat.insert(0, str(init["lat"]))
+        if init.get("lon") is not None:
+            self._geo_lon.insert(0, str(init["lon"]))
+
+        ctk.CTkLabel(
+            self._geo_frame,
+            text="用于地理大屏地图弧线；填写城市名可自动解析，也可直接填经纬度",
+            font=F(9), text_color="gray50", anchor="w").pack(
+            fill="x", padx=16, pady=(0, 4))
+
+    def _toggle_geo(self):
+        self._geo_visible = not self._geo_visible
+        if self._geo_visible:
+            self._geo_header.configure(
+                text="▼  地图坐标（可选，留空使用 IP 自动定位）")
+            self._geo_frame.pack(fill="x", padx=28, pady=(2, 4))
+        else:
+            self._geo_header.configure(
+                text="▶  地图坐标（可选，留空使用 IP 自动定位）")
+            self._geo_frame.pack_forget()
+
+    def _collect_geo_form(self, *, for_edit: bool = False):
+        """Return geo dict, None if empty, or False on validation error."""
+        if not hasattr(self, "_geo_lat"):
+            return None if not for_edit else None
+        try:
+            return build_manual_geo_from_fields(
+                lat=self._geo_lat.get(),
+                lon=self._geo_lon.get(),
+                city=self._geo_city.get(),
+                label=self._geo_label.get(),
+            )
+        except ValueError as exc:
+            self._error(str(exc))
+            return False
 
     # ── Ping-type selector ────────────────────────────────────────────
 
@@ -426,6 +505,8 @@ class AddTargetDialog(_BaseDialog):
             row=6, column=2, sticky="w", padx=(6, 0))
         self._refresh_latency_warn_placeholder()
 
+        self._build_geo_section(self.scroll_body)
+
         ctk.CTkButton(self._btn_outer, text="取消", width=100,
                       fg_color="gray30", hover_color="gray40",
                       font=F(13), command=self.destroy).pack(side="right", padx=(8, 0))
@@ -479,8 +560,14 @@ class AddTargetDialog(_BaseDialog):
             except ValueError:
                 self._error("Ping 间隔必须是 0.05~120 秒之间的有效数值"); return
 
+        geo_result = self._collect_geo_form()
+        if geo_result is False:
+            return
+
         self.result = {"label": label, "ip": ip,
                        "thresholds": thresholds or None, **type_result}
+        if geo_result:
+            self.result["geo"] = geo_result
         self.destroy()
 
 
@@ -488,7 +575,8 @@ class EditTargetDialog(_BaseDialog):
 
     def __init__(self, parent, current_label: str, current_ip: str,
                  current_thresholds: dict = None, global_settings: dict = None,
-                 current_ping_type: str = "icmp", current_extra: dict = None):
+                 current_ping_type: str = "icmp", current_extra: dict = None,
+                 current_geo: dict | None = None):
         super().__init__(parent, "编辑监测目标", width=460, height=540)
         self._init_label  = current_label
         self._init_ip     = current_ip
@@ -496,6 +584,7 @@ class EditTargetDialog(_BaseDialog):
         self._global      = global_settings or {}
         self._init_ptype  = current_ping_type or "icmp"
         self._init_extra  = current_extra or {}
+        self._init_geo    = current_geo
         self._build()
         self._center()
 
@@ -582,6 +671,8 @@ class EditTargetDialog(_BaseDialog):
         ctk.CTkLabel(tf, text=hint_text, font=F(9), text_color="gray50",
                      anchor="w").grid(row=6, column=2, sticky="w", padx=(6, 0))
 
+        self._build_geo_section(self.scroll_body, initial_geo=self._init_geo)
+
         # Button row (always visible, outside scroll)
         ctk.CTkButton(self._btn_outer, text="取消", width=100,
                       fg_color="gray30", hover_color="gray40",
@@ -646,9 +737,14 @@ class EditTargetDialog(_BaseDialog):
                 self._error("Ping 间隔必须是 0.05~120 秒之间的有效数值")
                 return
 
+        geo_result = self._collect_geo_form(for_edit=True)
+        if geo_result is False:
+            return
+
         self.result = {
             "label": label, "ip": ip,
             "thresholds": thresholds or None,
+            "geo": geo_result,
             **type_result
         }
         self.destroy()

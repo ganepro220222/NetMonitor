@@ -337,6 +337,60 @@ def _lookup_place(name: str) -> tuple[float, float] | None:
     return None
 
 
+def build_manual_geo_from_fields(
+    *,
+    lat: str = "",
+    lon: str = "",
+    city: str = "",
+    region: str = "",
+    label: str = "",
+) -> dict | None:
+    """Build monitor/target geo from UI field strings.
+
+    Returns None when all fields are empty (use automatic ip2region).
+    Raises ValueError with a user-facing message on invalid input.
+    """
+    lat_s = (lat or "").strip()
+    lon_s = (lon or "").strip()
+    city_s = (city or "").strip()
+    region_s = (region or "").strip()
+    label_s = (label or "").strip()
+
+    if not any((lat_s, lon_s, city_s, region_s, label_s)):
+        return None
+
+    draft: dict[str, Any] = {}
+    if label_s:
+        draft["label"] = label_s
+    if city_s:
+        draft["city"] = city_s
+    if region_s:
+        draft["region"] = region_s
+
+    if lat_s or lon_s:
+        if not lat_s or not lon_s:
+            raise ValueError("纬度和经度须同时填写，或留空后填写城市名自动解析")
+        try:
+            draft["lat"] = float(lat_s)
+            draft["lon"] = float(lon_s)
+        except ValueError as exc:
+            raise ValueError("经纬度必须是有效数字") from exc
+        result = parse_manual_geo(draft)
+        if result is None:
+            raise ValueError("经纬度超出有效范围（纬度 -90~90，经度 -180~180）")
+        return result
+
+    place = city_s or region_s
+    if not place:
+        raise ValueError("仅填写显示名称无法定位，请填写经纬度或城市名")
+    hit = _lookup_place(place) or _lookup_place(_normalize_admin_name(place))
+    if not hit:
+        raise ValueError(f"无法识别地名「{place}」，请填写经纬度或更换城市名")
+    draft["lat"] = hit[0]
+    draft["lon"] = hit[1]
+    return parse_manual_geo(draft)
+
+
 def parse_region_fields(region: str) -> dict[str, str]:
     """Parse ip2region v4 segment: Country|Region|City|ISP|ISO."""
     raw = [(p or "").strip() for p in (region or "").split("|")]

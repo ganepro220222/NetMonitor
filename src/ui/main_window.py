@@ -21,6 +21,7 @@ from src.ui.history_panel import HistoryPanel
 from src.ui.settings_dialog import SettingsDialog
 from src.ui.fonts import make as F
 from src.ui.window_utils import raise_tool_window
+from src.geo_resolver import GeoResolver
 
 # Capacity policy (MAX_TARGETS / WARN_TARGETS /
 # RECOMMENDED_LARGE_TARGET_INTERVAL_S / target_limit_state) lives in
@@ -1343,6 +1344,15 @@ class MainWindow(ctk.CTk):
             on_save=self._apply_settings)
         self.wait_window(dialog)
 
+    def _sync_screen_geo(self):
+        """Push monitor/target geo to the running Web server for /screen."""
+        monitor_geo, target_geos = self.config.get_screen_geo_bundle()
+        self.web_server.set_screen_geo(
+            monitor_geo=monitor_geo,
+            target_geos=target_geos,
+            resolver=GeoResolver(GeoResolver.resolve_xdb_path(None)),
+        )
+
     def _apply_settings(self, changed: dict):
         if "_sound_enabled" in changed:
             # Use set_enabled, not raw attribute assignment, so that
@@ -1403,6 +1413,9 @@ class MainWindow(ctk.CTk):
             new_hops = changed.pop("tracert_max_hops")
             self.config.set_setting("tracert_max_hops", new_hops)
             self.web_server.set_traceroute_max_hops(new_hops)
+        if "monitor_geo" in changed:
+            self.config.set_monitor_geo(changed.pop("monitor_geo"))
+            self._sync_screen_geo()
 
         # autostart lives in the Windows registry (written in
         # SettingsDialog._save); drop it so it never leaks into config.json
@@ -1501,6 +1514,8 @@ class MainWindow(ctk.CTk):
                 "ipv6_only",
             )
             extra = {k: r[k] for k in _extra_keys if k in r}
+            if r.get("geo"):
+                extra["geo"] = r["geo"]
             custom = dict(r.get("thresholds") or {})
             custom.update(extra)
             new_target = self.config.add_target(
@@ -1514,6 +1529,8 @@ class MainWindow(ctk.CTk):
                                    ping_type=new_target.get("ping_type", "icmp"),
                                    custom_settings=custom or None)
             self.logger.log_target_added(new_target["label"], new_target["ip"])
+            if r.get("geo"):
+                self._sync_screen_geo()
             # NOTE: no _schedule_auto_resize — adding a node must NEVER
             # change the window width. Scrollbar handles content overflow.
 
@@ -1837,12 +1854,15 @@ class MainWindow(ctk.CTk):
             current_thresholds=target.get("thresholds", {}),
             global_settings=self.config.config.get("settings", {}),
             current_ping_type=target.get("ping_type", "icmp"),
-            current_extra=current_extra)
+            current_extra=current_extra,
+            current_geo=target.get("geo"))
         self.wait_window(dialog)
         if not dialog.result:
             return
         r = dialog.result
         new_extra = {k: r[k] for k in extra_keys if k in r}
+        if "geo" in r:
+            new_extra["geo"] = r["geo"]
         # ConfigManager.update_target treats every EDIT_MANAGED_KEYS
         # field absent from `extra` as "operator cleared it" and
         # removes it from disk.  But the edit dialog only renders a
@@ -1917,6 +1937,8 @@ class MainWindow(ctk.CTk):
                                   ping_type=r.get("ping_type"),
                                   thresholds=r.get("thresholds"),
                                   extra=new_extra or None)
+        if "geo" in r:
+            self._sync_screen_geo()
         # Pass thresholds AND type-specific extras together so the live
         # monitor picks up changes to tcp_port / http_url / etc. We send
         # them through update_target_thresholds because the merge logic

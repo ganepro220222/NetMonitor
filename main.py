@@ -107,18 +107,6 @@ from src.web_server import WebServer
 from src.geo_resolver import GeoResolver
 
 
-def _screen_geo_from_config(config) -> tuple[dict | None, dict[str, dict]]:
-    """Extract monitor_geo and per-target manual geo from config."""
-    mg_raw = config.get_setting("monitor_geo")
-    monitor_geo = mg_raw if isinstance(mg_raw, dict) else None
-    target_geos: dict[str, dict] = {}
-    for t in config.get_targets():
-        g = t.get("geo")
-        if isinstance(g, dict) and "lat" in g and "lon" in g:
-            target_geos[t["id"]] = g
-    return monitor_geo, target_geos
-
-
 from src.icon_generator import ensure_icon
 from src.ui.main_window import MainWindow
 
@@ -170,7 +158,7 @@ def main():
             config.get_setting("db_webhook_outbox_retention_days") or 90),
     )
     web.set_data_store(data_store)
-    monitor_geo, target_geos = _screen_geo_from_config(config)
+    monitor_geo, target_geos = config.get_screen_geo_bundle()
     web.set_screen_geo(
         monitor_geo=monitor_geo,
         target_geos=target_geos,

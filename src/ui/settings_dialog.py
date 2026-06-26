@@ -14,6 +14,7 @@ import math
 import customtkinter as ctk
 from tkinter import messagebox
 from src.config_manager import MAX_PING_INTERVAL_S, MIN_PING_INTERVAL_S
+from src.geo_resolver import build_manual_geo_from_fields, parse_manual_geo
 from src.ui.fonts import make as F
 
 
@@ -127,6 +128,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._on_save  = on_save
         self._entries  = {}      # key → widget (Entry or CTkSwitch)
         self._originals = {}     # key → original value (for change detection)
+        self._geo_entries = {}   # monitor_geo field widgets
 
         self._build()
         self._center()
@@ -222,6 +224,8 @@ class SettingsDialog(ctk.CTkToplevel):
         for section_title, fields in _SECTIONS:
             self._add_section(scroll, section_title, fields)
 
+        self._add_monitor_geo_section(scroll)
+
         # Sound toggle (special case: lives in AlertManager, not config)
         self._add_sound_toggle(scroll)
 
@@ -284,6 +288,75 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(frame, text="关闭后程序仍会显示颜色变化，只是不播放声音",
                      font=F(11), text_color="gray50", anchor="w").pack(
             fill="x", padx=14, pady=(0, 8))
+
+    def _add_monitor_geo_section(self, parent):
+        """Optional monitor source location for /screen geo arcs."""
+        header = ctk.CTkLabel(
+            parent, text="地理大屏 · 监控源位置",
+            font=F(13, "bold"), anchor="w", text_color="gray70")
+        header.pack(fill="x", padx=16, pady=(14, 4))
+
+        frame = ctk.CTkFrame(parent, fg_color=("gray92", "gray17"), corner_radius=8)
+        frame.pack(fill="x", padx=12, pady=(0, 4))
+
+        mg_raw = self._config.get_setting("monitor_geo")
+        init = parse_manual_geo(mg_raw) if isinstance(mg_raw, dict) else None
+        self._originals["_monitor_geo"] = init
+
+        def _row(label: str, placeholder: str = "", value: str = ""):
+            ctk.CTkLabel(frame, text=label, font=F(12), anchor="w").pack(
+                fill="x", padx=14, pady=(8, 2))
+            e = ctk.CTkEntry(frame, placeholder_text=placeholder, font=F(12), height=30)
+            if value:
+                e.insert(0, value)
+            e.pack(fill="x", padx=14, pady=(0, 2))
+            return e
+
+        self._geo_entries["label"] = _row(
+            "显示名称（可选）", "例如：办公室监测机",
+            str(init.get("label", "")) if init else "")
+        self._geo_entries["city"] = _row(
+            "城市（可选）", "例如：贵阳、上海（可自动解析坐标）",
+            str(init.get("city", "")) if init else "")
+
+        lat_row = ctk.CTkFrame(frame, fg_color="transparent")
+        lat_row.pack(fill="x", padx=14, pady=(6, 0))
+        ctk.CTkLabel(lat_row, text="纬度", font=F(12), anchor="w").pack(
+            side="left", fill="x", expand=True)
+        ctk.CTkLabel(lat_row, text="经度", font=F(12), anchor="w").pack(
+            side="left", fill="x", expand=True)
+
+        entry_row = ctk.CTkFrame(frame, fg_color="transparent")
+        entry_row.pack(fill="x", padx=14, pady=(2, 2))
+        lat_e = ctk.CTkEntry(entry_row, placeholder_text="26.65", font=F(12), height=30)
+        lat_e.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        lon_e = ctk.CTkEntry(entry_row, placeholder_text="106.63", font=F(12), height=30)
+        lon_e.pack(side="left", fill="x", expand=True)
+        if init:
+            if init.get("lat") is not None:
+                lat_e.insert(0, str(init["lat"]))
+            if init.get("lon") is not None:
+                lon_e.insert(0, str(init["lon"]))
+        self._geo_entries["lat"] = lat_e
+        self._geo_entries["lon"] = lon_e
+
+        ctk.CTkLabel(
+            frame,
+            text="用于地理大屏上监测源位置弧线；留空则不显示监测源",
+            font=F(10), text_color="gray50", anchor="w").pack(
+            fill="x", padx=14, pady=(4, 10))
+
+    def _collect_monitor_geo(self) -> tuple[dict | None, str | None]:
+        try:
+            geo = build_manual_geo_from_fields(
+                lat=self._geo_entries["lat"].get(),
+                lon=self._geo_entries["lon"].get(),
+                city=self._geo_entries["city"].get(),
+                label=self._geo_entries["label"].get(),
+            )
+            return geo, None
+        except ValueError as exc:
+            return None, str(exc)
 
     def _add_field(self, parent, key, label, dtype, lo, hi, hint, index):
         # autostart state lives in the Windows registry, not config.json.
@@ -405,6 +478,12 @@ class SettingsDialog(ctk.CTkToplevel):
 
             if new_val != self._originals[key]:
                 changed[key] = new_val
+
+        new_geo, geo_err = self._collect_monitor_geo()
+        if geo_err:
+            errors.append(geo_err)
+        elif new_geo != self._originals.get("_monitor_geo"):
+            changed["monitor_geo"] = new_geo
 
         if errors:
             messagebox.showerror("输入有误", "\n".join(errors), parent=self)

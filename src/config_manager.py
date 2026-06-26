@@ -618,6 +618,31 @@ class ConfigManager:
         """返回所有监测目标的列表（浅拷贝，防止调用方遍历时被并发修改）。"""
         return list(self.config.get("targets", []))
 
+    def get_screen_geo_bundle(self) -> tuple[dict | None, dict[str, dict]]:
+        """Return (monitor_geo, target_geos) for /screen map arcs."""
+        mg_raw = self.get_setting("monitor_geo")
+        monitor_geo = mg_raw if isinstance(mg_raw, dict) else None
+        target_geos: dict[str, dict] = {}
+        for t in self.get_targets():
+            g = t.get("geo")
+            if isinstance(g, dict) and "lat" in g and "lon" in g:
+                target_geos[t["id"]] = g
+        return monitor_geo, target_geos
+
+    def set_monitor_geo(self, geo: dict | None):
+        """Set or remove settings.monitor_geo."""
+        from src.geo_resolver import parse_manual_geo
+        with self._lock:
+            if geo:
+                cleaned = parse_manual_geo(geo)
+                if cleaned:
+                    self.config["settings"]["monitor_geo"] = cleaned
+                else:
+                    self.config["settings"].pop("monitor_geo", None)
+            else:
+                self.config["settings"].pop("monitor_geo", None)
+            self._save_unlocked()
+
     def add_target(self, label: str, ip: str, ping_type: str = "icmp",
                    thresholds: dict = None, extra: dict = None) -> dict:
         """
@@ -635,7 +660,15 @@ class ConfigManager:
         if thresholds:
             new_target["thresholds"] = thresholds
         if extra:
-            new_target.update(extra)
+            e = dict(extra)
+            if "geo" in e:
+                from src.geo_resolver import parse_manual_geo
+                cleaned = parse_manual_geo(e.get("geo")) if e.get("geo") else None
+                if cleaned:
+                    e["geo"] = cleaned
+                else:
+                    e.pop("geo", None)
+            new_target.update(e)
         with self._lock:
             self.config["targets"].append(new_target)
             self._save_unlocked()
@@ -676,7 +709,18 @@ class ConfigManager:
                         target.pop("thresholds", None)
                     # Optional extras: sync against EDIT_MANAGED_KEYS so
                     # cleared dialog fields actually disappear from disk.
-                    e = extra or {}
+                    e = dict(extra or {})
+                    if "geo" in e:
+                        from src.geo_resolver import parse_manual_geo
+                        geo_val = e.pop("geo")
+                        if geo_val:
+                            cleaned = parse_manual_geo(geo_val)
+                            if cleaned:
+                                target["geo"] = cleaned
+                            else:
+                                target.pop("geo", None)
+                        else:
+                            target.pop("geo", None)
                     for k in EDIT_MANAGED_KEYS:
                         if k in e:
                             target[k] = e[k]
