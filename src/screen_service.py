@@ -911,7 +911,7 @@ def build_geo(
         "stats": {
             "total": len(rows),
             "on_map": map_count,
-            "private": len(inset),
+            "private": sum(1 for r in rows if r.get("kind") == "private"),
             "unlocated": sum(
                 1 for r in rows
                 if r.get("kind") == "public" and not r.get("geo")),

@@ -370,8 +370,35 @@ def test_build_geo():
         and kinds.get("T1") == "manual"
         and kinds.get("T2") == "private"
         and len(payload.get("inset", [])) >= 1
+        and payload.get("stats", {}).get("private") == 1
     )
     print(f"build_geo -> {ok} kinds={kinds}")
+    return ok
+
+
+def test_build_geo_stats_private_vs_unlocated():
+    """stats.private must not count unlocated public/hostname inset rows."""
+    w = WebServer(port=0)
+    w._running = True
+    w.set_screen_geo(resolver=GeoResolver())
+    w.update_target(
+        tid="priv", label="Private", ip="10.0.0.1", status="green",
+        latency_ms=5.0, jitter_ms=1.0, loss_rate=0.0, is_probe_result=True)
+    w.update_target(
+        tid="host", label="HostNoResolve", ip="example.invalid", status="green",
+        latency_ms=5.0, jitter_ms=1.0, loss_rate=0.0, is_probe_result=True)
+    payload = build_geo(w)
+    stats = payload.get("stats") or {}
+    inset_kinds = {i["tid"]: i.get("inset_kind") for i in payload.get("inset", [])}
+    ok = (
+        inset_kinds.get("priv") == "private"
+        and inset_kinds.get("host") == "unlocated"
+        and stats.get("total") == 2
+        and stats.get("private") == 1
+        and stats.get("unlocated") == 1
+        and stats.get("on_map") == 0
+    )
+    print(f"build_geo stats private/unlocated -> {ok} stats={stats}")
     return ok
 
 
@@ -502,6 +529,7 @@ def main():
         ("geo_resolver", test_geo_resolver()),
         ("demo_geo", test_demo_geo_shape()),
         ("build_geo", test_build_geo()),
+        ("build_geo_stats", test_build_geo_stats_private_vs_unlocated()),
         ("route_diff", test_route_diff()),
         ("demo_events", test_demo_events_shape()),
         ("merged_graph", test_merged_graph()),
