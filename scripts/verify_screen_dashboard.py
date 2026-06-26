@@ -826,6 +826,22 @@ def test_geo_source_egress_off_request_path():
     return ok
 
 
+def test_maphint_db_warning_order():
+    """geo_db_ready hint must append after overseas branches, not before."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    anchor = "let mapHint=mapMode==='china'"
+    start = html.find(anchor)
+    assert start >= 0, "mapHint block missing"
+    block = html[start:start + 900]
+    db_pos = block.find("geo_db_ready===false")
+    china_pos = block.find("hiddenOverseas.length")
+    world_pos = block.find("overseas.length")
+    ok = db_pos > china_pos > 0 and db_pos > world_pos > 0
+    print(f"maphint db warning order -> {ok}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -857,6 +873,7 @@ def main():
         ("error_fallback", test_error_fallback_no_demo()),
         ("dns_cached", test_dns_resolution_cached()),
         ("dns_off_path", test_geo_dns_off_request_path()),
+        ("maphint_db", test_maphint_db_warning_order()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

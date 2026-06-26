@@ -1414,13 +1414,13 @@ function renderGeo(data, updateBadge=true){
       });
     }
     let mapHint=mapMode==='china'?'中国地图 · 省界清晰':'世界地图 · 境内外混合';
-    if(data&&data.geo_db_ready===false){
-      mapHint+=' · 缺少 ip2region 数据库（运行 python scripts/download_ip2region.py）';
-    }
     if(mapMode==='china'&&hiddenOverseas.length){
       mapHint='中国地图 · '+hiddenOverseas.length+' 个境外目标在下方（请切「世界」）';
     } else if(mapMode==='world'&&overseas.length){
       mapHint='世界地图 · 含 '+overseas.length+' 个境外目标';
+    }
+    if(data&&data.geo_db_ready===false){
+      mapHint+=' · 缺少 ip2region 数据库（运行 python scripts/download_ip2region.py）';
     }
     if(!geoMapUserChoice){
       mapHint='自动跟随轮播 · '+mapHint;
