@@ -80,6 +80,33 @@ _PLACE_COORDS: dict[str, tuple[float, float]] = {
     "香港": (22.3193, 114.1694),
     "澳门": (22.1987, 113.5439),
     "中国": (35.8617, 104.1954),
+    # 省级（ip2region 常返回「XX省」，坐标取省会近似）
+    "黑龙江": (45.8038, 126.5350),
+    "吉林": (43.8171, 125.3235),
+    "辽宁": (41.8057, 123.4315),
+    "河北": (38.0428, 114.5149),
+    "山西": (37.8706, 112.5489),
+    "内蒙古": (40.8429, 111.7492),
+    "江苏": (32.0603, 118.7969),
+    "浙江": (30.2875, 120.1536),
+    "安徽": (31.8206, 117.2272),
+    "江西": (28.6820, 115.8579),
+    "山东": (36.6683, 117.0207),
+    "河南": (34.7466, 113.6254),
+    "湖北": (30.5928, 114.3055),
+    "湖南": (28.2280, 112.9388),
+    "广东": (23.1317, 113.2663),
+    "广西": (22.8170, 108.3665),
+    "海南": (20.0440, 110.1999),
+    "四川": (30.6517, 104.0757),
+    "贵州": (26.6470, 106.6302),
+    "云南": (25.0389, 102.7183),
+    "西藏": (29.6520, 91.1721),
+    "陕西": (34.3416, 108.9398),
+    "甘肃": (36.0611, 103.8343),
+    "青海": (36.6171, 101.7782),
+    "宁夏": (38.4872, 106.2309),
+    "新疆": (43.8256, 87.6168),
     # ── 海外主要国家 / 地区 / 城市（ip2region 英文段）──
     "United States": (39.8283, -98.5795),
     "USA": (39.8283, -98.5795),
@@ -272,19 +299,41 @@ def parse_manual_geo(raw: dict | None) -> dict | None:
     return out
 
 
+# ip2region / 中文地名常见行政后缀（由长到短，只剥一层）
+_ADMIN_SUFFIXES = (
+    "特别行政区", "自治区", "自治州", "地区", "省", "市", "区", "县",
+)
+
+# 中国地理中心 — 仅作最后兜底，不应与具体省市坐标混用
+_CN_COUNTRY_CENTER = (35.8617, 104.1954)
+
+
+def _normalize_admin_name(name: str) -> str:
+    """Strip one trailing admin suffix: 兰州市→兰州, 甘肃省→甘肃."""
+    s = (name or "").strip()
+    if not s or s == "0":
+        return ""
+    for suffix in _ADMIN_SUFFIXES:
+        if s.endswith(suffix) and len(s) > len(suffix):
+            return s[:-len(suffix)].strip()
+    return s
+
+
 def _lookup_place(name: str) -> tuple[float, float] | None:
     key = (name or "").strip()
-    if not key:
+    if not key or key == "0":
         return None
-    if key in _PLACE_COORDS:
-        return _PLACE_COORDS[key]
-    low = key.lower()
-    for k, v in _PLACE_COORDS.items():
-        if k.lower() == low:
-            return v
-    for k, v in _PLACE_COORDS.items():
-        if len(k) >= 3 and (k in key or key in k):
-            return v
+    candidates = [key]
+    norm = _normalize_admin_name(key)
+    if norm and norm not in candidates:
+        candidates.append(norm)
+    for cand in candidates:
+        if cand in _PLACE_COORDS:
+            return _PLACE_COORDS[cand]
+        low = cand.lower()
+        for k, v in _PLACE_COORDS.items():
+            if k.lower() == low:
+                return v
     return None
 
 
@@ -324,12 +373,6 @@ def region_string_to_coords(region: str) -> tuple[float, float, str] | None:
     if len(iso) == 2 and iso in _ISO_COUNTRY:
         lat, lon = _ISO_COUNTRY[iso]
         return lat, lon, "country"
-    # Legacy: scan all pipe segments
-    parts = [p.strip() for p in text.split("|") if p.strip() and p.strip() != "0"]
-    for part in reversed(parts):
-        hit = _lookup_place(part)
-        if hit:
-            return hit[0], hit[1], "region"
     return None
 
 

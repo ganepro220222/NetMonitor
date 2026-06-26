@@ -314,6 +314,47 @@ def test_build_overview_paths():
     return ok
 
 
+def test_china_city_suffix_coords():
+    """ip2region v4 city/province names carry 市/省 suffix — must not fall back to CN center."""
+    cn_lat, cn_lon = 35.8617, 104.1954
+    cases = [
+        ("中国|甘肃省|兰州市|电信|CN", (36.0611, 103.8343)),
+        ("中国|湖南省|长沙市|中国联通|CN", (28.228, 112.9388)),
+        ("中国|贵州省|贵阳市|移动|CN", (26.647, 106.6302)),
+        ("中国|北京|北京市|电信|CN", (39.9042, 116.4074)),
+    ]
+    ok = True
+    for raw, (want_lat, want_lon) in cases:
+        hit = region_string_to_coords(raw)
+        if not hit:
+            ok = False
+            print(f"china suffix coords miss -> {raw}")
+            continue
+        lat, lon, _prec = hit
+        if abs(lat - cn_lat) < 0.05 and abs(lon - cn_lon) < 0.05:
+            ok = False
+            print(f"china suffix fell back to country center -> {raw} {hit}")
+        if abs(lat - want_lat) > 0.2 or abs(lon - want_lon) > 0.2:
+            ok = False
+            print(f"china suffix wrong coords -> {raw} got {hit} want ~({want_lat},{want_lon})")
+    xdb = GeoResolver.resolve_xdb_path(ROOT)
+    if xdb and os.path.isfile(xdb):
+        rx = GeoResolver(xdb)
+        for ip, (want_lat, want_lon) in (
+            ("222.85.130.16", (26.647, 106.6302)),
+            ("116.162.6.102", (28.228, 112.9388)),
+        ):
+            g = rx.lookup_public_ip(ip)
+            if not g or abs(g["lat"] - cn_lat) < 0.05:
+                ok = False
+                print(f"china suffix xdb lookup -> {ip} {g}")
+            elif abs(g["lat"] - want_lat) > 0.2 or abs(g["lon"] - want_lon) > 0.2:
+                ok = False
+                print(f"china suffix xdb coords -> {ip} {g} want ~({want_lat},{want_lon})")
+    print(f"china city/province suffix coords -> {ok}")
+    return ok
+
+
 def test_overseas_coords():
     hit = region_string_to_coords("United States|California|0|Google LLC|US")
     ok_hit = hit is not None and hit[2] in ("region", "country", "city")
@@ -611,6 +652,7 @@ def main():
         ("break_kind", test_break_kind_display()),
         ("target_merge", test_target_merge_scheme_c()),
         ("overseas_coords", test_overseas_coords()),
+        ("china_suffix_coords", test_china_city_suffix_coords()),
         ("geo_resolver", test_geo_resolver()),
         ("demo_geo", test_demo_geo_shape()),
         ("build_geo", test_build_geo()),
