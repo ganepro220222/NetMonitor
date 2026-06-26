@@ -1711,7 +1711,7 @@ function estimateSvgTextWidth(text, fontSize=12){
   return w;
 }
 
-function svgTopoBadge(text, x, y, maxWidth, {fs=12, minW=160, h=28, pad=24}={}){
+function svgTopoBadge(text, x, y, maxWidth, {fs=12, minW=48, h=28, pad=24}={}){
   let label=String(text||'');
   const innerMax=Math.max(minW, maxWidth)-pad;
   if(estimateSvgTextWidth(label, fs)>innerMax){
@@ -1720,7 +1720,8 @@ function svgTopoBadge(text, x, y, maxWidth, {fs=12, minW=160, h=28, pad=24}={}){
     }
     label+='…';
   }
-  const w=Math.min(maxWidth, Math.max(minW, estimateSvgTextWidth(label, fs)+pad));
+  const contentW=estimateSvgTextWidth(label, fs)+pad;
+  const w=Math.min(maxWidth, Math.max(minW, contentW));
   return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="rgba(15,23,42,.75)" stroke="rgba(34,211,238,.3)"/>`+
     `<text x="${x+12}" y="${y+19}" fill="#22d3ee" font-size="${fs}" font-weight="600">${esc(label)}</text>`;
 }
