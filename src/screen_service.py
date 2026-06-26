@@ -419,7 +419,7 @@ def build_paths(web, *, window: str = "today", limit: int = 12) -> dict:
 
 def build_overview(web, *, window: str = "today",
                    uptime_days: float | None = None) -> dict:
-    cache_key = ("overview", window)
+    cache_key = ("overview", id(web), window)
     ttl = _CACHE_TTL.get(window, 30.0)
     cached = _cache_get(cache_key, ttl)
     if cached is not None:
@@ -624,7 +624,7 @@ def _collect_route_change_events(
 
 
 def build_topn(web, *, window: str = "today", n: int = 5) -> dict:
-    cache_key = ("topn", window, n)
+    cache_key = ("topn", id(web), window, n)
     ttl = _CACHE_TTL.get(window, 30.0)
     cached = _cache_get(cache_key, ttl)
     if cached is not None:

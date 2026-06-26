@@ -257,6 +257,34 @@ def test_invalidate_cache():
     return True
 
 
+def test_screen_cache_per_web_instance():
+    """overview/topn TTL cache must not bleed across WebServer instances."""
+    invalidate_screen_cache()
+    w1 = WebServer(port=0)
+    w1._running = True
+    w1.update_target(
+        tid="A", label="A", ip="1.1.1.1", status="red",
+        latency_ms=1.0, jitter_ms=0.0, loss_rate=1.0, is_probe_result=True)
+    w2 = WebServer(port=0)
+    w2._running = True
+    w2.update_target(
+        tid="B", label="B", ip="8.8.8.8", status="green",
+        latency_ms=1.0, jitter_ms=0.0, loss_rate=0.0, is_probe_result=True)
+    ov1 = build_overview(w1, window="today")
+    ov2 = build_overview(w2, window="today")
+    top1 = build_topn(w1, window="today", n=5)
+    top2 = build_topn(w2, window="today", n=5)
+    ok = (
+        ov1["counts"]["red"] == 1
+        and ov2["counts"]["green"] == 1
+        and ov2["counts"]["red"] == 0
+        and all(r.get("tid") != "A" for r in top2.get("lowest_sla", []))
+        and all(r.get("tid") != "B" for r in top1.get("lowest_sla", []))
+    )
+    print(f"screen cache per web instance -> {ok} w2={ov2['counts']}")
+    return ok
+
+
 def test_build_overview_paths():
     w = WebServer(port=0)
     w._running = True
@@ -536,6 +564,7 @@ def main():
         ("merged_unk_isolated", test_merged_unknown_hops_not_shared()),
         ("path_graph_timeouts", test_path_graph_distinct_timeout_hops()),
         ("invalidate_cache", test_invalidate_cache()),
+        ("cache_web_instance", test_screen_cache_per_web_instance()),
         ("builders", test_build_overview_paths()),
         ("events_db", test_build_events_db()),
         ("topo_layout", test_topo_layout_covers_all_hops()),
