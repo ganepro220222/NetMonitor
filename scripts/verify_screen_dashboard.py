@@ -855,6 +855,20 @@ def test_mark_scrollable_includes_root():
     return ok
 
 
+def test_render_geo_marks_topo_detail():
+    """renderGeo async path must markScrollable after topoDetail innerHTML updates."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    start = html.find("function renderGeo(")
+    assert start >= 0, "renderGeo missing"
+    block = html[start:start + 12000]
+    topo_pos = block.find("getElementById('topoDetail').innerHTML")
+    mark_pos = block.find("markScrollable(document.getElementById('topoDetail'))", topo_pos)
+    ok = topo_pos > 0 and mark_pos > topo_pos
+    print(f"renderGeo marks topoDetail -> {ok}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -888,6 +902,7 @@ def main():
         ("dns_off_path", test_geo_dns_off_request_path()),
         ("maphint_db", test_maphint_db_warning_order()),
         ("markscroll_root", test_mark_scrollable_includes_root()),
+        ("render_geo_markscroll", test_render_geo_marks_topo_detail()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

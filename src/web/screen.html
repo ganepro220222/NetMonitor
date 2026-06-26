@@ -1619,6 +1619,7 @@ function renderGeo(data, updateBadge=true){
       `${offMap?' · 未上图 '+offMap+' 个（内网/未定位/境外）':''}${mapLock}${viewHint}</div>`+
       `<div style="margin-top:4px;font-size:11px;color:var(--dim)">`+
       `${hiOnMap?'主图高亮':'下方 inset 高亮'}当前轮播节点；滚轮缩放 / 拖拽平移；点击目标进入单路径；点「全貌」恢复默认视口</div>`;
+    requestAnimationFrame(()=>markScrollable(document.getElementById('topoDetail')));
     if(updateBadge){
       const poolInfo=activeRotatePool();
       const idx=Math.max(0,poolInfo.pool.findIndex(x=>x.tid===hi));
