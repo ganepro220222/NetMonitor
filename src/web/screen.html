@@ -281,8 +281,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .center.panel.geo-mode .topo-wrap{
   position:relative;flex:1;min-height:0;flex-direction:column;
   background:
-    radial-gradient(ellipse at 50% 40%,rgba(34,211,238,.05),transparent 65%),
-    linear-gradient(180deg,rgba(2,8,20,.92),rgba(4,12,28,.88))}
+    radial-gradient(ellipse at 50% 42%,rgba(34,211,238,.10),transparent 58%),
+    repeating-linear-gradient(0deg,rgba(56,189,248,.035) 0 1px,transparent 1px 46px),
+    repeating-linear-gradient(90deg,rgba(56,189,248,.035) 0 1px,transparent 1px 46px),
+    linear-gradient(180deg,rgba(2,8,20,.94),rgba(3,11,26,.92))}
+.center.panel.geo-mode .topo-wrap::after{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:2;
+  box-shadow:inset 0 0 120px rgba(2,8,20,.65);
+  background:radial-gradient(ellipse at 50% 46%,transparent 62%,rgba(2,8,20,.45) 100%)}
 .center.panel.geo-mode #geoChart{
   position:absolute;inset:0;z-index:1;width:100%;height:100%;display:block}
 .center.panel.geo-mode #topoSvg{display:none}
@@ -1097,6 +1103,23 @@ function collectGeoFocusPoints(targets, src, focusTid){
   return pts;
 }
 
+/** Faint lat/lon graticule (curves with the map projection) as polylines. */
+function buildGraticule(mapMode){
+  const W=mapMode==='world';
+  const lonMin=W?-180:70, lonMax=W?180:140, lonStep=W?30:10;
+  const latMin=W?-60:10,  latMax=W?80:55,   latStep=W?20:10;
+  const out=[];
+  for(let lon=lonMin; lon<=lonMax+0.001; lon+=lonStep){
+    const pts=[]; for(let lat=latMin; lat<=latMax; lat+=3) pts.push([lon,lat]);
+    pts.push([lon,latMax]); out.push({coords:pts});
+  }
+  for(let lat=latMin; lat<=latMax+0.001; lat+=latStep){
+    const pts=[]; for(let lon=lonMin; lon<=lonMax; lon+=3) pts.push([lon,lat]);
+    pts.push([lonMax,lat]); out.push({coords:pts});
+  }
+  return out;
+}
+
 function geoViewportKey(mapMode, mode, focusTid, pts){
   if(geoUserRoam) return mapMode+'|roam';
   if(mode==='overview') return mapMode+'|overview';
@@ -1118,7 +1141,7 @@ function worldOverviewViewport(){
   const {minLon,maxLon,minLat,maxLat}=WORLD_BBOX;
   return {
     center:[10,16],
-    zoom:0.92,
+    zoom:1.10,
     aspectScale:0.75,
     boundingCoords:[[minLon,maxLat],[maxLon,minLat]],
   };
@@ -1420,9 +1443,11 @@ function renderGeo(data, updateBadge=true){
         lines.push({
           coords: [[src.lon, src.lat], [t.geo.lon, t.geo.lat]],
           lineStyle: {
-            color: colorForStatus(t.status),
-            width: t.tid===hi?2.5:1.2,
-            opacity: t.tid===hi?0.9:0.35,
+            color: new echarts.graphic.LinearGradient(0,0,1,0,[
+              {offset:0, color:'rgba(125,211,252,0.9)'},
+              {offset:1, color: colorForStatus(t.status)}]),
+            width: t.tid===hi?2.6:1.3,
+            opacity: t.tid===hi?0.95:0.4,
             curveness: mapMode==='world'?0.28:0.18,
           },
         });
@@ -1440,6 +1465,26 @@ function renderGeo(data, updateBadge=true){
     if(!geoMapUserChoice){
       mapHint='自动跟随轮播 · '+mapHint;
     }
+    // ── Refined map look: gradient landmass, glow border, source home-base ──
+    const areaGrad=new echarts.graphic.LinearGradient(0,0,0,1,[
+      {offset:0, color: mapMode==='china'?'rgba(24,58,102,0.94)':'rgba(18,48,90,0.90)'},
+      {offset:0.55, color: mapMode==='china'?'rgba(12,30,58,0.93)':'rgba(10,26,52,0.90)'},
+      {offset:1, color: mapMode==='china'?'rgba(5,13,30,0.95)':'rgba(4,11,26,0.93)'}]);
+    const emphGrad=new echarts.graphic.LinearGradient(0,0,0,1,[
+      {offset:0, color:'rgba(45,224,255,0.34)'},
+      {offset:1, color:'rgba(34,160,220,0.12)'}]);
+    const srcMarker=(src&&src.lon!=null&&src.lat!=null)?[{
+      name: src.label||'监控主机',
+      value:[src.lon, src.lat, 1],
+      itemStyle:{color:'#a5f3fc', shadowBlur:20, shadowColor:'rgba(125,211,252,0.95)',
+                 borderColor:'#e0f2fe', borderWidth:1.5},
+      symbol:'circle', symbolSize: mapMode==='world'?12:10,
+      label:{show:true, position:'bottom', distance:7,
+             formatter:()=>(src.label||'监控主机').slice(0,16),
+             color:'#bae6fd', fontSize:10, lineHeight:12,
+             backgroundColor:'rgba(8,16,32,0.72)', padding:[2,4], borderRadius:3},
+    }]:[];
+    const graticule=buildGraticule(mapMode);
     chart.setOption({
       backgroundColor: 'transparent',
       geo: {
@@ -1454,12 +1499,15 @@ function renderGeo(data, updateBadge=true){
         ...(view.boundingCoords?{boundingCoords:view.boundingCoords}:{}),
         label: {show:false},
         itemStyle: {
-          areaColor: mapMode==='china'?'rgba(8,20,40,.88)':'rgba(6,16,36,.82)',
-          borderColor: 'rgba(34,211,238,.28)',
-          borderWidth: mapMode==='china'?1:0.6,
+          areaColor: areaGrad,
+          borderColor: 'rgba(72,226,255,0.55)',
+          borderWidth: mapMode==='china'?1.1:0.7,
+          shadowColor: 'rgba(28,150,210,0.45)',
+          shadowBlur: mapMode==='china'?10:18,
         },
         emphasis: {
-          itemStyle: {areaColor: 'rgba(34,211,238,.14)'},
+          itemStyle: {areaColor: emphGrad, borderColor:'rgba(150,242,255,0.95)',
+                      borderWidth:1.5, shadowColor:'rgba(56,224,255,0.6)', shadowBlur:16},
           label: {show:false},
         },
       },
@@ -1494,22 +1542,44 @@ function renderGeo(data, updateBadge=true){
         {
           type: 'lines',
           coordinateSystem: 'geo',
+          data: graticule,
+          polyline: true,
+          silent: true,
+          lineStyle: {color: 'rgba(72,200,255,0.12)', width: 0.5, opacity: 0.12,
+                      type: mapMode==='world'?'solid':'dashed'},
+          z: 1,
+        },
+        {
+          type: 'lines',
+          coordinateSystem: 'geo',
           data: lines,
-          effect: {show: lines.length>0, period: 6, trailLength: 0.12, symbolSize: 3},
+          effect: {show: lines.length>0, period: 5, trailLength: 0.22,
+                   symbol: 'arrow', symbolSize: 5, color: 'rgba(186,247,253,0.95)'},
           lineStyle: {width: 1, opacity: 0.55, curveness: mapMode==='world'?0.28:0.18},
+          z: 2,
+        },
+        {
+          type: 'effectScatter',
+          coordinateSystem: 'geo',
+          data: srcMarker,
+          rippleEffect: {brushType: 'stroke', scale: 3.4, period: 4},
+          labelLayout: {hideOverlap: true},
+          z: 3,
+          silent: true,
         },
         {
           type: 'scatter',
           coordinateSystem: 'geo',
           data: scatter,
-          z: 3,
+          labelLayout: {hideOverlap: true},
+          z: 4,
         },
         {
           type: 'effectScatter',
           coordinateSystem: 'geo',
           data: breaks,
           rippleEffect: {brushType: 'stroke', scale: 2.8},
-          z: 4,
+          z: 5,
         },
       ],
     }, viewportChanged&&!geoUserRoam);
