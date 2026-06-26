@@ -542,6 +542,8 @@ def test_source_guards():
         and 'route("/screen")' in ws.replace(" ", "")
         and "/api/screen/overview" in ws
         and "window.open('/screen'" in ws
+        and "allow_egress_fetch=False" in svc
+        and "prewarm_monitor_source" in svc
         and "layoutSerpentine" in html
         and "syncAutoRotate" in html
         and "break-ripple" in html
@@ -700,6 +702,76 @@ def test_build_manual_geo_from_fields():
     return True
 
 
+def test_dns_resolution_cached():
+    """resolve_hostname_ipv4 must TTL-cache so the read-only geo path does not
+    re-run a blocking getaddrinfo for the same hostname on every poll."""
+    import src.geo_resolver as gr
+    with gr._DNS_CACHE_LOCK:
+        gr._DNS_CACHE.clear()
+    calls = {"n": 0}
+    real = gr.socket.getaddrinfo
+    gr.socket.getaddrinfo = lambda host, *a, **k: (
+        calls.__setitem__("n", calls["n"] + 1)
+        or [(2, 1, 6, "", ("8.8.8.8", 0))])  # a genuinely public IP
+    try:
+        a = gr.resolve_hostname_ipv4("host.example.com")
+        b = gr.resolve_hostname_ipv4("host.example.com")
+    finally:
+        gr.socket.getaddrinfo = real
+        with gr._DNS_CACHE_LOCK:
+            gr._DNS_CACHE.clear()
+    ok = a == "8.8.8.8" and b == "8.8.8.8" and calls["n"] == 1
+    print(f"dns resolution cached -> {ok} getaddrinfo_calls={calls['n']}")
+    return ok
+
+
+def test_geo_source_egress_off_request_path():
+    """build_geo must not block on the egress HTTP probe; it reads the cache
+    and prewarms the lookup on a background thread instead."""
+    import threading
+    import time
+    import src.monitor_source_geo as msg
+    import src.screen_service as ss
+    orig_detect = msg.detect_route_local_ipv4
+    orig_fetch = msg._fetch_public_egress_uncached
+    done = threading.Event()
+    hits = {"n": 0}
+
+    def slow_fetch(timeout=2.5):
+        hits["n"] += 1
+        time.sleep(0.8)        # simulate a slow/timing-out egress probe
+        done.set()
+        return None
+
+    msg.detect_route_local_ipv4 = lambda: "192.168.1.50"  # force NAT path
+    msg._fetch_public_egress_uncached = slow_fetch
+    with msg._EGRESS_CACHE_LOCK:
+        msg._EGRESS_CACHE.update(
+            {"ip": None, "ts": 0.0, "fail_ts": 0.0, "inflight": False})
+    try:
+        w = WebServer(port=0)
+        w._running = True
+        w.set_screen_geo(resolver=GeoResolver())  # monitor_geo unset -> auto
+        w.update_target(tid="x", label="X", ip="8.8.8.8", status="green",
+                        latency_ms=5.0, jitter_ms=1.0, loss_rate=0.0,
+                        is_probe_result=True)
+        ss.invalidate_screen_cache()
+        t0 = time.time()
+        payload = ss.build_geo(w)
+        dt = time.time() - t0
+        fast = dt < 0.4                # did NOT block on the 0.8s fetch
+        bg_ran = done.wait(2.0)        # prewarm ran the fetch in background
+    finally:
+        msg.detect_route_local_ipv4 = orig_detect
+        msg._fetch_public_egress_uncached = orig_fetch
+        with msg._EGRESS_CACHE_LOCK:
+            msg._EGRESS_CACHE.update(
+                {"ip": None, "ts": 0.0, "fail_ts": 0.0, "inflight": False})
+    ok = fast and bg_ran and payload.get("source") is None
+    print(f"geo egress off request path -> {ok} build_geo={dt:.2f}s bg_fetch={hits['n']}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -729,6 +801,8 @@ def main():
         ("http", test_http_routes()),
         ("window_valid", test_window_validation_normalizes()),
         ("error_fallback", test_error_fallback_no_demo()),
+        ("dns_cached", test_dns_resolution_cached()),
+        ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),
     ]

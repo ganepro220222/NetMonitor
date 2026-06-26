@@ -276,11 +276,13 @@ def is_ip_literal(ip: str) -> bool:
         return False
 
 
-def resolve_hostname_ipv4(hostname: str) -> str | None:
-    """Resolve *hostname* to the first public IPv4, or None."""
-    host = (hostname or "").strip()
-    if not host or is_ip_literal(host):
-        return None
+_DNS_CACHE_LOCK = threading.Lock()
+_DNS_CACHE: dict[str, tuple[float, str | None]] = {}
+_DNS_TTL_OK = 1800.0    # cache a successful hostname->IP for 30 min
+_DNS_TTL_FAIL = 120.0   # re-attempt a failed lookup after 2 min
+
+
+def _resolve_hostname_ipv4_uncached(host: str) -> str | None:
     try:
         results = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
     except (socket.gaierror, OSError):
@@ -290,6 +292,28 @@ def resolve_hostname_ipv4(hostname: str) -> str | None:
         if ip and is_public_ip(ip):
             return ip
     return None
+
+
+def resolve_hostname_ipv4(hostname: str) -> str | None:
+    """Resolve *hostname* to the first public IPv4, or None (TTL-cached).
+
+    Cached so the read-only /screen geo path never re-runs a blocking
+    getaddrinfo on every poll for the same hostname-configured target.
+    """
+    host = (hostname or "").strip()
+    if not host or is_ip_literal(host):
+        return None
+    now = time.time()
+    with _DNS_CACHE_LOCK:
+        hit = _DNS_CACHE.get(host)
+        if hit is not None:
+            ts, ip = hit
+            if now - ts < (_DNS_TTL_OK if ip else _DNS_TTL_FAIL):
+                return ip
+    ip = _resolve_hostname_ipv4_uncached(host)
+    with _DNS_CACHE_LOCK:
+        _DNS_CACHE[host] = (time.time(), ip)
+    return ip
 
 
 def resolve_probe_ipv4(*candidates: str | None) -> str | None:

@@ -22,7 +22,8 @@ from typing import Any
 from src.geo_resolver import GeoResolver, is_public_ip, parse_manual_geo
 
 _EGRESS_CACHE_LOCK = threading.Lock()
-_EGRESS_CACHE: dict[str, Any] = {"ip": None, "ts": 0.0, "fail_ts": 0.0}
+_EGRESS_CACHE: dict[str, Any] = {"ip": None, "ts": 0.0, "fail_ts": 0.0,
+                                 "inflight": False}
 _EGRESS_TTL_OK = 3600.0
 _EGRESS_TTL_FAIL = 300.0
 _EGRESS_ENDPOINTS = (
@@ -71,6 +72,46 @@ def fetch_public_egress_ipv4(timeout: float = 2.5) -> str | None:
         else:
             _EGRESS_CACHE["fail_ts"] = time.time()
     return ip
+
+
+def _egress_cached_ipv4() -> str | None:
+    """Return a fresh cached public egress IPv4 without any network I/O."""
+    import time
+    with _EGRESS_CACHE_LOCK:
+        cached = _EGRESS_CACHE.get("ip")
+        ts = float(_EGRESS_CACHE.get("ts") or 0)
+    if cached and time.time() - ts < _EGRESS_TTL_OK:
+        return cached
+    return None
+
+
+def prewarm_egress_async() -> None:
+    """Populate the egress-IP cache on a background thread so the read-only
+    /screen geo request path never blocks on the outbound HTTP probe. No-op
+    when a fetch is unnecessary (fresh cache), backed off (recent failure), or
+    already in flight."""
+    import time
+    with _EGRESS_CACHE_LOCK:
+        if _EGRESS_CACHE.get("inflight"):
+            return
+        now = time.time()
+        cached = _EGRESS_CACHE.get("ip")
+        ts = float(_EGRESS_CACHE.get("ts") or 0)
+        fail_ts = float(_EGRESS_CACHE.get("fail_ts") or 0)
+        if cached and now - ts < _EGRESS_TTL_OK:
+            return
+        if fail_ts and now - fail_ts < _EGRESS_TTL_FAIL:
+            return
+        _EGRESS_CACHE["inflight"] = True
+
+    def _run():
+        try:
+            fetch_public_egress_ipv4()
+        finally:
+            with _EGRESS_CACHE_LOCK:
+                _EGRESS_CACHE["inflight"] = False
+
+    threading.Thread(target=_run, name="egress-prewarm", daemon=True).start()
 
 
 def _fetch_public_egress_uncached(timeout: float = 2.5) -> str | None:
@@ -124,11 +165,27 @@ def resolve_monitor_source(
         if geo:
             return _format_monitor_source(geo, local_ip, "local_ip")
 
-    if allow_egress_fetch:
+    # Prefer the cached egress IP (no network I/O). Only fetch synchronously
+    # when explicitly allowed -- the read-only /screen path passes
+    # allow_egress_fetch=False and relies on prewarm_monitor_source().
+    egress = _egress_cached_ipv4()
+    if egress is None and allow_egress_fetch:
         egress = fetch_public_egress_ipv4()
-        if egress and is_public_ip(egress):
-            geo = resolver.lookup_public_ip(egress)
-            if geo:
-                return _format_monitor_source(geo, egress, "egress_ip")
+    if egress and is_public_ip(egress):
+        geo = resolver.lookup_public_ip(egress)
+        if geo:
+            return _format_monitor_source(geo, egress, "egress_ip")
 
     return None
+
+
+def prewarm_monitor_source(manual_geo: dict | None = None) -> None:
+    """Kick a background egress lookup for auto monitor-source detection so the
+    /screen geo request path never blocks. No-op when manual geo is configured
+    or the local route IP is already public."""
+    if parse_manual_geo(manual_geo):
+        return
+    local_ip = detect_route_local_ipv4()
+    if local_ip and is_public_ip(local_ip):
+        return
+    prewarm_egress_async()

@@ -14,11 +14,13 @@ from src.trace_policy import summarize_for_display
 
 try:
     from src.geo_resolver import GeoResolver, parse_manual_geo
-    from src.monitor_source_geo import resolve_monitor_source
+    from src.monitor_source_geo import (
+        resolve_monitor_source, prewarm_monitor_source)
 except ImportError:
     GeoResolver = None  # type: ignore
     parse_manual_geo = None  # type: ignore
     resolve_monitor_source = None  # type: ignore
+    prewarm_monitor_source = None  # type: ignore
 
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[tuple, tuple[float, Any]] = {}
@@ -913,7 +915,12 @@ def build_geo(
             })
 
     if resolve_monitor_source is not None:
-        src = resolve_monitor_source(res, monitor_geo)
+        # Read-only request path: never block on the egress HTTP probe. Read
+        # the cached egress IP only; prewarm it in the background so the arc
+        # appears on a subsequent poll instead of stalling this request.
+        src = resolve_monitor_source(res, monitor_geo, allow_egress_fetch=False)
+        if src is None and prewarm_monitor_source is not None:
+            prewarm_monitor_source(monitor_geo)
     else:
         src = parse_manual_geo(monitor_geo) if parse_manual_geo else None
     map_count = sum(1 for r in rows if r.get("geo"))
