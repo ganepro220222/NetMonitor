@@ -268,8 +268,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   box-shadow:0 0 12px rgba(34,211,238,.1)}
 .rotate-badge.fault{color:#fca5a5;border-color:rgba(239,68,68,.45);
   background:linear-gradient(90deg,rgba(239,68,68,.14),rgba(239,68,68,.04))}
+.rotate-status{font-size:10px;color:var(--dim);line-height:1.35;letter-spacing:.02em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(36vw,320px)}
+.rotate-status.fault{color:#fca5a5}
 .score-hint{font-size:10px;color:var(--dim);margin-top:6px;line-height:1.45;max-width:260px;opacity:.85}
-.topo-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px;width:100%;flex-shrink:0}
+.topo-toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;
+  margin-bottom:6px;width:100%;flex-shrink:0}
+.topo-toolbar-btns{display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1;min-width:0}
+.topo-toolbar-rotate{display:flex;align-items:center;gap:6px;flex-shrink:0;max-width:min(42%,360px)}
 .center.panel.geo-mode .topo-bg{display:none}
 #geoChart{display:none}
 .center.panel.geo-mode .topo-wrap{
@@ -340,15 +346,18 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
     <div class="ptitle">动态链路拓扑</div>
     <div class="pbody" style="display:flex;flex-direction:column;height:calc(100% - 42px)">
       <div class="topo-toolbar">
-        <button class="winbtn active" id="btnTopoGeo" onclick="setTopoMode('geo',this)">地理视图</button>
-        <button class="winbtn" id="btnTopoSingle" onclick="setTopoMode('single',this)">单路径</button>
-        <button class="winbtn" id="btnTopoMerged" onclick="setTopoMode('merged',this)">合并拓扑</button>
-        <button class="winbtn active" id="btnMapChina" onclick="setGeoMapMode('china',this)">中国</button>
-        <button class="winbtn" id="btnMapWorld" onclick="setGeoMapMode('world',this)">世界</button>
-        <button class="winbtn" id="btnGeoFit" onclick="resetGeoViewport()" title="恢复地图全貌（清除手动缩放/聚焦）">全貌</button>
-        <span class="rotate-badge hidden" id="geoMapHint" style="margin-left:0;font-size:10px;color:var(--dim);border:none;background:transparent"></span>
-        <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
-        <span class="rotate-badge hidden" id="rotateBadge"></span>
+        <div class="topo-toolbar-btns">
+          <button class="winbtn active" id="btnTopoGeo" onclick="setTopoMode('geo',this)">地理视图</button>
+          <button class="winbtn" id="btnTopoSingle" onclick="setTopoMode('single',this)">单路径</button>
+          <button class="winbtn" id="btnTopoMerged" onclick="setTopoMode('merged',this)">合并拓扑</button>
+          <button class="winbtn active" id="btnMapChina" onclick="setGeoMapMode('china',this)">中国</button>
+          <button class="winbtn" id="btnMapWorld" onclick="setGeoMapMode('world',this)">世界</button>
+          <button class="winbtn" id="btnGeoFit" onclick="resetGeoViewport()" title="恢复地图全貌（清除手动缩放/聚焦）">全貌</button>
+        </div>
+        <div class="topo-toolbar-rotate">
+          <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
+          <span class="rotate-status hidden" id="rotateBadge"></span>
+        </div>
       </div>
       <div class="topo-wrap">
         <div class="topo-bg"></div>
@@ -641,7 +650,11 @@ function updateRotateBadge(poolInfo, idx){
   el.classList.remove('hidden');
   el.classList.toggle('fault',poolInfo.mode==='fault');
   const paused=Date.now()<rotatePausedUntil?' · 已暂停':'';
-  el.textContent=`自动轮播 · ${poolInfo.label} ${i+1}/${poolInfo.pool.length} · ${cur.label||cur.tid||''}${paused} · ${poolInfo.mode==='fault'?Math.round(ROTATE.faultMs/1000):Math.round(ROTATE.normalMs/1000)}s`;
+  const rawLabel=cur.label||cur.tid||'';
+  const shortLabel=rawLabel.length>14?rawLabel.slice(0,13)+'…':rawLabel;
+  el.title=rawLabel&&rawLabel.length>14?rawLabel:'';
+  const tick=poolInfo.mode==='fault'?Math.round(ROTATE.faultMs/1000):Math.round(ROTATE.normalMs/1000);
+  el.textContent=`${poolInfo.label} ${i+1}/${poolInfo.pool.length} · ${shortLabel}${paused} · ${tick}s`;
 }
 
 function stopRotateTimer(){
@@ -1427,8 +1440,6 @@ function renderGeo(data, updateBadge=true){
     if(!geoMapUserChoice){
       mapHint='自动跟随轮播 · '+mapHint;
     }
-    document.getElementById('geoMapHint').textContent=mapHint;
-    document.getElementById('geoMapHint').classList.remove('hidden');
     chart.setOption({
       backgroundColor: 'transparent',
       geo: {
@@ -1528,7 +1539,7 @@ function renderGeo(data, updateBadge=true){
       ? ' · 已手动缩放（点「全貌」恢复）'
       : (viewMode==='focus'?' · 聚焦当前节点（暂停结束后恢复全貌）':' · 全国/全球全貌');
     document.getElementById('topoDetail').innerHTML=
-      `<div>地理视图（${mapMode==='china'?'中国':'世界'}）— 主图 ${onMap.length} 个${srcHint}`+
+      `<div>${esc(mapHint)} — 主图 ${onMap.length} 个${srcHint}`+
       `${hiddenOverseas.length?' · 境外 '+hiddenOverseas.length+' 个（中国图见下方）':''}`+
       `${offMap?' · 未上图 '+offMap+' 个（内网/未定位/境外）':''}${mapLock}${viewHint}</div>`+
       `<div style="margin-top:4px;font-size:11px;color:var(--dim)">`+

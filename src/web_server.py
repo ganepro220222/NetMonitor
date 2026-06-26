@@ -707,10 +707,10 @@ header{background:var(--surface);border-bottom:1px solid var(--border);
 .tmenu-item:hover{background:var(--surface)}
 .tbtn:last-child{border-right:none}
 .tbtn.active,.tbtn:hover{background:var(--border2);color:var(--text)}
-#snd-btn,#sel-btn{background:none;border:1px solid var(--border2);border-radius:6px;
-  cursor:pointer;padding:5px 9px;font-size:14px;color:var(--dim);transition:.15s}
+#snd-btn,#sel-btn,#screen-btn{background:none;border:1px solid var(--border2);border-radius:6px;
+  cursor:pointer;padding:5px 9px;font-size:14px;line-height:1;color:var(--dim);transition:.15s}
 #snd-btn.on{color:var(--green);border-color:rgba(34,197,94,.4)}
-#snd-btn:hover,#sel-btn:hover{background:var(--border2);color:var(--text)}
+#snd-btn:hover,#sel-btn:hover,#screen-btn:hover{background:var(--border2);color:var(--text)}
 .tabs{background:var(--surface2);border-bottom:1px solid var(--border);padding:0 20px;display:flex;flex-shrink:0}
 .tab{background:none;border:none;cursor:pointer;padding:11px 18px;font-size:13px;
   color:var(--dim);border-bottom:2px solid transparent;transition:.15s;font-weight:500}
@@ -1260,8 +1260,8 @@ body.theme-dark{
 <header>
   <span class="logo">🌐</span><span class="site-title">网络连通性监测</span>
   <div class="hdr-right">
-    <button id="screen-btn" onclick="window.open('/screen','_blank')" title="打开态势大屏（独立窗口）">🖥</button>
-    <button id="sel-btn" onclick="openCardSel()" title="自定义显示的卡片">⊞</button>
+    <button id="screen-btn" onclick="window.open('/screen','_blank')" title="打开态势大屏（独立窗口）">📺</button>
+    <button id="sel-btn" onclick="openCardSel()" title="自定义显示的卡片">☰</button>
     <button id="snd-btn" onclick="toggleSound()" title="告警声音">🔔</button>
     <button id="fullscreen-btn" onclick="toggleFullscreen()" title="大屏全屏模式（F11）">⛶</button>
     <div class="theme-btns" style="position:relative">
