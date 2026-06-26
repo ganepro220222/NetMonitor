@@ -105,6 +105,8 @@ from src.alert_manager import AlertManager
 from src.logger import Logger
 from src.web_server import WebServer
 from src.geo_resolver import GeoResolver
+from src.geo_bootstrap import ensure_ip2region_xdb
+from src.monitor_source_geo import prewarm_monitor_source
 
 
 from src.icon_generator import ensure_icon
@@ -158,12 +160,18 @@ def main():
             config.get_setting("db_webhook_outbox_retention_days") or 90),
     )
     web.set_data_store(data_store)
+    _xdb_path = ensure_ip2region_xdb(BASE_DIR)
+    if not _xdb_path:
+        print("[Geo] ip2region 数据库缺失，地理大屏无法自动定位公网 IP。"
+              "请运行: python scripts/download_ip2region.py")
     monitor_geo, target_geos = config.get_screen_geo_bundle()
+    _geo_resolver = GeoResolver(_xdb_path)
     web.set_screen_geo(
         monitor_geo=monitor_geo,
         target_geos=target_geos,
-        resolver=GeoResolver(GeoResolver.resolve_xdb_path(BASE_DIR)),
+        resolver=_geo_resolver,
     )
+    prewarm_monitor_source(monitor_geo)
 
     alerter.set_data_store(data_store)
     alerter.set_config(config)

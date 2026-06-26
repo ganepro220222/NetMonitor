@@ -878,6 +878,7 @@ def build_geo(
             resolve_ip=resolve_ip,
             manual_geo=manual_geo,
             probe_order=probe_order,
+            allow_dns_resolve=False,
         )
         break_hop = _break_hop_info(summary)
         break_geo = None
@@ -915,9 +916,8 @@ def build_geo(
             })
 
     if resolve_monitor_source is not None:
-        # Read-only request path: never block on the egress HTTP probe. Read
-        # the cached egress IP only; prewarm it in the background so the arc
-        # appears on a subsequent poll instead of stalling this request.
+        # Read-only request path: use cached egress IP only; kick background
+        # prewarm when still unset so the arc appears on the next poll.
         src = resolve_monitor_source(res, monitor_geo, allow_egress_fetch=False)
         if src is None and prewarm_monitor_source is not None:
             prewarm_monitor_source(monitor_geo)
@@ -928,6 +928,7 @@ def build_geo(
         "window": window,
         "updated_at": int(time.time()),
         "source": src,
+        "geo_db_ready": res.ensure_xdb_loaded(),
         "targets": rows,
         "inset": inset,
         "stats": {

@@ -278,8 +278,22 @@ def is_ip_literal(ip: str) -> bool:
 
 _DNS_CACHE_LOCK = threading.Lock()
 _DNS_CACHE: dict[str, tuple[float, str | None]] = {}
+_DNS_INFLIGHT: set[str] = set()
 _DNS_TTL_OK = 1800.0    # cache a successful hostname->IP for 30 min
 _DNS_TTL_FAIL = 120.0   # re-attempt a failed lookup after 2 min
+
+
+def _dns_cache_lookup(host: str) -> tuple[bool, str | None]:
+    """Return (hit, ip). *hit* is True when a non-expired cache entry exists."""
+    now = time.time()
+    with _DNS_CACHE_LOCK:
+        hit = _DNS_CACHE.get(host)
+        if hit is None:
+            return False, None
+        ts, ip = hit
+        if now - ts < (_DNS_TTL_OK if ip else _DNS_TTL_FAIL):
+            return True, ip
+    return False, None
 
 
 def _resolve_hostname_ipv4_uncached(host: str) -> str | None:
@@ -294,29 +308,55 @@ def _resolve_hostname_ipv4_uncached(host: str) -> str | None:
     return None
 
 
-def resolve_hostname_ipv4(hostname: str) -> str | None:
+def resolve_hostname_ipv4(hostname: str, *, allow_resolve: bool = True) -> str | None:
     """Resolve *hostname* to the first public IPv4, or None (TTL-cached).
 
-    Cached so the read-only /screen geo path never re-runs a blocking
-    getaddrinfo on every poll for the same hostname-configured target.
+    When *allow_resolve* is False (read-only /screen geo path), only cached
+    results are returned; cache misses do not call getaddrinfo().
     """
     host = (hostname or "").strip()
     if not host or is_ip_literal(host):
         return None
-    now = time.time()
-    with _DNS_CACHE_LOCK:
-        hit = _DNS_CACHE.get(host)
-        if hit is not None:
-            ts, ip = hit
-            if now - ts < (_DNS_TTL_OK if ip else _DNS_TTL_FAIL):
-                return ip
+    hit, ip = _dns_cache_lookup(host)
+    if hit:
+        return ip
+    if not allow_resolve:
+        return None
     ip = _resolve_hostname_ipv4_uncached(host)
     with _DNS_CACHE_LOCK:
         _DNS_CACHE[host] = (time.time(), ip)
     return ip
 
 
-def resolve_probe_ipv4(*candidates: str | None) -> str | None:
+def prewarm_hostname_async(hostname: str) -> None:
+    """Populate the hostname->IPv4 cache on a background thread for /screen geo."""
+    host = (hostname or "").strip()
+    if not host or is_ip_literal(host):
+        return
+    with _DNS_CACHE_LOCK:
+        if host in _DNS_INFLIGHT:
+            return
+        hit = _DNS_CACHE.get(host)
+        if hit is not None:
+            ts, ip = hit
+            if time.time() - ts < (_DNS_TTL_OK if ip else _DNS_TTL_FAIL):
+                return
+        _DNS_INFLIGHT.add(host)
+
+    def _run():
+        try:
+            resolve_hostname_ipv4(host, allow_resolve=True)
+        finally:
+            with _DNS_CACHE_LOCK:
+                _DNS_INFLIGHT.discard(host)
+
+    threading.Thread(target=_run, name=f"dns-prewarm:{host[:24]}", daemon=True).start()
+
+
+def resolve_probe_ipv4(
+        *candidates: str | None,
+        allow_dns_resolve: bool = True,
+) -> str | None:
     """Pick the first usable public IPv4 from literals or resolvable hostnames."""
     for raw in candidates:
         probe = (raw or "").strip()
@@ -326,9 +366,11 @@ def resolve_probe_ipv4(*candidates: str | None) -> str | None:
             if is_public_ip(probe):
                 return probe
             continue
-        resolved = resolve_hostname_ipv4(probe)
+        resolved = resolve_hostname_ipv4(probe, allow_resolve=allow_dns_resolve)
         if resolved:
             return resolved
+        if not allow_dns_resolve:
+            prewarm_hostname_async(probe)
     return None
 
 
@@ -591,12 +633,29 @@ class GeoResolver:
         self._cache: dict[str, tuple[float, dict | None]] = {}
         self._cache_ttl = 3600.0
         self._xdb: _XdbMemorySearcher | None = None
-        path = xdb_path or self.default_xdb_path()
+        self._xdb_path = xdb_path or self.default_xdb_path()
+        self._load_xdb(self._xdb_path)
+
+    def _load_xdb(self, path: str | None) -> None:
         if path and os.path.isfile(path):
             try:
                 self._xdb = _XdbMemorySearcher(path)
+                self._xdb_path = path
+                return
             except Exception:
-                self._xdb = None
+                pass
+        self._xdb = None
+
+    def ensure_xdb_loaded(self) -> bool:
+        """Lazy-load xdb when it appears after startup (e.g. first-run download)."""
+        if self._xdb is not None:
+            return True
+        path = GeoResolver.resolve_xdb_path(None)
+        if path and path != self._xdb_path:
+            self._load_xdb(path)
+        elif self._xdb_path and os.path.isfile(self._xdb_path):
+            self._load_xdb(self._xdb_path)
+        return self._xdb is not None
 
     @staticmethod
     def resolve_xdb_path(base_dir: str | None = None) -> str | None:
@@ -661,6 +720,7 @@ class GeoResolver:
             }
             self._cache_set(f"ip:{ip}", out)
             return out
+        self.ensure_xdb_loaded()
         region = None
         if self._xdb is not None:
             try:
@@ -696,6 +756,7 @@ class GeoResolver:
             manual_geo: dict | None,
             alt_hosts: list[str] | None = None,
             probe_order: list[str] | None = None,
+            allow_dns_resolve: bool = True,
     ) -> dict:
         """Return {kind, geo} for one target."""
         manual = parse_manual_geo(manual_geo)
@@ -710,7 +771,7 @@ class GeoResolver:
             candidates = [resolve_ip, ip]
             if alt_hosts:
                 candidates.extend(alt_hosts)
-        probe = resolve_probe_ipv4(*candidates)
+        probe = resolve_probe_ipv4(*candidates, allow_dns_resolve=allow_dns_resolve)
         if probe is None:
             # Distinguish private literal vs unresolved hostname for inset kind.
             literal = (resolve_ip or ip or "").strip()

@@ -544,6 +544,8 @@ def test_source_guards():
         and "window.open('/screen'" in ws
         and "allow_egress_fetch=False" in svc
         and "prewarm_monitor_source" in svc
+        and "geo_db_ready" in svc
+        and "ensure_ip2region_xdb" in open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
         and "layoutSerpentine" in html
         and "syncAutoRotate" in html
         and "break-ripple" in html
@@ -725,6 +727,57 @@ def test_dns_resolution_cached():
     return ok
 
 
+def test_geo_dns_off_request_path():
+    """build_geo must not block on uncached hostname DNS; cache miss stays
+    unlocated and prewarms lookup on a background thread."""
+    import threading
+    import time
+    import src.geo_resolver as gr
+    import src.screen_service as ss
+
+    with gr._DNS_CACHE_LOCK:
+        gr._DNS_CACHE.clear()
+        gr._DNS_INFLIGHT.clear()
+    done = threading.Event()
+    real = gr.socket.getaddrinfo
+
+    def slow(host, *a, **k):
+        time.sleep(0.8)
+        done.set()
+        return [(2, 1, 6, "", ("8.8.8.8", 0))]
+
+    gr.socket.getaddrinfo = slow
+    try:
+        w = WebServer(port=0)
+        w._running = True
+        w.update_target(
+            tid="h1",
+            label="Hostname",
+            ip="uncached-host.example.com",
+            status="green",
+            latency_ms=5.0,
+            jitter_ms=1.0,
+            loss_rate=0.0,
+            is_probe_result=True,
+        )
+        ss.invalidate_screen_cache()
+        t0 = time.time()
+        payload = ss.build_geo(w)
+        dt = time.time() - t0
+        row = payload["targets"][0] if payload.get("targets") else {}
+        fast = dt < 0.35
+        bg_ran = done.wait(2.0)
+        unlocated = row.get("kind") == "public" and not row.get("geo")
+    finally:
+        gr.socket.getaddrinfo = real
+        with gr._DNS_CACHE_LOCK:
+            gr._DNS_CACHE.clear()
+            gr._DNS_INFLIGHT.clear()
+    ok = fast and bg_ran and unlocated
+    print(f"geo dns off request path -> {ok} build_geo={dt:.2f}s unlocated={unlocated}")
+    return ok
+
+
 def test_geo_source_egress_off_request_path():
     """build_geo must not block on the egress HTTP probe; it reads the cache
     and prewarms the lookup on a background thread instead."""
@@ -802,6 +855,7 @@ def main():
         ("window_valid", test_window_validation_normalizes()),
         ("error_fallback", test_error_fallback_no_demo()),
         ("dns_cached", test_dns_resolution_cached()),
+        ("dns_off_path", test_geo_dns_off_request_path()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

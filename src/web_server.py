@@ -6435,7 +6435,14 @@ class WebServer:
         self._running = True
         _add_firewall_rule(self.port)
         bind_done, bind_ok = self._launch_server_thread()
-        return self._await_bind(bind_done, bind_ok)
+        ok = self._await_bind(bind_done, bind_ok)
+        if ok:
+            try:
+                from src.monitor_source_geo import prewarm_monitor_source
+                prewarm_monitor_source(getattr(self, "_monitor_geo", None))
+            except Exception:
+                pass
+        return ok
 
     def stop(self):
         """Signal the web server to stop. Returns immediately; shutdown is async."""

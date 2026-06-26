@@ -29,8 +29,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:linear-gradient(180deg,transparent 0%,rgba(34,211,238,.03) 50%,transparent 100%);
   animation:stageScan 6s ease-in-out infinite}
 @keyframes stageScan{0%,100%{transform:translateY(-100%);opacity:0}45%{opacity:1}100%{transform:translateY(100%)}}
-.grid{display:grid;grid-template-columns:420px 1fr 420px;grid-template-rows:100px 1fr 220px;
-  gap:14px;padding:14px;height:100%;position:relative;z-index:1}
+.grid{display:grid;grid-template-columns:400px 1fr 400px;grid-template-rows:96px 1fr 188px;
+  gap:12px;padding:12px;height:100%;position:relative;z-index:1}
 .panel{
   --pc:var(--cyan);
   position:relative;overflow:hidden;
@@ -179,9 +179,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 @keyframes radarSweep{to{transform:translate(-50%,-50%) rotate(360deg)}}
 #topoSvg{position:relative;z-index:1;width:100%;flex:1;min-height:0;display:block;
   background:transparent;border:0}
-.topo-detail{margin-top:10px;font-size:12px;color:var(--dim);min-height:36px;padding:10px 12px;
+.topo-detail{margin-top:8px;font-size:12px;color:var(--dim);
+  min-height:52px;max-height:68px;overflow-y:auto;padding:8px 12px;
   background:linear-gradient(90deg,rgba(15,23,42,.65),rgba(8,16,32,.45));
-  border:1px solid rgba(30,58,95,.4);border-left:3px solid rgba(34,211,238,.45)}
+  border:1px solid rgba(30,58,95,.4);border-left:3px solid rgba(34,211,238,.45);
+  flex-shrink:0}
 .toplist{display:flex;flex-direction:column;gap:6px}
 .toprow{display:grid;grid-template-columns:22px 1fr 72px 56px;gap:8px;align-items:center;
   font-size:12px;padding:7px 8px;
@@ -265,7 +267,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .rotate-badge.fault{color:#fca5a5;border-color:rgba(239,68,68,.45);
   background:linear-gradient(90deg,rgba(239,68,68,.14),rgba(239,68,68,.04))}
 .score-hint{font-size:10px;color:var(--dim);margin-top:6px;line-height:1.45;max-width:260px;opacity:.85}
-.topo-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px;width:100%}
+.topo-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px;width:100%;flex-shrink:0}
 .center.panel.geo-mode .topo-bg{display:none}
 #geoChart{display:none}
 .center.panel.geo-mode .topo-wrap{
@@ -276,8 +278,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .center.panel.geo-mode #geoChart{
   position:absolute;inset:0;z-index:1;width:100%;height:100%;display:block}
 .center.panel.geo-mode #topoSvg{display:none}
-#geoInset{display:none;margin-top:8px;padding:8px 10px;border:1px solid rgba(30,58,95,.45);
-  background:rgba(8,16,32,.55);border-radius:4px;max-height:88px;overflow:auto}
+#geoInset{display:none;margin-top:6px;padding:8px 10px;border:1px solid rgba(30,58,95,.45);
+  background:rgba(8,16,32,.55);border-radius:4px;max-height:72px;overflow:auto;flex-shrink:0}
 .center.panel.geo-mode #geoInset.has-inset{display:block}
 .geo-inset-title{font-size:10px;color:var(--dim);letter-spacing:.08em;margin-bottom:6px}
 .geo-inset-grid{display:flex;flex-wrap:wrap;gap:6px}
@@ -388,6 +390,7 @@ let pathsData=null;
 let geoData=null;
 let geoMapUserChoice=null;
 let geoRenderSeq=0;
+let geoViewportCache={key:'', mapMode:'', view:null};
 const CHINA_BBOX={minLon:73,maxLon:135,minLat:18,maxLat:54};
 let selectedTid=null;
 let topoMode='geo';
@@ -1055,6 +1058,22 @@ function collectGeoPoints(targets, src){
   return pts;
 }
 
+/** Viewport fit uses target + monitor-source pins only — break hops must not
+ *  zoom the map in/out when tracert data arrives on refresh. */
+function collectGeoViewportPoints(targets, src){
+  const pts=[];
+  (targets||[]).forEach(t=>{
+    if(t.geo&&t.geo.lon!=null&&t.geo.lat!=null) pts.push([t.geo.lon, t.geo.lat]);
+  });
+  if(src&&src.lon!=null&&src.lat!=null) pts.push([src.lon, src.lat]);
+  return pts;
+}
+
+function geoViewportKey(pts, mapMode){
+  const sig=(pts||[]).map(([lon,lat])=>lon.toFixed(2)+','+lat.toFixed(2)).sort().join(';');
+  return mapMode+'|'+sig;
+}
+
 function pointInChina(lon, lat){
   return lon>=CHINA_BBOX.minLon&&lon<=CHINA_BBOX.maxLon&&lat>=CHINA_BBOX.minLat&&lat<=CHINA_BBOX.maxLat;
 }
@@ -1080,6 +1099,7 @@ function resolveGeoMapMode(targets, src, tid){
 
 function setGeoMapMode(mode, btn){
   geoMapUserChoice=(geoMapUserChoice===mode)?null:mode;
+  geoViewportCache={key:'', mapMode:'', view:null};
   const effective=geoMapUserChoice||(geoData
     ? resolveGeoMapMode(mappableGeoTargets(geoData), geoData.source, selectedTid)
     : 'china');
@@ -1145,7 +1165,7 @@ function computeGeoViewport(pts, mapMode){
 
 function geoMapBox(mapMode){
   if(mapMode!=='world') return {};
-  return {left:'3.5%', top:'3.5%', right:'3.5%', bottom:'3.5%'};
+  return {left:'2%', top:'2%', right:'2%', bottom:'2%'};
 }
 
 function geoPlaceLabel(g){
@@ -1209,8 +1229,13 @@ function renderGeo(data, updateBadge=true){
     const hiddenOverseas=mapMode==='china'?overseas:[];
     syncGeoMapButtons(mapMode);
     if(geoChart) geoChart.resize();
-    const pts=collectGeoPoints(onMap, src);
-    const view=computeGeoViewport(pts, mapMode);
+    const viewPts=collectGeoViewportPoints(onMap, src);
+    const vKey=geoViewportKey(viewPts, mapMode);
+    const viewportChanged=vKey!==geoViewportCache.key||mapMode!==geoViewportCache.mapMode||!geoViewportCache.view;
+    if(viewportChanged){
+      geoViewportCache={key:vKey, mapMode, view:computeGeoViewport(viewPts, mapMode)};
+    }
+    const view=geoViewportCache.view;
     const mapBox=geoMapBox(mapMode);
     const mapName=mapMode==='china'?'china':'world';
     const symBase=mapMode==='world'?12:10;
@@ -1291,6 +1316,9 @@ function renderGeo(data, updateBadge=true){
       });
     }
     let mapHint=mapMode==='china'?'中国地图 · 省界清晰':'世界地图 · 境内外混合';
+    if(data&&data.geo_db_ready===false){
+      mapHint+=' · 缺少 ip2region 数据库（运行 python scripts/download_ip2region.py）';
+    }
     if(mapMode==='china'&&hiddenOverseas.length){
       mapHint='中国地图 · '+hiddenOverseas.length+' 个境外目标在下方（请切「世界」）';
     } else if(mapMode==='world'&&overseas.length){
@@ -1307,6 +1335,8 @@ function renderGeo(data, updateBadge=true){
         map: mapName,
         roam: true,
         ...mapBox,
+        layoutCenter: ['50%', '50%'],
+        layoutSize: mapMode==='china'?'110%':'104%',
         center: view.center,
         zoom: view.zoom,
         aspectScale: view.aspectScale,
@@ -1371,7 +1401,7 @@ function renderGeo(data, updateBadge=true){
           z: 4,
         },
       ],
-    }, true);
+    }, viewportChanged);
     chart.off('click');
     chart.on('click', params=>{
       const tid=(params.data&&params.data.tid)||null;
@@ -1390,7 +1420,7 @@ function renderGeo(data, updateBadge=true){
       ? (' · 弧线源 '+esc(src.label||src.city||'监控主机')+
          (src.loc_source==='egress_ip'?'（公网出口）':
           src.loc_source==='local_ip'?'（本机公网）':''))
-      : (' · 监控源未定位（可在全局设置手动指定，或检查网络/ip2region 数据库）');
+      : (' · 监控源未定位（内网需能访问外网查出口 IP，或手动填写；并确认 assets/ip2region_v4.xdb 已下载）');
     const mapLock=geoMapUserChoice
       ? (' · 地图已固定为「'+(geoMapUserChoice==='china'?'中国':'世界')+'」（再点同按钮恢复自动）')
       : ' · 地图随轮播在中/世界间自动切换';
