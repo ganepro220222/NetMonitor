@@ -105,21 +105,48 @@ def test_alert_path_ok_while_probe_fails():
     ]
     hops[-1]["ip"] = "221.13.0.217"
     alert = summarize_for_alert(
-        hops, ping_type="icmp", failure_reason="no_reply")
+        hops, ping_type="icmp", failure_reason="no_reply",
+        target_ip="221.13.0.217")
     display = summarize_for_display(
         hops, ping_type="icmp", failure_reason="no_reply",
-        status="red", probe_success=False)
+        status="red", probe_success=False, target_ip="221.13.0.217")
     text = alert.get("text") or ""
     ok = (
         "监测仍失败" in text
         and "ICMP 无响应" in text
-        and "路由可达" in text
-        and "无中间断点" in text
+        and "可达目标" in text
+        and "Echo 仍无响应" in text
         and "221.13.0.217" in text
+        and "路由可达" not in text
         and "路径完整" not in text
+        and alert.get("reached") is True
         and display.get("text") == text
     )
     print(f"alert path ok while probe fails -> {ok} text={text!r}")
+    return ok
+
+
+def test_alert_trace_not_reached_target():
+    """Clean trace with last hop != target must not claim route reached target."""
+    from src.trace_policy import summarize_for_alert
+
+    hops = [
+        {"hop": 1, "ip": "10.0.0.1", "status": "ok"},
+        {"hop": 2, "ip": "20.0.0.1", "status": "ok"},
+    ]
+    alert = summarize_for_alert(
+        hops, ping_type="icmp", failure_reason="no_reply",
+        target_ip="221.13.0.217")
+    text = alert.get("text") or ""
+    ok = (
+        "未确认到达目标" in text
+        and "221.13.0.217" in text
+        and "20.0.0.1" in text
+        and "路由可达" not in text
+        and "禁 ping" not in text
+        and alert.get("reached") is False
+    )
+    print(f"alert trace not reached target -> {ok} text={text!r}")
     return ok
 
 
@@ -848,9 +875,9 @@ def test_geo_xdb_foolproof_bootstrap():
     ok = (
         "def is_valid_xdb_file" in resolver
         and "def probe_xdb_file" in resolver
-        and "probe_xdb_file(p)" in resolver
-        and "probe_xdb_file(dest)" in bootstrap
-        and "probe_xdb_file(dest)" in dl
+        and "is_valid_xdb_file(p)" in resolver
+        and "is_valid_xdb_file(dest)" in bootstrap
+        and "is_valid_xdb_file(dest)" in dl
         and "def prewarm_ip2region_download_async" in bootstrap
         and "resolve_xdb_path(BASE_DIR)" in main_py
         and "prewarm_ip2region_download_async(BASE_DIR)" in main_py
@@ -864,6 +891,7 @@ def test_geo_xdb_foolproof_bootstrap():
 
 def test_xdb_corrupt_triggers_redownload():
     """A tiny corrupt ip2region_v4.xdb must not skip download/repair."""
+    import shutil
     import tempfile
     import src.geo_bootstrap as gb
     from src.geo_bootstrap import ensure_ip2region_xdb, xdb_dest_for_base
@@ -876,13 +904,17 @@ def test_xdb_corrupt_triggers_redownload():
         fh.write(b"xxx")
     assert not is_valid_xdb_file(dest)
 
+    real_xdb = os.path.join(ROOT, "assets", "ip2region_v4.xdb")
     calls = {"n": 0}
     real = gb.download_ip2region_xdb
 
     def fake_download(path, **kw):
         calls["n"] += 1
-        with open(path, "wb") as fh:
-            fh.write(b"x" * gb.MIN_XDB_BYTES)
+        if os.path.isfile(real_xdb):
+            shutil.copy2(real_xdb, path)
+        else:
+            with open(path, "wb") as fh:
+                fh.write(b"x" * gb.MIN_XDB_BYTES)
         return True
 
     gb.download_ip2region_xdb = fake_download  # type: ignore
@@ -901,7 +933,7 @@ def test_xdb_large_corrupt_triggers_redownload():
     import tempfile
     import src.geo_bootstrap as gb
     from src.geo_bootstrap import ensure_ip2region_xdb, xdb_dest_for_base
-    from src.geo_resolver import GeoResolver, MIN_XDB_BYTES, probe_xdb_file
+    from src.geo_resolver import GeoResolver, MIN_XDB_BYTES, is_valid_xdb_file, probe_xdb_file
 
     td = tempfile.mkdtemp()
     dest = xdb_dest_for_base(td)
@@ -909,6 +941,7 @@ def test_xdb_large_corrupt_triggers_redownload():
     with open(dest, "wb") as fh:
         fh.write(b"\x00" * MIN_XDB_BYTES)
     assert not probe_xdb_file(dest)
+    assert not is_valid_xdb_file(dest)
 
     real_xdb = os.path.join(ROOT, "assets", "ip2region_v4.xdb")
     calls = {"n": 0}
@@ -1135,6 +1168,7 @@ def main():
         ("summarize_break", test_summarize_break_wording()),
         ("break_kind", test_break_kind_display()),
         ("alert_path_ok", test_alert_path_ok_while_probe_fails()),
+        ("alert_not_reached", test_alert_trace_not_reached_target()),
         ("target_merge", test_target_merge_scheme_c()),
         ("overseas_coords", test_overseas_coords()),
         ("china_suffix_coords", test_china_city_suffix_coords()),

@@ -10,7 +10,7 @@ sys.path.insert(0, ROOT)
 
 import src.geo_bootstrap as gb
 from src.geo_bootstrap import ensure_ip2region_xdb, xdb_dest_for_base
-from src.geo_resolver import GeoResolver, MIN_XDB_BYTES, is_valid_xdb_file
+from src.geo_resolver import GeoResolver, MIN_XDB_BYTES, is_valid_xdb_file, probe_xdb_file
 
 
 def main() -> int:
@@ -32,12 +32,12 @@ def main() -> int:
         path = ensure_ip2region_xdb(td, allow_download=True)
         rx = GeoResolver(path)
         lookup = rx.lookup_public_ip("9.9.9.9")
-        print(f"is_valid_xdb_file {is_valid_xdb_file(dest)} size {os.path.getsize(dest)}")
+        print(f"is_valid_xdb_file {is_valid_xdb_file(dest)} probe_xdb_file {probe_xdb_file(dest)} size {os.path.getsize(dest)}")
         print(f"ensure_path {path}")
         print(f"download_calls {calls['n']}")
         print(f"xdb_loaded {rx.is_xdb_loaded()} lookup_9.9.9.9 {lookup}")
         bug = (
-            is_valid_xdb_file(dest)
+            (is_valid_xdb_file(dest) or probe_xdb_file(dest))
             and calls["n"] == 0
             and rx.is_xdb_loaded()
         )
