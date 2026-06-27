@@ -869,6 +869,23 @@ def test_render_geo_marks_topo_detail():
     return ok
 
 
+def test_geo_chart_zero_size_guard():
+    """Map controls must not render ECharts while #geoChart is hidden (0×0)."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    ok = (
+        "function isGeoChartReady()" in html
+        and "function disposeGeoChart()" in html
+        and "if(!isGeoChartReady()) return;" in html
+        and "if(topoMode!=='geo'||!geoData) return;" in html
+        and "if(topoMode==='geo'&&geoData) renderGeo(geoData,false);" in html
+        and "if(isGeoChartReady()) geoChart.resize()" in html
+        and "#centerPanel:not(.geo-mode) #btnMapChina" in html
+    )
+    print(f"geo zero-size guard -> {ok}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -903,6 +920,7 @@ def main():
         ("maphint_db", test_maphint_db_warning_order()),
         ("markscroll_root", test_mark_scrollable_includes_root()),
         ("render_geo_markscroll", test_render_geo_marks_topo_detail()),
+        ("geo_zero_guard", test_geo_chart_zero_size_guard()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

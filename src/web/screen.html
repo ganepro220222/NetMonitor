@@ -276,6 +276,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   margin-bottom:6px;width:100%;flex-shrink:0}
 .topo-toolbar-btns{display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1;min-width:0}
 .topo-toolbar-rotate{display:flex;align-items:center;gap:6px;flex-shrink:0;max-width:min(42%,360px)}
+#centerPanel:not(.geo-mode) #btnMapChina,
+#centerPanel:not(.geo-mode) #btnMapWorld,
+#centerPanel:not(.geo-mode) #btnGeoFit{display:none}
 .center.panel.geo-mode .topo-bg{display:none}
 #geoChart{display:none}
 .center.panel.geo-mode .topo-wrap{
@@ -444,7 +447,7 @@ function fitStage(){
   el.style.left=((innerWidth-1920*s)/2)+'px';
   el.style.top=((innerHeight-1080*s)/2)+'px';
 }
-addEventListener('resize',()=>{fitStage();markScrollable();if(geoChart) geoChart.resize();}); fitStage();
+addEventListener('resize',()=>{fitStage();markScrollable();if(isGeoChartReady()) geoChart.resize();}); fitStage();
 
 function markScrollable(root){
   const base=root||document;
@@ -592,14 +595,25 @@ function clearTopoPending(){
 }
 
 function setTopoMode(mode,btn){
+  const prevMode=topoMode;
   topoMode=mode;
   document.getElementById('btnTopoGeo').classList.toggle('active',mode==='geo');
   document.getElementById('btnTopoSingle').classList.toggle('active',mode==='single');
   document.getElementById('btnTopoMerged').classList.toggle('active',mode==='merged');
+  if(prevMode==='geo'&&mode!=='geo') geoRenderSeq++;
   syncCenterPanelMode();
+  if(mode==='geo'&&prevMode!=='geo') disposeGeoChart();
   if(pathsData||geoData) renderTopo(pathsData);
   syncAutoRotate();
-  if(mode==='geo') requestAnimationFrame(()=>{if(geoChart) geoChart.resize();});
+  if(mode==='geo'){
+    requestAnimationFrame(()=>{
+      requestAnimationFrame(()=>{
+        if(!isGeoChartReady()) return;
+        if(geoChart) geoChart.resize();
+        else if(geoData) renderGeo(geoData,false);
+      });
+    });
+  }
 }
 
 function toggleAutoRotate(btn){
@@ -1098,7 +1112,22 @@ function ensureGeoMaps(){
   return geoMapInitPromise;
 }
 
+function isGeoChartReady(){
+  if(topoMode!=='geo') return false;
+  const el=document.getElementById('geoChart');
+  if(!el||el.offsetWidth<=0||el.offsetHeight<=0) return false;
+  return true;
+}
+
+function disposeGeoChart(){
+  if(!geoChart) return;
+  try{geoChart.dispose();}catch(e){}
+  geoChart=null;
+  geoRoamHooked=false;
+}
+
 function initGeoChart(){
+  if(!isGeoChartReady()) return null;
   const el=document.getElementById('geoChart');
   if(!el||typeof echarts==='undefined') return null;
   if(!geoChart) geoChart=echarts.init(el);
@@ -1176,7 +1205,7 @@ function resetGeoViewport(){
   geoUserRoam=false;
   geoUserView=null;
   geoViewportCache={key:'', mapMode:'', view:null};
-  if(geoData) renderGeo(geoData,false);
+  if(topoMode==='geo'&&geoData) renderGeo(geoData,false);
 }
 
 function bindGeoRoam(chart){
@@ -1239,10 +1268,9 @@ function setGeoMapMode(mode, btn){
     : 'china');
   document.getElementById('btnMapChina').classList.toggle('active',effective==='china');
   document.getElementById('btnMapWorld').classList.toggle('active',effective==='world');
-  if(geoData){
-    renderGeo(geoData,false);
-    refreshRotateState(true);
-  }
+  if(topoMode!=='geo'||!geoData) return;
+  renderGeo(geoData,false);
+  refreshRotateState(true);
 }
 
 function syncGeoMapButtons(mode){
@@ -1353,14 +1381,17 @@ function renderGeoInset(data, extra, hiTid){
 }
 
 function renderGeo(data, updateBadge=true){
+  if(!isGeoChartReady()) return;
   const chart=initGeoChart();
   if(!chart){
-    document.getElementById('topoDetail').textContent='地图组件未加载（请检查 /vendor/）';
+    if(typeof echarts==='undefined'){
+      document.getElementById('topoDetail').textContent='地图组件未加载（请检查 /vendor/）';
+    }
     return;
   }
   const seq=++geoRenderSeq;
   ensureGeoMaps().then(()=>{
-    if(seq!==geoRenderSeq) return;
+    if(seq!==geoRenderSeq||!isGeoChartReady()) return;
     const targets=(data&&data.targets)||[];
     const src=(data&&data.source)||null;
     const mappable=targets.filter(t=>t.geo&&t.geo.lon!=null&&t.geo.lat!=null);
@@ -1370,7 +1401,7 @@ function renderGeo(data, updateBadge=true){
     const onMap=mapMode==='china'?domestic:mappable;
     const hiddenOverseas=mapMode==='china'?overseas:[];
     syncGeoMapButtons(mapMode);
-    if(geoChart) geoChart.resize();
+    if(geoChart&&isGeoChartReady()) geoChart.resize();
     bindGeoRoam(chart);
     let hi=selectedTid;
     if(!hi||!targets.find(t=>t.tid===hi)){
