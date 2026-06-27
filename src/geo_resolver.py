@@ -26,6 +26,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+# ip2region v4 on-disk size is ~11MB; reject truncated/corrupt files.
+MIN_XDB_BYTES = 1_000_000
+
+
+def is_valid_xdb_file(path: str | None) -> bool:
+    """True when *path* looks like a complete ip2region xdb (size gate only)."""
+    if not path:
+        return False
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) >= MIN_XDB_BYTES
+    except OSError:
+        return False
+
+
 # Approximate place centroids (city / province / country names from ip2region).
 _PLACE_COORDS: dict[str, tuple[float, float]] = {
     # ── 中国（省 / 市）──
@@ -667,9 +681,9 @@ class GeoResolver:
         if self._xdb is not None:
             return
         path = GeoResolver.resolve_xdb_path(None)
-        if not path and self._xdb_path and os.path.isfile(self._xdb_path):
+        if not path and self._xdb_path and is_valid_xdb_file(self._xdb_path):
             path = self._xdb_path
-        if not path or not os.path.isfile(path):
+        if not is_valid_xdb_file(path):
             return
         with self._lock:
             if self._xdb is not None or getattr(self, "_xdb_prewarm_inflight", False):
@@ -710,7 +724,7 @@ class GeoResolver:
                 "data/ip2region.xdb",
             ):
                 p = os.path.join(root, rel)
-                if os.path.isfile(p):
+                if is_valid_xdb_file(p):
                     return p
         return None
 

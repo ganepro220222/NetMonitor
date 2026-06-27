@@ -6,9 +6,7 @@ import threading
 import urllib.error
 import urllib.request
 
-from src.geo_resolver import GeoResolver
-
-MIN_XDB_BYTES = 1_000_000
+from src.geo_resolver import GeoResolver, MIN_XDB_BYTES, is_valid_xdb_file
 XDB_URLS = (
     "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ip2region_v4.xdb",
     "https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb",
@@ -53,21 +51,32 @@ def ensure_ip2region_xdb(
         force: bool = False,
 ) -> str | None:
     """Return path to ip2region xdb, downloading into assets/ when missing."""
-    existing = GeoResolver.resolve_xdb_path(base_dir)
-    if existing and os.path.isfile(existing) and not force:
-        return existing
-
-    if not allow_download or not base_dir:
-        return existing if existing and os.path.isfile(existing) else None
+    if not base_dir:
+        return GeoResolver.resolve_xdb_path(None)
 
     dest = xdb_dest_for_base(base_dir)
-    if os.path.isfile(dest) and not force:
-        return dest
-    if download_ip2region_xdb(dest):
-        return dest
-
     legacy = os.path.join(os.path.abspath(base_dir), "assets", "ip2region.xdb")
-    if os.path.isfile(legacy):
+
+    if not force:
+        if is_valid_xdb_file(dest):
+            return dest
+        if is_valid_xdb_file(legacy):
+            return legacy
+        # Only accept alternate locations when the primary dest file is absent —
+        # a corrupt dest must be repaired, not masked by another valid copy.
+        if not os.path.isfile(dest):
+            elsewhere = GeoResolver.resolve_xdb_path(base_dir)
+            if elsewhere and elsewhere not in (dest, legacy):
+                return elsewhere
+
+    if not allow_download:
+        return GeoResolver.resolve_xdb_path(base_dir)
+
+    if force or not is_valid_xdb_file(dest):
+        if download_ip2region_xdb(dest):
+            return dest
+
+    if is_valid_xdb_file(legacy):
         print(f"[ip2region] download failed; using legacy {legacy}")
         return legacy
 

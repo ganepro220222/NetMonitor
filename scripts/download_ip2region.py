@@ -16,6 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from src.geo_bootstrap import ensure_ip2region_xdb, xdb_dest_for_base
+from src.geo_resolver import is_valid_xdb_file
 
 
 def main() -> int:
@@ -24,12 +25,12 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="no output when already present")
     args = ap.parse_args()
     dest = xdb_dest_for_base(ROOT)
-    if os.path.isfile(dest) and not args.force:
+    if is_valid_xdb_file(dest) and not args.force:
         if not args.quiet:
             print(f"[ip2region] already present ({os.path.getsize(dest):,} bytes)")
         return 0
     path = ensure_ip2region_xdb(ROOT, allow_download=True, force=args.force)
-    return 0 if path and os.path.isfile(path) else 1
+    return 0 if is_valid_xdb_file(path) else 1
 
 
 if __name__ == "__main__":

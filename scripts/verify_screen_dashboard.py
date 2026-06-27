@@ -813,10 +813,16 @@ def test_geo_xdb_foolproof_bootstrap():
     """First-run: setup.bat + start.bat ensure xdb; main kicks async download."""
     main_py = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
     bootstrap = open(os.path.join(ROOT, "src", "geo_bootstrap.py"), encoding="utf-8").read()
+    resolver = open(os.path.join(ROOT, "src", "geo_resolver.py"), encoding="utf-8").read()
+    dl = open(os.path.join(ROOT, "scripts", "download_ip2region.py"), encoding="utf-8").read()
     start_bat = open(os.path.join(ROOT, "start.bat"), encoding="utf-8").read()
     setup_bat = open(os.path.join(ROOT, "setup.bat"), encoding="utf-8").read()
     ok = (
-        "def prewarm_ip2region_download_async" in bootstrap
+        "def is_valid_xdb_file" in resolver
+        and "is_valid_xdb_file(p)" in resolver
+        and "is_valid_xdb_file(dest)" in bootstrap
+        and "is_valid_xdb_file(dest)" in dl
+        and "def prewarm_ip2region_download_async" in bootstrap
         and "resolve_xdb_path(BASE_DIR)" in main_py
         and "prewarm_ip2region_download_async(BASE_DIR)" in main_py
         and "download_ip2region.py" in start_bat
@@ -824,6 +830,39 @@ def test_geo_xdb_foolproof_bootstrap():
         and "--quiet" in start_bat
     )
     print(f"geo xdb foolproof bootstrap -> {ok}")
+    return ok
+
+
+def test_xdb_corrupt_triggers_redownload():
+    """A tiny corrupt ip2region_v4.xdb must not skip download/repair."""
+    import tempfile
+    import src.geo_bootstrap as gb
+    from src.geo_bootstrap import ensure_ip2region_xdb, xdb_dest_for_base
+    from src.geo_resolver import is_valid_xdb_file
+
+    td = tempfile.mkdtemp()
+    dest = xdb_dest_for_base(td)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(b"xxx")
+    assert not is_valid_xdb_file(dest)
+
+    calls = {"n": 0}
+    real = gb.download_ip2region_xdb
+
+    def fake_download(path, **kw):
+        calls["n"] += 1
+        with open(path, "wb") as fh:
+            fh.write(b"x" * gb.MIN_XDB_BYTES)
+        return True
+
+    gb.download_ip2region_xdb = fake_download  # type: ignore
+    try:
+        path = ensure_ip2region_xdb(td, allow_download=True)
+        ok = calls["n"] == 1 and is_valid_xdb_file(path)
+    finally:
+        gb.download_ip2region_xdb = real  # type: ignore
+    print(f"xdb corrupt triggers redownload -> {ok}")
     return ok
 
 
@@ -1050,6 +1089,7 @@ def main():
         ("dns_off_path", test_geo_dns_off_request_path()),
         ("xdb_off_path", test_geo_xdb_off_request_path()),
         ("xdb_foolproof", test_geo_xdb_foolproof_bootstrap()),
+        ("xdb_corrupt", test_xdb_corrupt_triggers_redownload()),
         ("maphint_db", test_maphint_db_warning_order()),
         ("markscroll_root", test_mark_scrollable_includes_root()),
         ("render_geo_markscroll", test_render_geo_marks_topo_detail()),
