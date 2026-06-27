@@ -682,6 +682,7 @@ def test_source_guards():
         and "applyGlobeStyle" in html
         and "setGlobeStyle" in html
         and "showGlobeNodeDetail" in html
+        and "drillGlobeDetail" in html
         and "globeZoomIn" in html
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "earth-night.jpg"))
     )

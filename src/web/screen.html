@@ -1135,7 +1135,7 @@ function renderHopNode(pt, meta, layout){
 let geoChart=null;
 let geo3D=false, globe=null, globeLibPromise=null, globeReady=false;
 let globeStyle=(()=>{try{return localStorage.getItem('screenGlobeStyle')==='real'?'real':'night';}catch(e){return 'night';}})();
-let globeBordersData=null, globeZoomIn=false;
+let globeBordersData=null, globeZoomIn=false, globeDetailTid=null;
 let geoMapsReady={china:false, world:false};
 let geoMapInitPromise=null;
 
@@ -1840,14 +1840,20 @@ function onGlobeCameraEnd(){
 function showGlobeNodeDetail(tid){
   const t=((geoData&&geoData.targets)||[]).find(x=>x.tid===tid);
   const d=document.getElementById('topoDetail'); if(!t||!d) return;
+  globeDetailTid=tid;
   const col=colorForStatus(t.status);
   const stTxt=t.status==='red'?'告警':(t.status==='orange'?'警告':(t.status==='green'?'正常':'—'));
   const loc=(typeof geoPlaceLabel==='function'&&t.geo)?geoPlaceLabel(t.geo):'';
   d.innerHTML=`<div><span style="color:${col};font-weight:700">●</span> ${esc(t.label||tid)} · `+
     `<span style="color:${col}">${stTxt}</span>${loc?' · '+esc(loc):''}</div>`+
-    `<div style="margin-top:4px;font-size:11px;color:var(--dim)">已飞至该节点；点「单路径」看完整链路，点「全貌」回到全球</div>`;
+    `<div style="margin-top:6px"><button class="winbtn" onclick="drillGlobeDetail()">查看完整链路 →</button>`+
+    `<span style="margin-left:8px;font-size:11px;color:var(--dim)">点「全貌」回到全球</span></div>`;
   requestAnimationFrame(()=>markScrollable(d));
 }
+/* Drill from the globe node detail into the full single-path tracert view.
+   Reuses the existing 2D drill (drillToSinglePath) — switches to 单路径 and
+   focuses the node; returning to 地理视图 restores the globe (geo3D persists). */
+function drillGlobeDetail(){ if(globeDetailTid) drillToSinglePath(globeDetailTid); }
 function globeCameraFor(){
   if(geoMapUserChoice==='china') return {lat:34,lng:104,altitude:1.5};
   if(geoMapUserChoice==='world') return {lat:10,lng:60,altitude:2.5};
