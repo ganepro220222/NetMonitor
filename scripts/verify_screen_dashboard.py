@@ -905,6 +905,26 @@ def test_geo_viewport_setoption_merge():
     return ok
 
 
+def test_screen_data_seq_guard():
+    """loadAll/refreshPaths must ignore stale API responses when requests overlap."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    load_start = html.find("async function loadAll(")
+    refresh_start = html.find("async function refreshPaths(")
+    assert load_start >= 0 and refresh_start >= 0
+    load_block = html[load_start:html.find("function syncCenterPanelMode", load_start)]
+    refresh_block = html[refresh_start:html.find("async function refreshOverviewAndTop", refresh_start)]
+    ok = (
+        "let screenDataSeq=0" in html
+        and "const seq=++screenDataSeq" in load_block
+        and load_block.count("if(seq!==screenDataSeq) return") >= 2
+        and "const seq=++screenDataSeq" in refresh_block
+        and "if(seq!==screenDataSeq) return" in refresh_block
+    )
+    print(f"screen data seq guard -> {ok}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -941,6 +961,7 @@ def main():
         ("render_geo_markscroll", test_render_geo_marks_topo_detail()),
         ("geo_zero_guard", test_geo_chart_zero_size_guard()),
         ("geo_viewport_merge", test_geo_viewport_setoption_merge()),
+        ("screen_data_seq", test_screen_data_seq_guard()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

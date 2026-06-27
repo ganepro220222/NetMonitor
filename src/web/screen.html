@@ -411,6 +411,7 @@ let pathsData=null;
 let geoData=null;
 let geoMapUserChoice=null;
 let geoRenderSeq=0;
+let screenDataSeq=0;
 let geoViewportCache={key:'', mapMode:'', view:null};
 let geoViewportMode='overview';
 let geoUserRoam=false;
@@ -564,10 +565,12 @@ function noteDataError(map){
 }
 
 async function loadAll(){
+  const seq=++screenDataSeq;
   document.getElementById('refreshHint').textContent='刷新中...';
   try{
     const [ov,paths,top,ev,geo]=await Promise.all([
       api('overview'), api('paths'), api('topn'), api('events'), api('geo')]);
+    if(seq!==screenDataSeq) return;
     renderOverview(ov);
     pathsData=paths;
     geoData=geo;
@@ -580,6 +583,7 @@ async function loadAll(){
     document.getElementById('refreshHint').textContent=
       '更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
   }catch(e){
+    if(seq!==screenDataSeq) return;
     document.getElementById('refreshHint').textContent='加载失败';
     document.getElementById('topoDetail').textContent='加载失败: '+e.message;
   }
@@ -1958,8 +1962,10 @@ function selectPath(tid){
 }
 
 async function refreshPaths(){
+  const seq=++screenDataSeq;
   try{
     const [paths,geo]=await Promise.all([api('paths'), api('geo')]);
+    if(seq!==screenDataSeq) return;
     pathsData=paths;
     geoData=geo;
     renderTopo(pathsData);
