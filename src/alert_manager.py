@@ -628,6 +628,7 @@ class AlertManager:
                         ping_type=ping_type,
                         failure_reason=failure_reason,
                         tcp_checks=trace_snap.get("tcp_checks"),
+                        target_ip=ip,
                     )
                     signature = trace_signature_from_summary(summary)
                     last_trace_at = float(trace_snap.get("ts") or 0)
@@ -1477,6 +1478,7 @@ class AlertManager:
                 ping_type=inc.ping_type,
                 failure_reason=inc.failure_reason,
                 tcp_checks=result.get("tcp_checks"),
+                target_ip=inc.ip,
             )
             signature = trace_signature_from_summary(summary)
 

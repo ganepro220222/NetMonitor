@@ -2391,6 +2391,7 @@ class DataStore:
                                 snap.get("hops", []),
                                 ping_type=ptype,
                                 failure_reason=red_fr,
+                                target_ip=meta.get("ip") or "",
                             )
                             trace_t = _fmt_ts(snap.get("ts"))
                             chg = ("；路径较上次有变化"

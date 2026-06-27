@@ -368,6 +368,7 @@ def build_paths(web, *, window: str = "today", limit: int = 12) -> dict:
             ping_type=t.get("ping_type"),
             probe_success=t.get("probe_success"),
             failure_reason=t.get("failure_reason"),
+            target_ip=(trace or {}).get("resolve_ip") or ip,
         )
         trace_status = "none"
         if trace:
@@ -857,6 +858,7 @@ def build_geo(
         open_inc = open_map.get(tid)
         trace, _source = _read_traceroute(web, tid, ip, open_inc)
         hops = (trace or {}).get("hops") or []
+        resolve_ip = (trace or {}).get("resolve_ip") or ip
         summary = summarize_for_display(
             hops,
             tcp_checks=(trace or {}).get("tcp_checks"),
@@ -864,8 +866,8 @@ def build_geo(
             ping_type=t.get("ping_type"),
             probe_success=t.get("probe_success"),
             failure_reason=t.get("failure_reason"),
+            target_ip=resolve_ip,
         )
-        resolve_ip = (trace or {}).get("resolve_ip") or ip
         manual_geo = target_geos.get(tid) or t.get("geo")
         ptype = (t.get("ping_type") or "icmp").lower()
         probe_order = None
