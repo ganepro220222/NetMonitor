@@ -28,6 +28,8 @@ from typing import Any
 
 # ip2region v4 on-disk size is ~11MB; reject truncated/corrupt files.
 MIN_XDB_BYTES = 1_000_000
+# Stable public IPv4 that real ip2region data should resolve (Baidu CDN).
+_XDB_PROBE_IP = "220.181.38.148"
 
 
 def is_valid_xdb_file(path: str | None) -> bool:
@@ -37,6 +39,21 @@ def is_valid_xdb_file(path: str | None) -> bool:
     try:
         return os.path.isfile(path) and os.path.getsize(path) >= MIN_XDB_BYTES
     except OSError:
+        return False
+
+
+def _xdb_search_sanity(searcher: "_XdbMemorySearcher") -> bool:
+    region = searcher.search(_XDB_PROBE_IP)
+    return bool(region and "|" in region)
+
+
+def probe_xdb_file(path: str | None) -> bool:
+    """True when *path* loads and can resolve a known public IPv4 (bootstrap gate)."""
+    if not is_valid_xdb_file(path):
+        return False
+    try:
+        return _xdb_search_sanity(_XdbMemorySearcher(path))
+    except Exception:
         return False
 
 
@@ -652,14 +669,18 @@ class GeoResolver:
         self._load_xdb(self._xdb_path)
 
     def _load_xdb(self, path: str | None) -> None:
-        if path and os.path.isfile(path):
-            try:
-                self._xdb = _XdbMemorySearcher(path)
-                self._xdb_path = path
+        if not is_valid_xdb_file(path):
+            self._xdb = None
+            return
+        try:
+            sx = _XdbMemorySearcher(path)
+            if not _xdb_search_sanity(sx):
+                self._xdb = None
                 return
-            except Exception:
-                pass
-        self._xdb = None
+            self._xdb = sx
+            self._xdb_path = path
+        except Exception:
+            self._xdb = None
 
     def is_xdb_loaded(self) -> bool:
         """True when xdb is already in memory (read-only, no IO)."""
@@ -681,9 +702,9 @@ class GeoResolver:
         if self._xdb is not None:
             return
         path = GeoResolver.resolve_xdb_path(None)
-        if not path and self._xdb_path and is_valid_xdb_file(self._xdb_path):
+        if not path and self._xdb_path and probe_xdb_file(self._xdb_path):
             path = self._xdb_path
-        if not is_valid_xdb_file(path):
+        if not probe_xdb_file(path):
             return
         with self._lock:
             if self._xdb is not None or getattr(self, "_xdb_prewarm_inflight", False):
@@ -724,7 +745,7 @@ class GeoResolver:
                 "data/ip2region.xdb",
             ):
                 p = os.path.join(root, rel)
-                if is_valid_xdb_file(p):
+                if probe_xdb_file(p):
                     return p
         return None
 

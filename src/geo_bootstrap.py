@@ -6,7 +6,7 @@ import threading
 import urllib.error
 import urllib.request
 
-from src.geo_resolver import GeoResolver, MIN_XDB_BYTES, is_valid_xdb_file
+from src.geo_resolver import GeoResolver, MIN_XDB_BYTES, is_valid_xdb_file, probe_xdb_file
 XDB_URLS = (
     "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ip2region_v4.xdb",
     "https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb",
@@ -58,9 +58,9 @@ def ensure_ip2region_xdb(
     legacy = os.path.join(os.path.abspath(base_dir), "assets", "ip2region.xdb")
 
     if not force:
-        if is_valid_xdb_file(dest):
+        if probe_xdb_file(dest):
             return dest
-        if is_valid_xdb_file(legacy):
+        if probe_xdb_file(legacy):
             return legacy
         # Only accept alternate locations when the primary dest file is absent —
         # a corrupt dest must be repaired, not masked by another valid copy.
@@ -72,11 +72,11 @@ def ensure_ip2region_xdb(
     if not allow_download:
         return GeoResolver.resolve_xdb_path(base_dir)
 
-    if force or not is_valid_xdb_file(dest):
-        if download_ip2region_xdb(dest):
+    if force or not probe_xdb_file(dest):
+        if download_ip2region_xdb(dest) and probe_xdb_file(dest):
             return dest
 
-    if is_valid_xdb_file(legacy):
+    if probe_xdb_file(legacy):
         print(f"[ip2region] download failed; using legacy {legacy}")
         return legacy
 
