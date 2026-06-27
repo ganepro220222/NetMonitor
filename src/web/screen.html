@@ -312,6 +312,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .center.panel.globe-on #geoInset{display:none!important}
 .center.panel.globe-on .topo-wrap::after{display:none}
 #centerPanel:not(.geo-mode) #btnGlobe{display:none}
+#centerPanel:not(.globe-on) #btnGlobeNight,#centerPanel:not(.globe-on) #btnGlobeReal{display:none}
 .glb-tag{font:600 11px/1.2 "Segoe UI","Microsoft YaHei",sans-serif;color:#bae6fd;
   background:rgba(8,16,32,.74);border:1px solid rgba(34,211,238,.4);border-radius:3px;
   padding:1px 6px;white-space:nowrap;pointer-events:none;transform:translate(-50%,-150%);
@@ -381,6 +382,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
           <button class="winbtn" id="btnMapWorld" onclick="setGeoMapMode('world',this)">世界</button>
           <button class="winbtn" id="btnGeoFit" onclick="resetGeoViewport()" title="恢复地图全貌（清除手动缩放/聚焦）">全貌</button>
           <button class="winbtn" id="btnGlobe" onclick="toggleGlobe(this)" title="3D 地球视图（2D⇄3D 切换；中国/世界/全貌作为相机视角）">🌐 地球</button>
+          <button class="winbtn" id="btnGlobeNight" onclick="setGlobeStyle('night',this)" title="城市灯光地表 + 发光国界线">灯光</button>
+          <button class="winbtn" id="btnGlobeReal" onclick="setGlobeStyle('real',this)" title="真实地表">写实</button>
         </div>
         <div class="topo-toolbar-rotate">
           <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
@@ -1131,6 +1134,8 @@ function renderHopNode(pt, meta, layout){
 
 let geoChart=null;
 let geo3D=false, globe=null, globeLibPromise=null, globeReady=false;
+let globeStyle=(()=>{try{return localStorage.getItem('screenGlobeStyle')==='real'?'real':'night';}catch(e){return 'night';}})();
+let globeBordersData=null, globeZoomIn=false;
 let geoMapsReady={china:false, world:false};
 let geoMapInitPromise=null;
 
@@ -1245,7 +1250,7 @@ function resetGeoViewport(){
   geoUserRoam=false;
   geoUserView=null;
   geoViewportCache={key:'', mapMode:'', view:null};
-  if(geo3D){ if(globe) globe.pointOfView({lat:22,lng:60,altitude:2.4}, 900); return; }
+  if(geo3D){ globeZoomIn=false; if(globe) globe.pointOfView({lat:22,lng:60,altitude:2.4}, 900); if(geoData) renderGlobe(geoData,false); return; }
   if(topoMode==='geo'&&geoData) renderGeo(geoData,false);
 }
 
@@ -1310,7 +1315,7 @@ function setGeoMapMode(mode, btn){
   document.getElementById('btnMapChina').classList.toggle('active',effective==='china');
   document.getElementById('btnMapWorld').classList.toggle('active',effective==='world');
   if(topoMode!=='geo'||!geoData) return;
-  if(geo3D){ if(globe) globe.pointOfView(globeCameraFor(), 900); refreshRotateState(true); return; }
+  if(geo3D){ const cam=globeCameraFor(); if(globe) globe.pointOfView(cam, 900); globeZoomIn=(cam.altitude<1.6); if(geoData) renderGlobe(geoData,false); refreshRotateState(true); return; }
   renderGeo(geoData,false);
   refreshRotateState(true);
 }
@@ -1765,16 +1770,11 @@ function initGlobe(){
   if(globe) return globe;
   const el=document.getElementById('globeViz');
   globe=Globe()(el)
-    .globeImageUrl('/vendor/earth-blue-marble.jpg')
-    .bumpImageUrl('/vendor/earth-topology.png')
     .backgroundImageUrl('/vendor/night-sky.png')
     .showAtmosphere(true).atmosphereColor('#38e0ff').atmosphereAltitude(0.26)
-    .showGraticules(true)
     .pointLat('lat').pointLng('lng').pointColor('color')
       .pointAltitude('alt').pointRadius('r').pointsMerge(false)
-    .onPointClick(d=>{ if(!d) return; globePauseRotate(8000);
-      globe.pointOfView({lat:d.lat,lng:d.lng,altitude:1.3}, 800);
-      if(d.tid){ selectedTid=d.tid; if(geoData) renderGlobe(geoData,false); } })
+    .onPointClick(d=>onGlobePointClick(d))
     .htmlLat('lat').htmlLng('lng').htmlAltitude('halt')
       .htmlElement(d=>{const e=document.createElement('div');e.className='glb-tag';
         e.textContent=d.name; e.style.borderColor=d.color+'aa'; return e;})
@@ -1783,13 +1783,70 @@ function initGlobe(){
       .arcDashLength(0.45).arcDashGap(0.25).arcDashInitialGap(()=>Math.random()).arcDashAnimateTime(1600)
     .ringLat('lat').ringLng('lng')
       .ringColor(()=>(t=>'rgba(239,68,68,'+(1-t)+')'))
-      .ringMaxRadius(6).ringPropagationSpeed(2.4).ringRepeatPeriod(700);
+      .ringMaxRadius(6).ringPropagationSpeed(2.4).ringRepeatPeriod(700)
+    .pathPointLat(p=>p[1]).pathPointLng(p=>p[0]).pathColor(()=>'rgba(56,224,255,0.45)')
+      .pathStroke(0.5).pathPointAlt(0.004).pathTransitionDuration(0);
   try{globe.renderer().setClearColor(0x030712,1);}catch(e){}
   const c=globe.controls(); c.autoRotate=true; c.autoRotateSpeed=0.6;
   c.enableZoom=true; c.minDistance=180; c.maxDistance=620;
   try{ c.addEventListener('start',()=>globePauseRotate(12000)); }catch(e){}
+  try{ c.addEventListener('end',()=>onGlobeCameraEnd()); }catch(e){}
+  applyGlobeStyle(globeStyle);
   globeReady=true;
   return globe;
+}
+/* Style switch: 写实(真实地表) ⇄ 城市灯光(夜灯+发光国界线). No grid in either. */
+function applyGlobeStyle(style){
+  globeStyle=(style==='real')?'real':'night';
+  try{localStorage.setItem('screenGlobeStyle',globeStyle);}catch(e){}
+  const bn=document.getElementById('btnGlobeNight'), br=document.getElementById('btnGlobeReal');
+  if(bn) bn.classList.toggle('active',globeStyle==='night');
+  if(br) br.classList.toggle('active',globeStyle==='real');
+  if(!globe) return;
+  if(globeStyle==='real'){
+    globe.globeImageUrl('/vendor/earth-blue-marble.jpg').bumpImageUrl('/vendor/earth-topology.png').pathsData([]);
+  }else{
+    globe.globeImageUrl('/vendor/earth-night.jpg'); try{globe.bumpImageUrl(null);}catch(e){}
+    loadGlobeBorders();
+  }
+}
+function setGlobeStyle(style, btn){ applyGlobeStyle(style); }
+function loadGlobeBorders(){
+  if(!globe) return;
+  if(globeBordersData){ globe.pathsData(globeBordersData); return; }
+  fetch('/vendor/world.json').then(r=>r.ok?r.json():null).then(j=>{
+    if(!j) return; const paths=[];
+    (j.features||[]).forEach(f=>{const g=f&&f.geometry; if(!g)return;
+      const polys=g.type==='Polygon'?[g.coordinates]:(g.type==='MultiPolygon'?g.coordinates:[]);
+      polys.forEach(poly=>(poly||[]).forEach(ring=>{ if(ring&&ring.length>1) paths.push(ring); }));});
+    globeBordersData=paths; if(globe&&globeStyle==='night') globe.pathsData(paths);
+  }).catch(()=>{});
+}
+/* Click a node: fly close (spreads nearby nodes), select it, link the detail panel. */
+function onGlobePointClick(d){
+  if(!d||!globe) return;
+  globePauseRotate(8000); globeZoomIn=true;
+  globe.pointOfView({lat:d.lat,lng:d.lng,altitude:1.25}, 800);
+  if(d.tid){ selectedTid=d.tid; showGlobeNodeDetail(d.tid); }
+  if(geoData) renderGlobe(geoData,false);
+}
+/* When the camera settles, reveal all labels if zoomed in, declutter when far. */
+function onGlobeCameraEnd(){
+  if(!globe||!geo3D) return;
+  const alt=(globe.pointOfView()||{}).altitude;
+  const zoomed=(alt!=null&&alt<1.6);
+  if(zoomed!==globeZoomIn){ globeZoomIn=zoomed; if(geoData) renderGlobe(geoData,false); }
+}
+function showGlobeNodeDetail(tid){
+  const t=((geoData&&geoData.targets)||[]).find(x=>x.tid===tid);
+  const d=document.getElementById('topoDetail'); if(!t||!d) return;
+  const col=colorForStatus(t.status);
+  const stTxt=t.status==='red'?'告警':(t.status==='orange'?'警告':(t.status==='green'?'正常':'—'));
+  const loc=(typeof geoPlaceLabel==='function'&&t.geo)?geoPlaceLabel(t.geo):'';
+  d.innerHTML=`<div><span style="color:${col};font-weight:700">●</span> ${esc(t.label||tid)} · `+
+    `<span style="color:${col}">${stTxt}</span>${loc?' · '+esc(loc):''}</div>`+
+    `<div style="margin-top:4px;font-size:11px;color:var(--dim)">已飞至该节点；点「单路径」看完整链路，点「全貌」回到全球</div>`;
+  requestAnimationFrame(()=>markScrollable(d));
 }
 function globeCameraFor(){
   if(geoMapUserChoice==='china') return {lat:34,lng:104,altitude:1.5};
@@ -1807,17 +1864,22 @@ function renderGlobe(data, updateBadge=true){
     const src=(data&&data.source)||null;
     const hasSrc=src&&src.lon!=null&&src.lat!=null;
     const mappable=targets.filter(t=>t.geo&&t.geo.lon!=null&&t.geo.lat!=null);
-    const pts=[], arcs=[], rings=[];
-    if(hasSrc) pts.push({lat:src.lat,lng:src.lon,name:src.label||'监控主机',
-                         color:'#22d3ee',alt:0.06,halt:0.085,r:0.62});
+    const pts=[], arcs=[], rings=[], labelPts=[];
+    if(hasSrc){ const sp={lat:src.lat,lng:src.lon,name:src.label||'监控主机',
+                          color:'#22d3ee',alt:0.06,halt:0.085,r:0.62};
+      pts.push(sp); labelPts.push(sp); }   // monitor source always labeled
     mappable.forEach(t=>{
       const col=colorForStatus(t.status), sel=t.tid===selectedTid;
-      pts.push({lat:t.geo.lat,lng:t.geo.lon,name:t.label||t.tid,color:col,tid:t.tid,
-                alt:sel?0.06:0.035,halt:sel?0.085:0.05,r:sel?0.56:0.4});
+      const pt={lat:t.geo.lat,lng:t.geo.lon,name:t.label||t.tid,color:col,tid:t.tid,
+                alt:sel?0.06:0.035,halt:sel?0.085:0.05,r:sel?0.56:0.4};
+      pts.push(pt);
+      // declutter: only the selected node + fault(red) nodes are labeled when
+      // viewing the whole globe; flying in (globeZoomIn) reveals every label.
+      if(globeZoomIn||sel||t.status==='red') labelPts.push(pt);
       if(hasSrc) arcs.push({a:src.lat,b:src.lon,c:t.geo.lat,d:t.geo.lon,color:['#22d3ee',col]});
       if(t.status==='red') rings.push({lat:t.geo.lat,lng:t.geo.lon});
     });
-    g.pointsData(pts).htmlElementsData(pts).arcsData(arcs).ringsData(rings);
+    g.pointsData(pts).htmlElementsData(labelPts).arcsData(arcs).ringsData(rings);
     if(g.resumeAnimation) g.resumeAnimation();
     requestAnimationFrame(()=>{try{g.width(el.clientWidth); g.height(el.clientHeight);}catch(e){}});
     // NOTE: do NOT move the camera on data refresh — periodic loadAll/SSE renders

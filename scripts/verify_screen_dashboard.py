@@ -677,8 +677,13 @@ def test_source_guards():
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "earth-blue-marble.jpg"))
         # globe Phase-2: graticule, click-to-fly, interaction-aware auto-rotate
         and "globePauseRotate" in html
-        and "showGraticules" in html
         and "onPointClick" in html
+        # globe style switch (写实 ⇄ 城市灯光) + click-linked detail + label declutter
+        and "applyGlobeStyle" in html
+        and "setGlobeStyle" in html
+        and "showGlobeNodeDetail" in html
+        and "globeZoomIn" in html
+        and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "earth-night.jpg"))
     )
     print(f"source guards + wiring -> {ok}")
     return ok
