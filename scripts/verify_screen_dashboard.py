@@ -675,6 +675,10 @@ def test_source_guards():
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "globe.gl.min.js"))
         and os.path.getsize(os.path.join(ROOT, "src", "web", "vendor", "globe.gl.min.js")) > 100000
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "earth-blue-marble.jpg"))
+        # globe Phase-2: graticule, click-to-fly, interaction-aware auto-rotate
+        and "globePauseRotate" in html
+        and "showGraticules" in html
+        and "onPointClick" in html
     )
     print(f"source guards + wiring -> {ok}")
     return ok
