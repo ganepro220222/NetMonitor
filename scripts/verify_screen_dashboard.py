@@ -690,6 +690,11 @@ def test_source_guards():
         and "polygonsData" in html
         and "polygonLabel" in html
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "ne_countries.json"))
+        # Chinese country names on both the 2D world map (nameMap) and the 3D globe
+        and "CN_COUNTRY" in html
+        and "cnCountry" in html
+        and "nameMap" in html
+        and '"中国"' in html
     )
     print(f"source guards + wiring -> {ok}")
     return ok
