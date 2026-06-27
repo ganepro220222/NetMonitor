@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import urllib.error
 import urllib.request
 
@@ -13,6 +14,9 @@ XDB_URLS = (
     "https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb",
     "https://cdn.jsdelivr.net/gh/lionsoul2014/ip2region@master/data/ip2region_v4.xdb",
 )
+
+_XDB_DOWNLOAD_LOCK = threading.Lock()
+_XDB_DOWNLOAD_INFLIGHT = False
 
 
 def xdb_dest_for_base(base_dir: str) -> str:
@@ -71,3 +75,32 @@ def ensure_ip2region_xdb(
     print(f"  {dest}")
     print("  Run: python scripts/download_ip2region.py")
     return GeoResolver.resolve_xdb_path(base_dir)
+
+
+def prewarm_ip2region_download_async(base_dir: str | None) -> None:
+    """Download ip2region xdb on a background thread when missing (non-blocking)."""
+    global _XDB_DOWNLOAD_INFLIGHT
+    if not base_dir:
+        return
+    if GeoResolver.resolve_xdb_path(base_dir):
+        return
+    with _XDB_DOWNLOAD_LOCK:
+        if _XDB_DOWNLOAD_INFLIGHT:
+            return
+        if GeoResolver.resolve_xdb_path(base_dir):
+            return
+        _XDB_DOWNLOAD_INFLIGHT = True
+
+    def _run():
+        global _XDB_DOWNLOAD_INFLIGHT
+        try:
+            ensure_ip2region_xdb(base_dir, allow_download=True)
+        finally:
+            with _XDB_DOWNLOAD_LOCK:
+                _XDB_DOWNLOAD_INFLIGHT = False
+
+    threading.Thread(
+        target=_run,
+        name="ip2region-download",
+        daemon=True,
+    ).start()

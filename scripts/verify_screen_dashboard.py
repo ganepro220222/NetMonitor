@@ -545,7 +545,7 @@ def test_source_guards():
         and "allow_egress_fetch=False" in svc
         and "prewarm_monitor_source" in svc
         and "geo_db_ready" in svc
-        and "ensure_ip2region_xdb" in open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+        and "prewarm_ip2region_download_async" in open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
         and "layoutSerpentine" in html
         and "syncAutoRotate" in html
         and "break-ripple" in html
@@ -779,6 +779,24 @@ def test_geo_dns_off_request_path():
     return ok
 
 
+def test_geo_xdb_foolproof_bootstrap():
+    """First-run: setup.bat + start.bat ensure xdb; main kicks async download."""
+    main_py = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    bootstrap = open(os.path.join(ROOT, "src", "geo_bootstrap.py"), encoding="utf-8").read()
+    start_bat = open(os.path.join(ROOT, "start.bat"), encoding="utf-8").read()
+    setup_bat = open(os.path.join(ROOT, "setup.bat"), encoding="utf-8").read()
+    ok = (
+        "def prewarm_ip2region_download_async" in bootstrap
+        and "resolve_xdb_path(BASE_DIR)" in main_py
+        and "prewarm_ip2region_download_async(BASE_DIR)" in main_py
+        and "download_ip2region.py" in start_bat
+        and "download_ip2region.py" in setup_bat
+        and "--quiet" in start_bat
+    )
+    print(f"geo xdb foolproof bootstrap -> {ok}")
+    return ok
+
+
 def test_geo_xdb_off_request_path():
     """build_geo must not synchronously load ip2region xdb on /api/screen/geo."""
     import tempfile
@@ -1000,6 +1018,7 @@ def main():
         ("dns_cached", test_dns_resolution_cached()),
         ("dns_off_path", test_geo_dns_off_request_path()),
         ("xdb_off_path", test_geo_xdb_off_request_path()),
+        ("xdb_foolproof", test_geo_xdb_foolproof_bootstrap()),
         ("maphint_db", test_maphint_db_warning_order()),
         ("markscroll_root", test_mark_scrollable_includes_root()),
         ("render_geo_markscroll", test_render_geo_marks_topo_detail()),

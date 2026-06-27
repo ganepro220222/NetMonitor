@@ -21,10 +21,12 @@ from src.geo_bootstrap import ensure_ip2region_xdb, xdb_dest_for_base
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true", help="re-download even if present")
+    ap.add_argument("--quiet", action="store_true", help="no output when already present")
     args = ap.parse_args()
     dest = xdb_dest_for_base(ROOT)
     if os.path.isfile(dest) and not args.force:
-        print(f"[ip2region] already present ({os.path.getsize(dest):,} bytes)")
+        if not args.quiet:
+            print(f"[ip2region] already present ({os.path.getsize(dest):,} bytes)")
         return 0
     path = ensure_ip2region_xdb(ROOT, allow_download=True, force=args.force)
     return 0 if path and os.path.isfile(path) else 1

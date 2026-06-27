@@ -105,7 +105,7 @@ from src.alert_manager import AlertManager
 from src.logger import Logger
 from src.web_server import WebServer
 from src.geo_resolver import GeoResolver
-from src.geo_bootstrap import ensure_ip2region_xdb
+from src.geo_bootstrap import prewarm_ip2region_download_async
 from src.monitor_source_geo import prewarm_monitor_source
 
 
@@ -160,10 +160,11 @@ def main():
             config.get_setting("db_webhook_outbox_retention_days") or 90),
     )
     web.set_data_store(data_store)
-    _xdb_path = ensure_ip2region_xdb(BASE_DIR)
+    _xdb_path = GeoResolver.resolve_xdb_path(BASE_DIR)
     if not _xdb_path:
-        print("[Geo] ip2region 数据库缺失，地理大屏无法自动定位公网 IP。"
-              "请运行: python scripts/download_ip2region.py")
+        prewarm_ip2region_download_async(BASE_DIR)
+        print("[Geo] 正在后台下载 ip2region 地理库（约 11MB）；"
+              "完成前公网 IP 暂无法自动上图，大屏稍后会自动恢复。")
     monitor_geo, target_geos = config.get_screen_geo_bundle()
     _geo_resolver = GeoResolver(_xdb_path)
     web.set_screen_geo(
