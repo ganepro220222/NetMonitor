@@ -779,6 +779,49 @@ def test_geo_dns_off_request_path():
     return ok
 
 
+def test_geo_xdb_off_request_path():
+    """build_geo must not synchronously load ip2region xdb on /api/screen/geo."""
+    import tempfile
+    import time
+    import src.geo_resolver as gr
+    import src.screen_service as ss
+
+    with tempfile.NamedTemporaryFile(suffix=".xdb", delete=False) as fh:
+        fh.write(b"x" * 512)
+        fake_path = fh.name
+
+    real_init = gr._XdbMemorySearcher.__init__
+
+    def slow_init(self, db_path: str):
+        time.sleep(0.55)
+        raise ValueError("slow xdb read")
+
+    orig_resolve = gr.GeoResolver.resolve_xdb_path
+    gr._XdbMemorySearcher.__init__ = slow_init  # type: ignore[method-assign]
+    payload = {}
+    dt = 999.0
+    try:
+        missing = os.path.join(tempfile.gettempdir(), "verify_xdb_off_missing.xdb")
+        res = gr.GeoResolver(xdb_path=missing)
+        gr.GeoResolver.resolve_xdb_path = staticmethod(lambda base_dir=None: fake_path)  # type: ignore
+        w = WebServer(port=0)
+        w._running = True
+        w._geo_resolver = res
+        t0 = time.time()
+        payload = ss.build_geo(w, resolver=res)
+        dt = time.time() - t0
+        ok = dt < 0.35 and payload.get("geo_db_ready") is False
+    finally:
+        gr._XdbMemorySearcher.__init__ = real_init  # type: ignore[method-assign]
+        gr.GeoResolver.resolve_xdb_path = orig_resolve
+        try:
+            os.unlink(fake_path)
+        except OSError:
+            pass
+    print(f"geo xdb off request path -> {ok} build_geo={dt:.2f}s geo_db_ready={payload.get('geo_db_ready')}")
+    return ok
+
+
 def test_geo_source_egress_off_request_path():
     """build_geo must not block on the egress HTTP probe; it reads the cache
     and prewarms the lookup on a background thread instead."""
@@ -956,6 +999,7 @@ def main():
         ("error_fallback", test_error_fallback_no_demo()),
         ("dns_cached", test_dns_resolution_cached()),
         ("dns_off_path", test_geo_dns_off_request_path()),
+        ("xdb_off_path", test_geo_xdb_off_request_path()),
         ("maphint_db", test_maphint_db_warning_order()),
         ("markscroll_root", test_mark_scrollable_includes_root()),
         ("render_geo_markscroll", test_render_geo_marks_topo_detail()),

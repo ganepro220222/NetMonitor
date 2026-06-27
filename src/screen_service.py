@@ -923,12 +923,14 @@ def build_geo(
             prewarm_monitor_source(monitor_geo)
     else:
         src = parse_manual_geo(monitor_geo) if parse_manual_geo else None
+    if not res.is_xdb_loaded():
+        res.prewarm_xdb_async()
     map_count = sum(1 for r in rows if r.get("geo"))
     return {
         "window": window,
         "updated_at": int(time.time()),
         "source": src,
-        "geo_db_ready": res.ensure_xdb_loaded(),
+        "geo_db_ready": res.is_xdb_loaded(),
         "targets": rows,
         "inset": inset,
         "stats": {

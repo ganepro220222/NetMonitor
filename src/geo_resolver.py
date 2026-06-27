@@ -634,6 +634,7 @@ class GeoResolver:
         self._cache_ttl = 3600.0
         self._xdb: _XdbMemorySearcher | None = None
         self._xdb_path = xdb_path or self.default_xdb_path()
+        self._xdb_prewarm_inflight = False
         self._load_xdb(self._xdb_path)
 
     def _load_xdb(self, path: str | None) -> None:
@@ -646,6 +647,10 @@ class GeoResolver:
                 pass
         self._xdb = None
 
+    def is_xdb_loaded(self) -> bool:
+        """True when xdb is already in memory (read-only, no IO)."""
+        return self._xdb is not None
+
     def ensure_xdb_loaded(self) -> bool:
         """Lazy-load xdb when it appears after startup (e.g. first-run download)."""
         if self._xdb is not None:
@@ -656,6 +661,29 @@ class GeoResolver:
         elif self._xdb_path and os.path.isfile(self._xdb_path):
             self._load_xdb(self._xdb_path)
         return self._xdb is not None
+
+    def prewarm_xdb_async(self) -> None:
+        """Load xdb on a background thread; never blocks the caller."""
+        if self._xdb is not None:
+            return
+        path = GeoResolver.resolve_xdb_path(None)
+        if not path and self._xdb_path and os.path.isfile(self._xdb_path):
+            path = self._xdb_path
+        if not path or not os.path.isfile(path):
+            return
+        with self._lock:
+            if self._xdb is not None or getattr(self, "_xdb_prewarm_inflight", False):
+                return
+            self._xdb_prewarm_inflight = True
+
+        def _run():
+            try:
+                self.ensure_xdb_loaded()
+            finally:
+                with self._lock:
+                    self._xdb_prewarm_inflight = False
+
+        threading.Thread(target=_run, name="xdb-prewarm", daemon=True).start()
 
     @staticmethod
     def resolve_xdb_path(base_dir: str | None = None) -> str | None:
@@ -720,7 +748,8 @@ class GeoResolver:
             }
             self._cache_set(f"ip:{ip}", out)
             return out
-        self.ensure_xdb_loaded()
+        if self._xdb is None:
+            self.prewarm_xdb_async()
         region = None
         if self._xdb is not None:
             try:
