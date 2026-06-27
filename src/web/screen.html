@@ -29,7 +29,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:linear-gradient(180deg,transparent 0%,rgba(34,211,238,.03) 50%,transparent 100%);
   animation:stageScan 6s ease-in-out infinite}
 @keyframes stageScan{0%,100%{transform:translateY(-100%);opacity:0}45%{opacity:1}100%{transform:translateY(100%)}}
-.grid{display:grid;grid-template-columns:400px 1fr 400px;grid-template-rows:96px 1fr 188px;
+.grid{display:grid;grid-template-columns:400px 1fr 400px;grid-template-rows:minmax(96px,auto) 1fr 188px;
   gap:12px;padding:12px;height:100%;position:relative;z-index:1}
 .panel{
   --pc:var(--cyan);
@@ -172,10 +172,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 /* sweeping radar beam */
 .topo-bg::after{content:"";position:absolute;left:50%;top:50%;width:520px;height:520px;
   transform:translate(-50%,-50%);border-radius:50%;
-  background:conic-gradient(from 0deg,rgba(34,211,238,.16),transparent 22%,transparent 100%);
+  background:conic-gradient(from 0deg,rgba(34,211,238,.11),transparent 26%,transparent 100%);
   -webkit-mask:radial-gradient(circle at center,#000 56%,transparent 70%);
           mask:radial-gradient(circle at center,#000 56%,transparent 70%);
-  animation:radarSweep 7s linear infinite;opacity:.7}
+  animation:radarSweep 7s linear infinite;opacity:.42}
 @keyframes radarSweep{to{transform:translate(-50%,-50%) rotate(360deg)}}
 #topoSvg{position:relative;z-index:1;width:100%;flex:1;min-height:0;display:block;
   background:transparent;border:0}
@@ -249,6 +249,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
 .flow{stroke-dasharray:8 6;animation:flow 1.2s linear infinite}
 @keyframes flow{to{stroke-dashoffset:-28}}
+.edge-base{opacity:.45}
+.flow-comet{stroke-linecap:round;filter:drop-shadow(0 0 3px rgba(186,230,253,.7));animation:cometRun 1.5s linear infinite}
+@keyframes cometRun{to{stroke-dashoffset:-340}}
 @keyframes breakRipple{0%{transform:scale(.75);opacity:.9}100%{transform:scale(1.65);opacity:0}}
 @keyframes breakRing{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.08);opacity:.72}}
 @keyframes breakEdge{0%,100%{stroke-opacity:.85}50%{stroke-opacity:1}}
@@ -275,6 +278,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .topo-toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;
   margin-bottom:6px;width:100%;flex-shrink:0}
 .topo-toolbar-btns{display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1;min-width:0}
+.tb-div{width:1px;align-self:stretch;margin:3px 2px;flex-shrink:0;
+  background:linear-gradient(180deg,transparent,rgba(34,211,238,.4),transparent)}
+#centerPanel:not(.geo-mode) .tb-div{display:none}
 .topo-toolbar-rotate{display:flex;align-items:center;gap:6px;flex-shrink:0;max-width:min(42%,360px)}
 #centerPanel:not(.geo-mode) #btnMapChina,
 #centerPanel:not(.geo-mode) #btnMapWorld,
@@ -359,6 +365,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
           <button class="winbtn active" id="btnTopoGeo" onclick="setTopoMode('geo',this)">地理视图</button>
           <button class="winbtn" id="btnTopoSingle" onclick="setTopoMode('single',this)">单路径</button>
           <button class="winbtn" id="btnTopoMerged" onclick="setTopoMode('merged',this)">合并拓扑</button>
+          <span class="tb-div" aria-hidden="true"></span>
           <button class="winbtn active" id="btnMapChina" onclick="setGeoMapMode('china',this)">中国</button>
           <button class="winbtn" id="btnMapWorld" onclick="setGeoMapMode('world',this)">世界</button>
           <button class="winbtn" id="btnGeoFit" onclick="resetGeoViewport()" title="恢复地图全貌（清除手动缩放/聚焦）">全貌</button>
@@ -944,6 +951,19 @@ function topoEdgePath(a, b){
   const dx=b.x-a.x, dy=b.y-a.y;
   const cx=mx-dy*0.12, cy=my+dx*0.12;
   return `M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`;
+}
+
+/* One topology link. Healthy links: a calm gradient base line plus a single
+   bright comet that travels source->target (clear direction, premium feel).
+   Break/degraded links keep the coloured dashed flow — dash + colour carry the
+   alarm, so they read as "down/uncertain" at a glance. */
+function topoFlowEdge(a, b, hot, col, hotW, hotCls){
+  const d=topoEdgePath(a, b);
+  if(hot){
+    return `<path d="${d}" fill="none" stroke="${col}" stroke-width="${hotW}" opacity=".88" class="${hotCls}"/>`;
+  }
+  return `<path d="${d}" fill="none" stroke="url(#gradFlow)" stroke-width="2.4" class="edge-base"/>`+
+         `<path d="${d}" fill="none" stroke="#dff4ff" stroke-width="2.8" stroke-dasharray="20 320" class="flow-comet"/>`;
 }
 
 /** Pick break/ICMP tag side — avoid covering neighbors and viewport edges. */
@@ -1758,10 +1778,7 @@ function renderMergedTopo(data){
     if(!a||!b) return;
     const col=hopStatusColor(e.status||'ok');
     const isBreak=e.status==='break'||e.status==='after'||e.status==='red';
-    const dash=(e.status==='break'||e.status==='after')?' stroke-dasharray="6 4"':'';
-    const cls='flow'+(isBreak?' break-edge':'');
-    const edgeStroke=isBreak?col:'url(#gradFlow)';
-    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${edgeStroke}" stroke-width="${isBreak?4:2}" opacity=".75"${dash} class="${cls}"/>`;
+    html+=topoFlowEdge(a, b, isBreak, col, 4, 'flow break-edge');
   });
   layout.pts.forEach((pt,i)=>{html+=renderHopNode(pt, visuals[i], layout);});
   svg.innerHTML=html;
@@ -1912,11 +1929,13 @@ function renderSingleTopo(data, updateBadge=true){
     const isEp=nxt.breakKind==='endpoint';
     const col=isReal?'#ef4444':(isIcmp?'#f59e0b':(isEp?'#a78bfa':hopStatusColor(st)));
     const isHotEdge=isReal||isIcmp||isEp||st==='break'||st==='after';
-    const dash=(st==='break'||st==='after'||pending)?' stroke-dasharray="6 4"':'';
-    const cls='flow'+(isReal?' break-edge':(isIcmp?' icmp-edge':(pending?' pending-edge':'')));
-    const edgeStroke=isHotEdge?col:'url(#gradFlow)';
-    html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="${edgeStroke}" stroke-width="${isHotEdge?4.5:2.5}" opacity=".85"${dash} class="${cls}"/>`;
-    html+=`<circle cx="${(a.x+b.x)/2}" cy="${(a.y+b.y)/2}" r="${isHotEdge?4:2.5}" fill="${col}" opacity=".95"/>`;
+    if(isHotEdge){
+      html+=topoFlowEdge(a, b, true, col, 4.5, 'flow'+(isReal?' break-edge':(isIcmp?' icmp-edge':'')));
+    } else if(pending){
+      html+=`<path d="${topoEdgePath(a,b)}" fill="none" stroke="url(#gradFlow)" stroke-width="2.6" opacity=".8" class="flow pending-edge"/>`;
+    } else {
+      html+=topoFlowEdge(a, b, false, col, 4.5, '');
+    }
   }
 
   layout.pts.forEach((pt,i)=>{
