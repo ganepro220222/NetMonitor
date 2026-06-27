@@ -305,6 +305,17 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:rgba(8,16,32,.55);border-radius:4px;max-height:72px;overflow:auto;flex-shrink:0}
 .center.panel.geo-mode #geoInset.has-inset{display:block}
 .geo-inset-title{font-size:10px;color:var(--dim);letter-spacing:.08em;margin-bottom:6px}
+/* 3D globe (globe.gl) — twin of the 2D geo map; shares the dark/cyan theme */
+#globeViz{position:absolute;inset:0;z-index:1;display:none}
+.center.panel.globe-on #globeViz{display:block;z-index:3}
+.center.panel.globe-on #geoChart{display:none}
+.center.panel.globe-on #geoInset{display:none!important}
+.center.panel.globe-on .topo-wrap::after{display:none}
+#centerPanel:not(.geo-mode) #btnGlobe{display:none}
+.glb-tag{font:600 11px/1.2 "Segoe UI","Microsoft YaHei",sans-serif;color:#bae6fd;
+  background:rgba(8,16,32,.74);border:1px solid rgba(34,211,238,.4);border-radius:3px;
+  padding:1px 6px;white-space:nowrap;pointer-events:none;transform:translate(-50%,-150%);
+  text-shadow:0 0 6px rgba(0,0,0,.7)}
 .geo-inset-grid{display:flex;flex-wrap:wrap;gap:6px}
 .geo-inset-chip{font-size:11px;padding:4px 10px;border-radius:999px;cursor:pointer;
   border:1px solid rgba(30,58,95,.55);background:rgba(15,23,42,.65);color:#cbd5e1}
@@ -369,6 +380,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
           <button class="winbtn active" id="btnMapChina" onclick="setGeoMapMode('china',this)">中国</button>
           <button class="winbtn" id="btnMapWorld" onclick="setGeoMapMode('world',this)">世界</button>
           <button class="winbtn" id="btnGeoFit" onclick="resetGeoViewport()" title="恢复地图全貌（清除手动缩放/聚焦）">全貌</button>
+          <button class="winbtn" id="btnGlobe" onclick="toggleGlobe(this)" title="3D 地球视图（2D⇄3D 切换；中国/世界/全貌作为相机视角）">🌐 地球</button>
         </div>
         <div class="topo-toolbar-rotate">
           <button class="winbtn active" id="btnAutoRotate" onclick="toggleAutoRotate(this)">自动轮播</button>
@@ -379,6 +391,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
         <div class="topo-bg"></div>
         <div id="geoChart"></div>
         <svg id="topoSvg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg>
+        <div id="globeViz"></div>
       </div>
       <div id="geoInset"><div class="geo-inset-title">内网 / 未上图目标</div><div class="geo-inset-grid" id="geoInsetGrid"></div></div>
       <div class="topo-detail" id="topoDetail">选择节点或等待路径数据...</div>
@@ -613,6 +626,7 @@ function setTopoMode(mode,btn){
   document.getElementById('btnTopoMerged').classList.toggle('active',mode==='merged');
   if(prevMode==='geo'&&mode!=='geo') geoRenderSeq++;
   syncCenterPanelMode();
+  syncGlobeVisibility();
   if(mode==='geo'&&prevMode!=='geo') disposeGeoChart();
   if(pathsData||geoData) renderTopo(pathsData);
   syncAutoRotate();
@@ -1115,6 +1129,7 @@ function renderHopNode(pt, meta, layout){
 }
 
 let geoChart=null;
+let geo3D=false, globe=null, globeLibPromise=null, globeReady=false;
 let geoMapsReady={china:false, world:false};
 let geoMapInitPromise=null;
 
@@ -1229,6 +1244,7 @@ function resetGeoViewport(){
   geoUserRoam=false;
   geoUserView=null;
   geoViewportCache={key:'', mapMode:'', view:null};
+  if(geo3D){ if(globe) globe.pointOfView({lat:22,lng:60,altitude:2.4}, 900); return; }
   if(topoMode==='geo'&&geoData) renderGeo(geoData,false);
 }
 
@@ -1293,6 +1309,7 @@ function setGeoMapMode(mode, btn){
   document.getElementById('btnMapChina').classList.toggle('active',effective==='china');
   document.getElementById('btnMapWorld').classList.toggle('active',effective==='world');
   if(topoMode!=='geo'||!geoData) return;
+  if(geo3D){ if(globe) globe.pointOfView(globeCameraFor(), 900); refreshRotateState(true); return; }
   renderGeo(geoData,false);
   refreshRotateState(true);
 }
@@ -1405,6 +1422,7 @@ function renderGeoInset(data, extra, hiTid){
 }
 
 function renderGeo(data, updateBadge=true){
+  if(geo3D){ renderGlobe(data, updateBadge); return; }
   if(!isGeoChartReady()) return;
   const chart=initGeoChart();
   if(!chart){
@@ -1708,6 +1726,109 @@ function renderGeo(data, updateBadge=true){
   }).catch(err=>{
     document.getElementById('topoDetail').textContent='地图加载失败: '+err.message;
   });
+}
+
+/* ───────── 3D globe (globe.gl) — lazy-loaded twin of the 2D geo map ─────────
+   Reuses the same geoData (source + targets + break points) and the same status
+   palette (colorForStatus / cyan source) as the 2D map, so 2D and 3D stay
+   visually consistent. All assets live under /vendor/ (no CDN) and are bundled
+   into the exe by the spec's ('src/web/vendor', ...) datas entry. The library is
+   loaded on first activation only, so 2D-only users pay nothing for it. */
+function hasWebGL(){
+  try{const c=document.createElement('canvas');
+    return !!(window.WebGLRenderingContext&&(c.getContext('webgl')||c.getContext('experimental-webgl')));
+  }catch(e){return false;}
+}
+function ensureGlobeLib(){
+  if(globeLibPromise) return globeLibPromise;
+  globeLibPromise=new Promise((resolve,reject)=>{
+    if(window.Globe) return resolve();
+    const s=document.createElement('script');
+    s.src='/vendor/globe.gl.min.js'; s.async=true;
+    s.onload=()=>window.Globe?resolve():reject(new Error('Globe 未定义'));
+    s.onerror=()=>reject(new Error('globe.gl 加载失败'));
+    document.head.appendChild(s);
+  }).catch(err=>{globeLibPromise=null; throw err;});
+  return globeLibPromise;
+}
+function initGlobe(){
+  if(globe) return globe;
+  const el=document.getElementById('globeViz');
+  globe=Globe()(el)
+    .globeImageUrl('/vendor/earth-blue-marble.jpg')
+    .bumpImageUrl('/vendor/earth-topology.png')
+    .backgroundImageUrl('/vendor/night-sky.png')
+    .showAtmosphere(true).atmosphereColor('#22d3ee').atmosphereAltitude(0.2)
+    .pointLat('lat').pointLng('lng').pointColor('color')
+      .pointAltitude('alt').pointRadius('r').pointsMerge(false)
+    .htmlLat('lat').htmlLng('lng').htmlAltitude('halt')
+      .htmlElement(d=>{const e=document.createElement('div');e.className='glb-tag';
+        e.textContent=d.name; e.style.borderColor=d.color+'aa'; return e;})
+    .arcStartLat('a').arcStartLng('b').arcEndLat('c').arcEndLng('d').arcColor('color')
+      .arcStroke(0.55).arcAltitudeAutoScale(0.45)
+      .arcDashLength(0.45).arcDashGap(0.25).arcDashInitialGap(()=>Math.random()).arcDashAnimateTime(1600)
+    .ringLat('lat').ringLng('lng')
+      .ringColor(()=>(t=>'rgba(239,68,68,'+(1-t)+')'))
+      .ringMaxRadius(6).ringPropagationSpeed(2.4).ringRepeatPeriod(700);
+  try{globe.renderer().setClearColor(0x030712,1);}catch(e){}
+  const c=globe.controls(); c.autoRotate=true; c.autoRotateSpeed=0.5;
+  c.enableZoom=true; c.minDistance=180; c.maxDistance=620;
+  globeReady=true;
+  return globe;
+}
+function globeCameraFor(){
+  if(geoMapUserChoice==='china') return {lat:34,lng:104,altitude:1.5};
+  if(geoMapUserChoice==='world') return {lat:10,lng:60,altitude:2.5};
+  return {lat:22,lng:108,altitude:2.1};
+}
+function renderGlobe(data, updateBadge=true){
+  const el=document.getElementById('globeViz');
+  if(!el) return;
+  if(!hasWebGL()){ geo3D=false; syncGlobeVisibility(); renderGeo(data,updateBadge); return; }
+  ensureGlobeLib().then(()=>{
+    if(!geo3D||topoMode!=='geo') return;
+    const g=initGlobe();
+    const targets=(data&&data.targets)||[];
+    const src=(data&&data.source)||null;
+    const hasSrc=src&&src.lon!=null&&src.lat!=null;
+    const mappable=targets.filter(t=>t.geo&&t.geo.lon!=null&&t.geo.lat!=null);
+    const pts=[], arcs=[], rings=[];
+    if(hasSrc) pts.push({lat:src.lat,lng:src.lon,name:src.label||'监控主机',
+                         color:'#22d3ee',alt:0.06,halt:0.085,r:0.62});
+    mappable.forEach(t=>{
+      const col=colorForStatus(t.status), sel=t.tid===selectedTid;
+      pts.push({lat:t.geo.lat,lng:t.geo.lon,name:t.label||t.tid,color:col,
+                alt:sel?0.06:0.035,halt:sel?0.085:0.05,r:sel?0.56:0.4});
+      if(hasSrc) arcs.push({a:src.lat,b:src.lon,c:t.geo.lat,d:t.geo.lon,color:['#22d3ee',col]});
+      if(t.status==='red') rings.push({lat:t.geo.lat,lng:t.geo.lon});
+    });
+    g.pointsData(pts).htmlElementsData(pts).arcsData(arcs).ringsData(rings);
+    if(g.resumeAnimation) g.resumeAnimation();
+    requestAnimationFrame(()=>{try{g.width(el.clientWidth); g.height(el.clientHeight);}catch(e){}});
+    if(updateBadge) g.pointOfView(globeCameraFor(), 900);
+  }).catch(err=>{
+    const d=document.getElementById('topoDetail');
+    if(d) d.textContent='3D 地球加载失败：'+err.message+'（已回退 2D 地图）';
+    geo3D=false; syncGlobeVisibility(); renderGeo(data,updateBadge);
+  });
+}
+function syncGlobeVisibility(){
+  const on=(topoMode==='geo'&&geo3D);
+  document.getElementById('centerPanel').classList.toggle('globe-on',on);
+  const b=document.getElementById('btnGlobe'); if(b) b.classList.toggle('active',geo3D);
+  if(globe){ if(on){ if(globe.resumeAnimation) globe.resumeAnimation(); }
+             else  { if(globe.pauseAnimation)  globe.pauseAnimation();  } }
+}
+function toggleGlobe(btn){
+  if(!geo3D&&!hasWebGL()){
+    const d=document.getElementById('topoDetail');
+    if(d) d.textContent='当前环境不支持 WebGL，无法启用 3D 地球';
+    return;
+  }
+  geo3D=!geo3D;
+  if(geo3D&&topoMode!=='geo') setTopoMode('geo', document.getElementById('btnTopoGeo'));
+  syncGlobeVisibility();
+  if(geoData) renderGeo(geoData,true);
 }
 
 function renderTopo(data){

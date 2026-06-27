@@ -665,6 +665,16 @@ def test_source_guards():
         and "/api/screen/geo" in ws
         and 'route("/vendor/' in ws.replace(" ", "")
         and "src/web/vendor" in open(os.path.join(ROOT, "build_exe.spec"), encoding="utf-8").read()
+        # 3D globe (globe.gl) — twin of the 2D map; assets vendored + bundled
+        and "renderGlobe" in html
+        and "toggleGlobe" in html
+        and "btnGlobe" in html
+        and "hasWebGL" in html
+        and "globe.gl.min.js" in html
+        and "jpg|jpeg|png|webp" in ws  # /vendor route serves Earth textures
+        and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "globe.gl.min.js"))
+        and os.path.getsize(os.path.join(ROOT, "src", "web", "vendor", "globe.gl.min.js")) > 100000
+        and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "earth-blue-marble.jpg"))
     )
     print(f"source guards + wiring -> {ok}")
     return ok

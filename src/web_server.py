@@ -7341,12 +7341,14 @@ class WebServer:
 
         @app.route("/vendor/<path:name>")
         def screen_vendor(name):
-            """Self-hosted ECharts + China GeoJSON for /screen (no CDN)."""
+            """Self-hosted assets for /screen — ECharts + GeoJSON (2D map) and
+            globe.gl + Earth textures (3D globe). No CDN; all bundled in the exe
+            via the spec's ('src/web/vendor', ...) datas entry."""
             import pathlib
             from flask import send_file
             safe = pathlib.PurePosixPath(name).name
             if safe != name or not re.match(
-                    r"^[a-zA-Z0-9_.-]+\.(js|json|map)$", safe):
+                    r"^[a-zA-Z0-9_.-]+\.(js|json|map|jpg|jpeg|png|webp)$", safe):
                 return "", 404
             fp = (pathlib.Path(__file__).parent / "web" / "vendor" / safe).resolve()
             base = fp.parent.resolve()
@@ -7356,7 +7358,10 @@ class WebServer:
                 return "", 404
             if not fp.is_file():
                 return "", 404
-            mt = "application/json" if safe.endswith(".json") else "application/javascript"
+            _MT = {".json": "application/json", ".js": "application/javascript",
+                   ".map": "application/json", ".jpg": "image/jpeg",
+                   ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+            mt = _MT.get(fp.suffix.lower(), "application/octet-stream")
             return send_file(fp, mimetype=mt, max_age=86400)
 
         def _screen_demo():
