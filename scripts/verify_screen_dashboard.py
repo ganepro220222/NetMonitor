@@ -1193,6 +1193,35 @@ def test_overview_fresh_refresh():
     return ok
 
 
+def test_world_geo_hover_country_label():
+    """2D world map must show Chinese country name on region hover."""
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    block = html[html.find("function renderGeo("):html.find("/* ───────── 3D globe", html.find("function renderGeo("))]
+    ok = (
+        "mapMode==='world'?{" in block
+        and "show:true" in block
+        and "formatter: p=>cnCountry(p.name)" in block
+        and "return esc(cnCountry(p.name)" in block
+    )
+    print(f"world geo hover country label -> {ok}")
+    return ok
+
+
+def test_globe_dynamic_data_guard():
+    """3D globe must skip points/arcs refresh when poll data is unchanged."""
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    block = html[html.find("function renderGlobe("):html.find("function syncGlobeVisibility", html.find("function renderGlobe("))]
+    ok = (
+        "function globeDynamicSig" in html
+        and "g.__dynSig!==dynSig" in block
+        and "g.__dynSig=dynSig" in block
+        and block.count("pointsData(pts)") == 1
+        and "resumeAnimation" not in block
+    )
+    print(f"globe dynamic data guard -> {ok}")
+    return ok
+
+
 def test_screen_data_seq_guard():
     """loadAll/refreshLivePanels must ignore stale API responses when requests overlap."""
     html_path = os.path.join(ROOT, "src", "web", "screen.html")
@@ -1259,6 +1288,8 @@ def main():
         ("screen_data_seq", test_screen_data_seq_guard()),
         ("counts_hint_orange", test_counts_hint_includes_orange()),
         ("overview_fresh", test_overview_fresh_refresh()),
+        ("world_geo_label", test_world_geo_hover_country_label()),
+        ("globe_dyn_guard", test_globe_dynamic_data_guard()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),
