@@ -405,6 +405,36 @@ def test_geo_resolver():
     return ok
 
 
+def test_monitor_geo_persists_reload():
+    """settings.monitor_geo must survive ConfigManager reload (_sanitize_settings)."""
+    import json
+    import tempfile
+    from src.config_manager import ConfigManager
+
+    td = tempfile.mkdtemp()
+    path = os.path.join(td, "config.json")
+    geo = {"lat": 39.9042, "lon": 116.4074, "label": "Office", "city": "北京"}
+    cm = ConfigManager(path)
+    cm.set_monitor_geo(geo)
+    with open(path, encoding="utf-8") as fh:
+        saved = json.load(fh)["settings"].get("monitor_geo")
+    cm2 = ConfigManager(path)
+    mg, _ = cm2.get_screen_geo_bundle()
+    ok = (
+        saved
+        and saved.get("lat") == geo["lat"]
+        and mg is not None
+        and mg.get("lat") == geo["lat"]
+        and mg.get("lon") == geo["lon"]
+    )
+    cm2.set_monitor_geo(None)
+    cm3 = ConfigManager(path)
+    mg3, _ = cm3.get_screen_geo_bundle()
+    ok = ok and mg3 is None
+    print(f"monitor_geo persists reload -> {ok}")
+    return ok
+
+
 def test_demo_geo_shape():
     d = demo_geo()
     ok = (
@@ -996,6 +1026,7 @@ def main():
         ("overseas_coords", test_overseas_coords()),
         ("china_suffix_coords", test_china_city_suffix_coords()),
         ("geo_resolver", test_geo_resolver()),
+        ("monitor_geo_reload", test_monitor_geo_persists_reload()),
         ("geo_ui_fields", test_build_manual_geo_from_fields()),
         ("monitor_source", test_monitor_source_geo()),
         ("resolve_probe", test_resolve_probe_ipv4()),

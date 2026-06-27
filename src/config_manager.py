@@ -436,7 +436,10 @@ DEFAULT_CONFIG = {
         # 是否启用声音告警（关闭后只静音；颜色变化、桌面通知、
         # webhook 仍照常推送）。新增于 sound-persistence 修复以前
         # 没有这个 key 的配置文件，仍然按默认 True 处理。
-        "sound_alert_enabled": True
+        "sound_alert_enabled": True,
+
+        # 地理大屏 · 监控源位置（手动 lat/lon；None = 自动探测出口 IP）
+        "monitor_geo": None,
     }
 }
 
