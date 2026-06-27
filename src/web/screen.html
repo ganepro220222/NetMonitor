@@ -557,9 +557,10 @@ function setWindow(w,btn){
   loadAll();
 }
 
-function api(path){
+function api(path, opts){
   const q=DEMO?'&demo=1':'';
-  return fetch('/api/screen/'+path+'?window='+encodeURIComponent(WINDOW)+q)
+  const fresh=(opts&&opts.fresh)?'&fresh=1':'';
+  return fetch('/api/screen/'+path+'?window='+encodeURIComponent(WINDOW)+q+fresh)
     .then(r=>r.json());
 }
 
@@ -861,7 +862,7 @@ function renderOverview(ov){
   healthRing.style.setProperty('--arc',healthCol);
   healthRing.style.setProperty('--pct',Math.max(0,Math.min(1,healthScore/10)));
   document.getElementById('countsHint').textContent=
-    `节点 ${c.targets||0} · 正常 ${c.green||0} · 告警 ${c.red||0} · 未恢复 ${ov.open_incidents||0}`;
+    `节点 ${c.targets||0} · 正常 ${c.green||0} · 警告 ${c.orange||0} · 告警 ${c.red||0} · 未恢复 ${ov.open_incidents||0}`;
   document.getElementById('riskStats').innerHTML=[
     ['正常','green',c.green],['警告','orange',c.orange],['告警','red',c.red],
     ['Webhook失败','orange',ov.webhook_failures||0]
@@ -2101,26 +2102,28 @@ function selectPath(tid){
   focusPath(tid,{pauseMs:ROTATE.manualPauseMs,render:true});
 }
 
-async function refreshPaths(){
+async function refreshLivePanels(){
   const seq=++screenDataSeq;
   try{
-    const [paths,geo]=await Promise.all([api('paths'), api('geo')]);
+    const [paths,geo,ov,top]=await Promise.all([
+      api('paths'), api('geo'), api('overview',{fresh:true}), api('topn')]);
     if(seq!==screenDataSeq) return;
     pathsData=paths;
     geoData=geo;
+    renderOverview(ov);
     renderTopo(pathsData);
     refreshRotateState(false);
-    noteDataError({paths:paths, geo:geo});
+    renderTop(top);
+    noteDataError({paths:paths, geo:geo, overview:ov, topn:top});
   }catch(_){}
 }
 
+async function refreshPaths(){
+  return refreshLivePanels();
+}
+
 async function refreshOverviewAndTop(){
-  try{
-    const [ov,top]=await Promise.all([api('overview'), api('topn')]);
-    renderOverview(ov);
-    renderTop(top);
-    noteDataError({overview:ov, topn:top});
-  }catch(_){}
+  return refreshLivePanels();
 }
 
 function renderTop(top){
@@ -2184,16 +2187,14 @@ function connectSSE(){
       if(m.type==='trace_break'){
         clearTimeout(debPaths);
         debPaths=setTimeout(()=>{
-          refreshPaths().then(()=>onTraceFaultSSE(m));
-          refreshOverviewAndTop();
+          refreshLivePanels().then(()=>onTraceFaultSSE(m));
         },400);
         return;
       }
       if(m.type==='trace_heal'){
         clearTimeout(debPaths);
         debPaths=setTimeout(()=>{
-          refreshPaths().then(()=>onTraceHealSSE(m));
-          refreshOverviewAndTop();
+          refreshLivePanels().then(()=>onTraceHealSSE(m));
           api('events').then(renderEvents).catch(()=>{});
         },400);
         return;
@@ -2201,8 +2202,7 @@ function connectSSE(){
       if(m.type==='route_changed'){
         clearTimeout(debPaths);
         debPaths=setTimeout(()=>{
-          refreshPaths().then(()=>onRouteChangedSSE(m));
-          refreshOverviewAndTop();
+          refreshLivePanels().then(()=>onRouteChangedSSE(m));
           api('events').then(renderEvents).catch(()=>{});
         },400);
         return;

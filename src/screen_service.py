@@ -423,12 +423,14 @@ def build_paths(web, *, window: str = "today", limit: int = 12) -> dict:
 
 
 def build_overview(web, *, window: str = "today",
-                   uptime_days: float | None = None) -> dict:
+                   uptime_days: float | None = None,
+                   fresh: bool = False) -> dict:
     cache_key = ("overview", id(web), window)
     ttl = _CACHE_TTL.get(window, 30.0)
-    cached = _cache_get(cache_key, ttl)
-    if cached is not None:
-        return cached
+    if not fresh:
+        cached = _cache_get(cache_key, ttl)
+        if cached is not None:
+            return cached
 
     with web._lock:
         targets = list(web._live_targets_snapshot())

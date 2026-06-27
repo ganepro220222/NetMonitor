@@ -1151,15 +1151,37 @@ def test_geo_viewport_setoption_merge():
     return ok
 
 
+def test_counts_hint_includes_orange():
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    ok = "警告 ${c.orange||0}" in html or "警告 ${c.orange" in html
+    print(f"counts hint includes orange -> {ok}")
+    return ok
+
+
+def test_overview_fresh_refresh():
+    """Live panel refresh must bypass overview TTL and fetch with geo/paths."""
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    svc = open(os.path.join(ROOT, "src", "screen_service.py"), encoding="utf-8").read()
+    ws = open(os.path.join(ROOT, "src", "web_server.py"), encoding="utf-8").read()
+    ok = (
+        "async function refreshLivePanels" in html
+        and "api('overview',{fresh:true})" in html
+        and "fresh: bool = False" in svc
+        and 'request.args.get("fresh")' in ws
+    )
+    print(f"overview fresh refresh -> {ok}")
+    return ok
+
+
 def test_screen_data_seq_guard():
-    """loadAll/refreshPaths must ignore stale API responses when requests overlap."""
+    """loadAll/refreshLivePanels must ignore stale API responses when requests overlap."""
     html_path = os.path.join(ROOT, "src", "web", "screen.html")
     html = open(html_path, encoding="utf-8").read()
     load_start = html.find("async function loadAll(")
-    refresh_start = html.find("async function refreshPaths(")
+    refresh_start = html.find("async function refreshLivePanels(")
     assert load_start >= 0 and refresh_start >= 0
     load_block = html[load_start:html.find("function syncCenterPanelMode", load_start)]
-    refresh_block = html[refresh_start:html.find("async function refreshOverviewAndTop", refresh_start)]
+    refresh_block = html[refresh_start:html.find("async function refreshPaths", refresh_start)]
     ok = (
         "let screenDataSeq=0" in html
         and "const seq=++screenDataSeq" in load_block
@@ -1215,6 +1237,8 @@ def main():
         ("geo_zero_guard", test_geo_chart_zero_size_guard()),
         ("geo_viewport_merge", test_geo_viewport_setoption_merge()),
         ("screen_data_seq", test_screen_data_seq_guard()),
+        ("counts_hint_orange", test_counts_hint_includes_orange()),
+        ("overview_fresh", test_overview_fresh_refresh()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

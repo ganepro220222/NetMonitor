@@ -7378,7 +7378,9 @@ class WebServer:
                 return json.dumps(ss.demo_overview(), ensure_ascii=False), 200, {
                     "Content-Type": "application/json"}
             try:
-                payload = ss.build_overview(self, window=window)
+                fresh = (request.args.get("fresh") or "").strip().lower() in (
+                    "1", "true", "yes")
+                payload = ss.build_overview(self, window=window, fresh=fresh)
             except Exception as e:
                 logging.getLogger(__name__).warning("[screen/overview] %s", e)
                 # Degrade to an empty skeleton (NOT demo data) so a real
