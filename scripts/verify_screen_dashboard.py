@@ -685,6 +685,11 @@ def test_source_guards():
         and "drillGlobeDetail" in html
         and "globeZoomIn" in html
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "earth-night.jpg"))
+        # globe country hover: highlight + name + pause auto-rotate (Natural Earth polys)
+        and "onGlobePolyHover" in html
+        and "polygonsData" in html
+        and "polygonLabel" in html
+        and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "ne_countries.json"))
     )
     print(f"source guards + wiring -> {ok}")
     return ok

@@ -1135,7 +1135,7 @@ function renderHopNode(pt, meta, layout){
 let geoChart=null;
 let geo3D=false, globe=null, globeLibPromise=null, globeReady=false;
 let globeStyle=(()=>{try{return localStorage.getItem('screenGlobeStyle')==='real'?'real':'night';}catch(e){return 'night';}})();
-let globeBordersData=null, globeZoomIn=false, globeDetailTid=null;
+let globeBordersData=null, globeZoomIn=false, globeDetailTid=null, globeHoverPoly=null;
 let geoMapsReady={china:false, world:false};
 let geoMapInitPromise=null;
 
@@ -1763,7 +1763,7 @@ function globePauseRotate(ms){
   globe.controls().autoRotate=false;
   clearTimeout(globe.__rotTimer);
   globe.__rotTimer=setTimeout(()=>{
-    if(globe&&geo3D&&topoMode==='geo') globe.controls().autoRotate=true;
+    if(globe&&geo3D&&topoMode==='geo'&&!globeHoverPoly) globe.controls().autoRotate=true;
   }, ms||6000);
 }
 function initGlobe(){
@@ -1784,13 +1784,23 @@ function initGlobe(){
     .ringLat('lat').ringLng('lng')
       .ringColor(()=>(t=>'rgba(239,68,68,'+(1-t)+')'))
       .ringMaxRadius(6).ringPropagationSpeed(2.4).ringRepeatPeriod(700)
-    .pathPointLat(p=>p[1]).pathPointLng(p=>p[0]).pathColor(()=>'rgba(56,224,255,0.45)')
-      .pathStroke(0.5).pathPointAlt(0.004).pathTransitionDuration(0);
+    .polygonsTransitionDuration(0)
+    .polygonCapColor(d=>d===globeHoverPoly?'rgba(56,224,255,0.22)':'rgba(0,0,0,0)')
+    .polygonSideColor(()=>'rgba(0,0,0,0)')
+    .polygonStrokeColor(()=>'rgba(56,224,255,0.4)')
+    .polygonAltitude(d=>d===globeHoverPoly?0.012:0.005)
+    .polygonLabel(d=>{const n=(d.properties||{}).name||'';
+      return n?`<div style="font:600 12px/1.3 'Segoe UI','Microsoft YaHei',sans-serif;color:#bae6fd;background:rgba(8,16,32,.85);border:1px solid rgba(56,224,255,.5);border-radius:3px;padding:2px 8px">${esc(n)}</div>`:'';})
+    .onPolygonHover(d=>onGlobePolyHover(d));
   try{globe.renderer().setClearColor(0x030712,1);}catch(e){}
   const c=globe.controls(); c.autoRotate=true; c.autoRotateSpeed=0.6;
   c.enableZoom=true; c.minDistance=180; c.maxDistance=620;
   try{ c.addEventListener('start',()=>globePauseRotate(12000)); }catch(e){}
   try{ c.addEventListener('end',()=>onGlobeCameraEnd()); }catch(e){}
+  // onPolygonHover doesn't fire when the cursor leaves the canvas entirely —
+  // clear the hover (and resume rotation) when the mouse exits the globe area.
+  try{ el.addEventListener('mouseleave',()=>onGlobePolyHover(null)); }catch(e){}
+  loadGlobeCountries();
   applyGlobeStyle(globeStyle);
   globeReady=true;
   return globe;
@@ -1804,23 +1814,35 @@ function applyGlobeStyle(style){
   if(br) br.classList.toggle('active',globeStyle==='real');
   if(!globe) return;
   if(globeStyle==='real'){
-    globe.globeImageUrl('/vendor/earth-blue-marble.jpg').bumpImageUrl('/vendor/earth-topology.png').pathsData([]);
+    globe.globeImageUrl('/vendor/earth-blue-marble.jpg').bumpImageUrl('/vendor/earth-topology.png');
   }else{
     globe.globeImageUrl('/vendor/earth-night.jpg'); try{globe.bumpImageUrl(null);}catch(e){}
-    loadGlobeBorders();
   }
+  // Country borders visible only in 城市灯光; both styles keep the polygon layer
+  // so hover-highlight + country name work either way (写实 just hides the stroke).
+  globe.polygonStrokeColor(()=> globeStyle==='real'?'rgba(0,0,0,0)':'rgba(56,224,255,0.4)');
 }
 function setGlobeStyle(style, btn){ applyGlobeStyle(style); }
-function loadGlobeBorders(){
+/* Country polygons (Natural Earth) — borders + hover-highlight + country name.
+   Uses ne_countries.json (clean dataset); the ECharts world.json crashes the
+   globe.gl polygon layer (degenerate rings -> d3-geo). Loaded once for both styles. */
+function loadGlobeCountries(){
   if(!globe) return;
-  if(globeBordersData){ globe.pathsData(globeBordersData); return; }
-  fetch('/vendor/world.json').then(r=>r.ok?r.json():null).then(j=>{
-    if(!j) return; const paths=[];
-    (j.features||[]).forEach(f=>{const g=f&&f.geometry; if(!g)return;
-      const polys=g.type==='Polygon'?[g.coordinates]:(g.type==='MultiPolygon'?g.coordinates:[]);
-      polys.forEach(poly=>(poly||[]).forEach(ring=>{ if(ring&&ring.length>1) paths.push(ring); }));});
-    globeBordersData=paths; if(globe&&globeStyle==='night') globe.pathsData(paths);
+  if(globeBordersData){ globe.polygonsData(globeBordersData); return; }
+  fetch('/vendor/ne_countries.json').then(r=>r.ok?r.json():null).then(j=>{
+    if(!j) return;
+    globeBordersData=(j.features||[]).filter(f=>f&&f.geometry);
+    if(globe) globe.polygonsData(globeBordersData);
   }).catch(()=>{});
+}
+/* Hover a country: highlight it + show its name (polygonLabel) + pause auto-rotate;
+   leaving resumes rotation. Mirrors the 2D map's hover behaviour. */
+function onGlobePolyHover(d){
+  globeHoverPoly=d||null;
+  if(!globe) return;
+  globe.polygonCapColor(p=>p===globeHoverPoly?'rgba(56,224,255,0.22)':'rgba(0,0,0,0)')
+       .polygonAltitude(p=>p===globeHoverPoly?0.012:0.005);
+  globe.controls().autoRotate = !globeHoverPoly;
 }
 /* Click a node: fly close (spreads nearby nodes), select it, link the detail panel. */
 function onGlobePointClick(d){
