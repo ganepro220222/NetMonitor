@@ -886,6 +886,25 @@ def test_geo_chart_zero_size_guard():
     return ok
 
 
+def test_geo_viewport_setoption_merge():
+    """Viewport changes must merge setOption; notMerge caused wrong geo scale on map switch."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    start = html.find("function renderGeo(")
+    assert start >= 0, "renderGeo missing"
+    block = html[start:start + 32000]
+    set_pos = block.rfind("chart.setOption({")
+    assert set_pos >= 0, "renderGeo setOption missing"
+    tail = block[set_pos:set_pos + 8000]
+    ok = (
+        "}, false);" in tail
+        and "viewportChanged&&!geoUserRoam);" not in tail
+        and "if(viewportChanged&&!geoUserRoam)" in tail
+    )
+    print(f"geo viewport setOption merge -> {ok}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -921,6 +940,7 @@ def main():
         ("markscroll_root", test_mark_scrollable_includes_root()),
         ("render_geo_markscroll", test_render_geo_marks_topo_detail()),
         ("geo_zero_guard", test_geo_chart_zero_size_guard()),
+        ("geo_viewport_merge", test_geo_viewport_setoption_merge()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

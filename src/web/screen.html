@@ -1637,7 +1637,13 @@ function renderGeo(data, updateBadge=true){
           z: 5,
         },
       ],
-    }, viewportChanged&&!geoUserRoam);
+    }, false);
+    if(viewportChanged&&!geoUserRoam){
+      requestAnimationFrame(()=>{
+        if(seq!==geoRenderSeq||!isGeoChartReady()) return;
+        geoChart.resize();
+      });
+    }
     chart.off('click');
     chart.on('click', params=>{
       const tid=(params.data&&params.data.tid)||null;
