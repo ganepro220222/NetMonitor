@@ -286,6 +286,41 @@ def classify_path_break(hops: list | None, *,
     }
 
 
+def _path_ok_hop_suffix(base: dict) -> str:
+    """Compact hop tail for path-complete summaries, e.g. （共6跳→221.13.0.217）."""
+    total = int(base.get("total_hops") or 0)
+    last_ok = base.get("last_ok") or {}
+    ip = last_ok.get("ip")
+    if total and ip:
+        return f"（共{total}跳→{ip}）"
+    if total:
+        return f"（共{total}跳）"
+    return ""
+
+
+def format_path_ok_while_probe_fails(
+        base: dict,
+        *,
+        ping_type: str | None,
+        failure_reason: str | None,
+) -> str:
+    """Webhook / screen copy when traceroute is clean but the probe is still red."""
+    detail = describe_failure(failure_reason)
+    if not detail:
+        detail = f"{ping_type_label(ping_type)}探测失败"
+    pt = (ping_type or "icmp").strip().lower()
+    if pt == "icmp":
+        hint = "疑禁 ping 或 ICMP 策略"
+    elif pt == "tcp":
+        hint = "疑端口/服务问题，非路由断点"
+    else:
+        hint = "疑探测层与路由层不一致"
+    suffix = _path_ok_hop_suffix(base)
+    return (
+        f"监测仍失败（{detail}）；路由可达、无中间断点{suffix}。{hint}"
+    )
+
+
 def _service_hint(cls: dict, ping_type: str | None,
                   tcp_checks: list | None) -> str:
     hint = cls.get("hint")
@@ -328,6 +363,12 @@ def summarize_for_display(hops: list, *,
     base["service_ok"] = cls.get("service_ok")
 
     if kind == "none":
+        if (status or "").strip().lower() == "red" and not cls.get("service_ok"):
+            base["text"] = format_path_ok_while_probe_fails(
+                base,
+                ping_type=ping_type,
+                failure_reason=failure_reason,
+            )
         return base
 
     break_at = base.get("break_at")
@@ -372,18 +413,29 @@ def summarize_for_alert(hops: list, *,
     )
 
     if cls["break_kind"] == "icmp_filtered":
+        hint = _service_hint(cls, ping_type, tcp_checks)
         text = (
-            "目标可能过滤 ICMP，traceroute 显示的断点不一定代表服务中断"
-            f"{_service_hint(cls, ping_type, tcp_checks)}。"
+            f"监测仍失败（{describe_failure(failure_reason) or '探测失败'}）；"
+            f"traceroute 某跳后 ICMP 不可见{hint}，不等于路径故障"
         )
-        if base.get("text"):
-            text = f"{text} 原始：{base['text']}"
         return {
             **base,
             "text": text,
             "icmp_filtered": True,
             "break_at": None,
         }
+
+    if cls["break_kind"] == "none":
+        base["text"] = format_path_ok_while_probe_fails(
+            base,
+            ping_type=ping_type,
+            failure_reason=failure_reason,
+        )
+
+    elif cls["break_kind"] == "real" and base.get("text"):
+        base["text"] = (
+            f"{base['text']}（辅助端口检测也不通，疑似真实路径问题）"
+        )
 
     return base
 

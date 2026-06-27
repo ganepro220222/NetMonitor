@@ -95,6 +95,34 @@ def test_break_kind_display():
     return ok
 
 
+def test_alert_path_ok_while_probe_fails():
+    """Red probe + clean traceroute must not read like the outage is false."""
+    from src.trace_policy import summarize_for_alert, summarize_for_display
+
+    hops = [
+        {"hop": i, "ip": f"10.0.0.{i}", "status": "ok"}
+        for i in range(1, 7)
+    ]
+    hops[-1]["ip"] = "221.13.0.217"
+    alert = summarize_for_alert(
+        hops, ping_type="icmp", failure_reason="no_reply")
+    display = summarize_for_display(
+        hops, ping_type="icmp", failure_reason="no_reply",
+        status="red", probe_success=False)
+    text = alert.get("text") or ""
+    ok = (
+        "监测仍失败" in text
+        and "ICMP 无响应" in text
+        and "路由可达" in text
+        and "无中间断点" in text
+        and "221.13.0.217" in text
+        and "路径完整" not in text
+        and display.get("text") == text
+    )
+    print(f"alert path ok while probe fails -> {ok} text={text!r}")
+    return ok
+
+
 def test_merged_graph():
     paths = [
         {"tid": "A", "label": "A", "status": "green", "hops": [
@@ -1106,6 +1134,7 @@ def main():
         ("scores", test_score_helpers()),
         ("summarize_break", test_summarize_break_wording()),
         ("break_kind", test_break_kind_display()),
+        ("alert_path_ok", test_alert_path_ok_while_probe_fails()),
         ("target_merge", test_target_merge_scheme_c()),
         ("overseas_coords", test_overseas_coords()),
         ("china_suffix_coords", test_china_city_suffix_coords()),
