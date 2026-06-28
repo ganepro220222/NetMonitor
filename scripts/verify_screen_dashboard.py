@@ -695,6 +695,10 @@ def test_source_guards():
         and "cnCountry" in html
         and "nameMap" in html
         and '"中国"' in html
+        # globe perf: cap render resolution on extreme DPI + pause when hidden
+        and "setPixelRatio" in html
+        and "visibilitychange" in html
+        and "webglcontextlost" in html
     )
     print(f"source guards + wiring -> {ok}")
     return ok

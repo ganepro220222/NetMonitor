@@ -1861,6 +1861,19 @@ function initGlobe(){
       return n?`<div style="font:600 12px/1.3 'Segoe UI','Microsoft YaHei',sans-serif;color:#bae6fd;background:rgba(8,16,32,.85);border:1px solid rgba(56,224,255,.5);border-radius:3px;padding:2px 8px">${esc(n)}</div>`:'';})
     .onPolygonHover(d=>onGlobePolyHover(d));
   try{globe.renderer().setClearColor(0x030712,1);}catch(e){}
+  // Cap render resolution: DPR ≤ 2 is untouched (identical quality on normal,
+  // retina and standard 4K@100% screens); only extreme high-DPI (>2, e.g. 5K/8K
+  // or 4K at high OS scaling) is clamped to 2 to avoid runaway GPU on a 24/7
+  // screen. No visible change for the vast majority of displays.
+  try{globe.renderer().setPixelRatio(Math.min(window.devicePixelRatio||1, 2));}catch(e){}
+  // Recover gracefully if the GPU drops the WebGL context (driver reset, etc.):
+  // dormant in normal use; only fires on an actual context loss, which would
+  // otherwise leave the globe permanently blank.
+  try{const gcv=globe.renderer().domElement;
+    gcv.addEventListener('webglcontextlost',e=>e.preventDefault(),false);
+    gcv.addEventListener('webglcontextrestored',()=>{try{applyGlobeStyle(globeStyle);
+      if(geoData) renderGlobe(geoData,false);}catch(_){}},false);
+  }catch(e){}
   const c=globe.controls(); c.autoRotate=true; c.autoRotateSpeed=0.6;
   c.enableZoom=true; c.minDistance=180; c.maxDistance=620;
   try{ c.addEventListener('start',()=>globePauseRotate(12000)); }catch(e){}
@@ -2039,6 +2052,14 @@ function syncGlobeVisibility(){
   if(globe){ if(on){ if(globe.resumeAnimation) globe.resumeAnimation(); }
              else  { if(globe.pauseAnimation)  globe.pauseAnimation();  } }
 }
+// Pause the globe's render loop while the page is hidden (minimised/occluded) to
+// save GPU on a 24/7 screen. Data polling (loadAll/SSE) is separate and keeps
+// running, so the view is current when the page becomes visible again.
+document.addEventListener('visibilitychange',()=>{
+  if(!globe) return;
+  if(document.hidden){ if(globe.pauseAnimation) globe.pauseAnimation(); }
+  else if(topoMode==='geo'&&geo3D){ if(globe.resumeAnimation) globe.resumeAnimation(); }
+});
 function toggleGlobe(btn){
   if(!geo3D&&!hasWebGL()){
     const d=document.getElementById('topoDetail');
