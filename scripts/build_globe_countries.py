@@ -23,6 +23,11 @@ SRC_URL = (
 )
 MIN_FEATURES = 200
 MIN_BYTES = 400_000
+# Drop micro secondary islands/holes (each ring is a separate globe.gl draw call,
+# but invisible at globe scale). Every country always keeps its largest landmass,
+# so no country disappears; only tiny secondary rings below this area (sq-degrees)
+# are removed. This cut globe draw calls ~8100 -> ~1850 with no visible change.
+KEEP_SECONDARY_AREA = 0.6
 
 
 def _fetch(url: str) -> bytes:
@@ -85,6 +90,30 @@ def _clean_polygon(coords: list) -> list | None:
     return rings
 
 
+def _filter_islands(geometry: dict) -> dict:
+    """Keep each country's main landmass; drop tiny secondary islands/holes that
+    each cost a draw call but are invisible at globe scale."""
+    def big(ring: list) -> bool:
+        return _ring_area(ring) >= KEEP_SECONDARY_AREA
+    if geometry["type"] == "Polygon":
+        rings = geometry["coordinates"]
+        kept = [rings[0]] + [r for r in rings[1:] if big(r)]  # outer + large holes
+        return {"type": "Polygon", "coordinates": kept}
+    # MultiPolygon: prune holes per polygon, then keep the biggest polygon + large ones
+    pruned = []
+    for poly in geometry["coordinates"]:
+        if not poly:
+            continue
+        pruned.append([poly[0]] + [r for r in poly[1:] if big(r)])
+    if not pruned:
+        return geometry
+    pruned.sort(key=lambda poly: _ring_area(poly[0]), reverse=True)
+    kept = [pruned[0]] + [poly for poly in pruned[1:] if big(poly[0])]
+    if len(kept) == 1:
+        return {"type": "Polygon", "coordinates": kept[0]}
+    return {"type": "MultiPolygon", "coordinates": kept}
+
+
 def _pick_name(props: dict) -> str:
     """Prefer cartographic NAME labels (match world.json + CN_COUNTRY keys)."""
     for key in ("NAME", "BRK_NAME", "ADMIN", "SOVEREIGNT", "NAME_LONG"):
@@ -118,6 +147,7 @@ def _clean_feature(feature: dict) -> dict | None:
     else:
         return None
 
+    geometry = _filter_islands(geometry)
     props = feature.get("properties") or {}
     return {
         "type": "Feature",
