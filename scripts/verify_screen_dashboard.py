@@ -690,6 +690,11 @@ def test_source_guards():
         and "polygonsData" in html
         and "polygonLabel" in html
         and os.path.isfile(os.path.join(ROOT, "src", "web", "vendor", "ne_countries.json"))
+        and os.path.getsize(os.path.join(ROOT, "src", "web", "vendor", "ne_countries.json")) > 400000
+        and os.path.isfile(os.path.join(ROOT, "scripts", "build_globe_countries.py"))
+        and "applyGlobePolygonStyle" in html
+        and "GLOBE_POLY_ALT_BASE" in html
+        and "logarithmicDepthBuffer" in html
         # Chinese country names on both the 2D world map (nameMap) and the 3D globe
         and "CN_COUNTRY" in html
         and "cnCountry" in html

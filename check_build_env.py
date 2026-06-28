@@ -43,6 +43,7 @@ def check_screen_vendor():
         os.path.join(root, "src", "web", "vendor", "echarts.min.js"),
         os.path.join(root, "src", "web", "vendor", "china.json"),
         os.path.join(root, "src", "web", "vendor", "world.json"),
+        os.path.join(root, "src", "web", "vendor", "ne_countries.json"),
     )
     missing = [p for p in need if not os.path.isfile(p)]
     if missing:
