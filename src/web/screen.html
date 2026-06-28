@@ -1312,7 +1312,7 @@ function resetGeoViewport(){
   geoUserRoam=false;
   geoUserView=null;
   geoViewportCache={key:'', mapMode:'', view:null};
-  if(geo3D){ globeZoomIn=false; if(globe) globe.pointOfView({lat:22,lng:60,altitude:2.4}, 900); if(geoData) renderGlobe(geoData,false); return; }
+  if(geo3D){ globeZoomIn=false; if(globe) globe.pointOfView({lat:22,lng:60,altitude:2.0}, 900); if(geoData) renderGlobe(geoData,false); return; }
   if(topoMode==='geo'&&geoData) renderGeo(geoData,false);
 }
 
@@ -1377,7 +1377,7 @@ function setGeoMapMode(mode, btn){
   document.getElementById('btnMapChina').classList.toggle('active',effective==='china');
   document.getElementById('btnMapWorld').classList.toggle('active',effective==='world');
   if(topoMode!=='geo'||!geoData) return;
-  if(geo3D){ const cam=globeCameraFor(); if(globe) globe.pointOfView(cam, 900); globeZoomIn=(cam.altitude<1.6); if(geoData) renderGlobe(geoData,false); refreshRotateState(true); return; }
+  if(geo3D){ const cam=globeCameraFor(); if(globe) globe.pointOfView(cam, 900); globeZoomIn=(cam.altitude<1.8); if(geoData) renderGlobe(geoData,false); refreshRotateState(true); return; }
   renderGeo(geoData,false);
   refreshRotateState(true);
 }
@@ -1962,7 +1962,7 @@ function onGlobePointClick(d){
 function onGlobeCameraEnd(){
   if(!globe||!geo3D) return;
   const alt=(globe.pointOfView()||{}).altitude;
-  const zoomed=(alt!=null&&alt<1.6);
+  const zoomed=(alt!=null&&alt<1.8);
   if(zoomed!==globeZoomIn){ globeZoomIn=zoomed; if(geoData) renderGlobe(geoData,false); }
 }
 function showGlobeNodeDetail(tid){
@@ -2017,9 +2017,9 @@ function drillGlobeDetail(){
   drillToSinglePath(tid);
 }
 function globeCameraFor(){
-  if(geoMapUserChoice==='china') return {lat:34,lng:104,altitude:1.5};
-  if(geoMapUserChoice==='world') return {lat:10,lng:60,altitude:2.5};
-  return {lat:22,lng:108,altitude:2.1};
+  if(geoMapUserChoice==='china') return {lat:34,lng:104,altitude:1.62};
+  if(geoMapUserChoice==='world') return {lat:10,lng:60,altitude:2.0};
+  return {lat:22,lng:108,altitude:2.0};
 }
 function renderGlobe(data, updateBadge=true){
   const el=document.getElementById('globeViz');
