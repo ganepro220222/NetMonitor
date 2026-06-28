@@ -705,6 +705,14 @@ def test_source_guards():
         and "setPixelRatio" in html
         and "visibilitychange" in html
         and "webglcontextlost" in html
+        # globe search/jump: locate a node or country and fly the camera there;
+        # node labels double as large click targets (dots are hard to hit on a sphere)
+        and "globeSearchInput" in html
+        and "globeJumpToNode" in html
+        and "globeJumpToCountry" in html
+        and "globeFeatureCentroid" in html
+        and "setupGlobeSearch" in html
+        and "glb-clickable" in html
     )
     print(f"source guards + wiring -> {ok}")
     return ok

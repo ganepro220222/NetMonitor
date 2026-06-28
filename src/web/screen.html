@@ -317,6 +317,28 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:rgba(8,16,32,.74);border:1px solid rgba(34,211,238,.4);border-radius:3px;
   padding:1px 6px;white-space:nowrap;pointer-events:none;transform:translate(-50%,-150%);
   text-shadow:0 0 6px rgba(0,0,0,.7)}
+/* node labels double as large click targets (the dots are hard to hit on a sphere) */
+.glb-tag.glb-clickable{pointer-events:auto;cursor:pointer}
+.glb-tag.glb-clickable:hover{border-color:#38e0ff;color:#e0f2fe;background:rgba(8,16,32,.94)}
+/* globe search/jump overlay — find a node or country, Enter flies the camera to it */
+#globeSearch{position:absolute;top:10px;left:10px;z-index:6;width:250px;display:none;
+  font-family:"Segoe UI","Microsoft YaHei",sans-serif}
+.center.panel.globe-on #globeSearch{display:block}
+#globeSearchInput{width:100%;box-sizing:border-box;padding:6px 10px;border-radius:4px;
+  border:1px solid rgba(34,211,238,.35);background:rgba(8,16,32,.82);color:#e0f2fe;font-size:12px;outline:none}
+#globeSearchInput::placeholder{color:#5b7591}
+#globeSearchInput:focus{border-color:rgba(56,224,255,.7);box-shadow:0 0 10px rgba(56,224,255,.25)}
+#globeSearchResults{margin-top:4px;border-radius:4px;border:1px solid rgba(34,211,238,.3);
+  background:rgba(8,14,28,.95);max-height:248px;overflow:auto;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+#globeSearchResults.hidden{display:none}
+.gs-group{font-size:10px;letter-spacing:.1em;color:#5b7591;padding:6px 10px 2px}
+.gs-row{display:flex;align-items:center;gap:7px;padding:5px 10px;font-size:12px;color:#cbd5e1;
+  cursor:pointer;white-space:nowrap}
+.gs-row:hover,.gs-row.active{background:rgba(34,211,238,.16);color:#e0f2fe}
+.gs-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.gs-flag{font-size:11px;opacity:.8}
+.gs-sub{margin-left:auto;font-size:10px;color:#5b7591;padding-left:10px;overflow:hidden;text-overflow:ellipsis}
+.gs-empty{padding:8px 10px;font-size:12px;color:#5b7591}
 .geo-inset-grid{display:flex;flex-wrap:wrap;gap:6px}
 .geo-inset-chip{font-size:11px;padding:4px 10px;border-radius:999px;cursor:pointer;
   border:1px solid rgba(30,58,95,.55);background:rgba(15,23,42,.65);color:#cbd5e1}
@@ -395,6 +417,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
         <div id="geoChart"></div>
         <svg id="topoSvg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg>
         <div id="globeViz"></div>
+        <div id="globeSearch">
+          <input id="globeSearchInput" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="搜索节点 / 国家，回车定位">
+          <div id="globeSearchResults" class="hidden"></div>
+        </div>
       </div>
       <div id="geoInset"><div class="geo-inset-title">内网 / 未上图目标</div><div class="geo-inset-grid" id="geoInsetGrid"></div></div>
       <div class="topo-detail" id="topoDetail">选择节点或等待路径数据...</div>
@@ -1175,6 +1202,7 @@ let geoChart=null;
 let geo3D=false, globe=null, globeLibPromise=null, globeReady=false;
 let globeStyle=(()=>{try{return localStorage.getItem('screenGlobeStyle')==='real'?'real':'night';}catch(e){return 'night';}})();
 let globeBordersData=null, globeZoomIn=false, globeDetailTid=null, globeHoverPoly=null;
+let globeSearchItems=[], globeSearchSel=-1;
 /* 3D country polygons: subtle fill + raised altitude reduces z-fighting / border shimmer. */
 const GLOBE_POLY_ALT_BASE=0.012, GLOBE_POLY_ALT_HOVER=0.022;
 const GLOBE_HOVER_ROTATE_DELAY_MS=5000;
@@ -1874,7 +1902,10 @@ function initGlobe(){
     .onPointClick(d=>onGlobePointClick(d))
     .htmlLat('lat').htmlLng('lng').htmlAltitude('halt')
       .htmlElement(d=>{const e=document.createElement('div');e.className='glb-tag';
-        e.textContent=d.name; e.style.borderColor=d.color+'aa'; return e;})
+        e.textContent=d.name; e.style.borderColor=d.color+'aa';
+        if(d.tid){ e.classList.add('glb-clickable'); e.title='点击查看节点详情';
+          e.addEventListener('click',ev=>{ev.stopPropagation(); onGlobePointClick(d);}); }
+        return e;})
     .arcStartLat('a').arcStartLng('b').arcEndLat('c').arcEndLng('d').arcColor('color')
       .arcStroke(0.55).arcAltitudeAutoScale(0.45)
       .arcDashLength(0.45).arcDashGap(0.25).arcDashInitialGap(()=>Math.random()).arcDashAnimateTime(1600)
@@ -1912,6 +1943,7 @@ function initGlobe(){
   // clear the hover (and resume rotation) when the mouse exits the globe area.
   try{ el.addEventListener('mouseleave',()=>onGlobePolyHover(null)); }catch(e){}
   loadGlobeCountries();
+  setupGlobeSearch();
   applyGlobeStyle(globeStyle);
   globeReady=true;
   return globe;
@@ -1976,6 +2008,123 @@ function onGlobeCameraEnd(){
   const alt=(globe.pointOfView()||{}).altitude;
   const zoomed=(alt!=null&&alt<1.8);
   if(zoomed!==globeZoomIn){ globeZoomIn=zoomed; if(geoData) renderGlobe(geoData,false); }
+}
+/* ---- Globe search / jump: locate a node or country without hunting for a tiny
+   hit target on a spinning sphere. Type -> Enter (or click a result) flies the
+   camera there; nodes select + open detail, countries highlight + center. ---- */
+function globeFeatureCentroid(f){
+  if(f.__cen) return f.__cen;
+  const g=f&&f.geometry; if(!g) return null;
+  const polys=g.type==='Polygon'?[g.coordinates]:(g.type==='MultiPolygon'?g.coordinates:[]);
+  // Center on the largest landmass (outer ring by |shoelace area|) so multi-part
+  // countries (US, Russia, Japan) target their main body, not an island average.
+  let best=null, bestA=-1;
+  for(let i=0;i<polys.length;i++){
+    const ring=polys[i]&&polys[i][0]; if(!ring||ring.length<4) continue;
+    let a=0; for(let k=0;k<ring.length-1;k++){ a+=ring[k][0]*ring[k+1][1]-ring[k+1][0]*ring[k][1]; }
+    a=Math.abs(a); if(a>bestA){ bestA=a; best=ring; }
+  }
+  if(!best) return null;
+  // Spherical (3D unit-vector) average handles ±180° wrap (Russia, Fiji, NZ).
+  let x=0,y=0,z=0; const n=best.length;
+  for(let k=0;k<n;k++){ const lo=best[k][0]*Math.PI/180, la=best[k][1]*Math.PI/180;
+    x+=Math.cos(la)*Math.cos(lo); y+=Math.cos(la)*Math.sin(lo); z+=Math.sin(la); }
+  if(!n) return null;
+  x/=n; y/=n; z/=n;
+  const lng=Math.atan2(y,x)*180/Math.PI;
+  const lat=Math.atan2(z,Math.sqrt(x*x+y*y))*180/Math.PI;
+  return (f.__cen={lat,lng});
+}
+function globeJumpToNode(tid){
+  const t=((geoData&&geoData.targets)||[]).find(x=>x.tid===tid);
+  if(!t||!t.geo||t.geo.lat==null||t.geo.lon==null) return;
+  onGlobePointClick({lat:t.geo.lat,lng:t.geo.lon,tid:t.tid,name:t.label||t.tid,color:colorForStatus(t.status)});
+}
+function globeJumpToCountry(f){
+  if(!globe||!f) return;
+  const c=globeFeatureCentroid(f); if(!c) return;
+  globeHoverPoly=f; applyGlobePolygonStyle();
+  globe.controls().autoRotate=false;
+  clearTimeout(globe.__rotTimer);
+  globe.__rotTimer=setTimeout(()=>{ globeClearPolyHover();
+    if(globe&&geo3D&&topoMode==='geo') globe.controls().autoRotate=true; }, 9000);
+  globe.pointOfView({lat:c.lat,lng:c.lng,altitude:1.55}, 900);
+  const nm=cnCountry((f.properties||{}).name), d=document.getElementById('topoDetail');
+  if(d&&nm) d.innerHTML=`<div><span style="color:var(--cyan)">◎ 已定位</span> · ${esc(nm)}`+
+    `<span style="margin-left:8px;font-size:11px;color:var(--dim)">拖拽旋转 / 点击节点查看详情</span></div>`;
+}
+function globeSearchMatch(){
+  const q=((document.getElementById('globeSearchInput')||{}).value||'').trim().toLowerCase();
+  const nodes=[], countries=[];
+  if(q){
+    ((geoData&&geoData.targets)||[]).forEach(t=>{
+      if(!t.geo||t.geo.lat==null||t.geo.lon==null) return;
+      const hay=((t.label||'')+' '+(t.tid||'')+' '+(t.ip||t.host||'')).toLowerCase();
+      if(hay.indexOf(q)>=0) nodes.push(t);
+    });
+    (globeBordersData||[]).forEach(f=>{
+      const en=((f.properties||{}).name)||'', cn=cnCountry(en);
+      if(en.toLowerCase().indexOf(q)>=0 || (cn&&cn.toLowerCase().indexOf(q)>=0)) countries.push({f,en,cn});
+    });
+  }
+  return {q, nodes:nodes.slice(0,8), countries:countries.slice(0,8)};
+}
+function globeRenderSearch(){
+  const box=document.getElementById('globeSearchResults'); if(!box) return;
+  const {q,nodes,countries}=globeSearchMatch();
+  globeSearchItems=[];
+  if(!q){ box.classList.add('hidden'); box.innerHTML=''; globeSearchSel=-1; return; }
+  let html='';
+  if(nodes.length){ html+='<div class="gs-group">节点</div>';
+    nodes.forEach(t=>{ const i=globeSearchItems.length; globeSearchItems.push({type:'node',t});
+      const col=colorForStatus(t.status);
+      html+=`<div class="gs-row" data-i="${i}" onmousedown="event.preventDefault();globeSearchPick(${i})">`+
+            `<span class="gs-dot" style="background:${col};box-shadow:0 0 6px ${col}"></span>${esc(t.label||t.tid)}</div>`;
+    });
+  }
+  if(countries.length){ html+='<div class="gs-group">国家 / 地区</div>';
+    countries.forEach(c=>{ const i=globeSearchItems.length; globeSearchItems.push({type:'country',f:c.f});
+      html+=`<div class="gs-row" data-i="${i}" onmousedown="event.preventDefault();globeSearchPick(${i})">`+
+            `<span class="gs-flag">🌐</span>${esc(c.cn||c.en)}`+
+            `<span class="gs-sub">${esc(c.cn?c.en:'')}</span></div>`;
+    });
+  }
+  if(!globeSearchItems.length) html='<div class="gs-empty">无匹配结果</div>';
+  box.innerHTML=html; box.classList.remove('hidden');
+  globeSearchSel=globeSearchItems.length?0:-1; globeUpdateSearchSel();
+}
+function globeUpdateSearchSel(){
+  const box=document.getElementById('globeSearchResults'); if(!box) return;
+  box.querySelectorAll('.gs-row').forEach(r=>r.classList.toggle('active',+r.getAttribute('data-i')===globeSearchSel));
+  const a=box.querySelector('.gs-row.active'); if(a&&a.scrollIntoView) a.scrollIntoView({block:'nearest'});
+}
+function globeHideSearch(){
+  const b=document.getElementById('globeSearchResults');
+  if(b){ b.classList.add('hidden'); b.innerHTML=''; }
+  globeSearchItems=[]; globeSearchSel=-1;
+}
+function globeSearchPick(i){
+  const it=globeSearchItems[i];
+  if(it){ if(it.type==='node') globeJumpToNode(it.t.tid); else globeJumpToCountry(it.f); }
+  const inp=document.getElementById('globeSearchInput'); if(inp){ inp.value=''; inp.blur(); }
+  globeHideSearch();
+}
+function globeSearchKey(e){
+  if(e.isComposing) return;   // don't hijack Enter while composing pinyin/IME
+  const n=globeSearchItems.length;
+  if(e.key==='ArrowDown'){ if(n){ globeSearchSel=(globeSearchSel+1)%n; globeUpdateSearchSel(); } e.preventDefault(); }
+  else if(e.key==='ArrowUp'){ if(n){ globeSearchSel=(globeSearchSel-1+n)%n; globeUpdateSearchSel(); } e.preventDefault(); }
+  else if(e.key==='Enter'){ if(n) globeSearchPick(globeSearchSel>=0?globeSearchSel:0); e.preventDefault(); }
+  else if(e.key==='Escape'){ const i=document.getElementById('globeSearchInput'); if(i){ i.value=''; i.blur(); } globeHideSearch(); }
+}
+function setupGlobeSearch(){
+  const inp=document.getElementById('globeSearchInput'); if(!inp||inp.__wired) return;
+  inp.__wired=true;
+  inp.addEventListener('input', globeRenderSearch);
+  inp.addEventListener('focus', ()=>{ if(inp.value.trim()) globeRenderSearch(); });
+  inp.addEventListener('keydown', globeSearchKey);
+  document.addEventListener('mousedown', e=>{ const w=document.getElementById('globeSearch');
+    if(w && !w.contains(e.target)) globeHideSearch(); });
 }
 function showGlobeNodeDetail(tid){
   const t=((geoData&&geoData.targets)||[]).find(x=>x.tid===tid);
@@ -2086,6 +2235,7 @@ function syncGlobeVisibility(){
   const on=(topoMode==='geo'&&geo3D);
   document.getElementById('centerPanel').classList.toggle('globe-on',on);
   const b=document.getElementById('btnGlobe'); if(b) b.classList.toggle('active',geo3D);
+  if(!on) globeHideSearch();
   if(globe){ if(on){ if(globe.resumeAnimation) globe.resumeAnimation(); }
              else  { if(globe.pauseAnimation)  globe.pauseAnimation();  } }
 }
