@@ -250,19 +250,19 @@ _ISO_COUNTRY: dict[str, tuple[float, float]] = {
 _WELL_KNOWN_ANYCAST: dict[str, dict[str, Any]] = {
     "1.1.1.1": {
         "lat": 37.7622, "lon": -122.4396,
-        "city": "旧金山", "region": "加利福尼亚", "country": "United States",
+        "city": "旧金山", "region": "加利福尼亚", "country": "美国",
     },
     "1.0.0.1": {
         "lat": 37.7622, "lon": -122.4396,
-        "city": "旧金山", "region": "加利福尼亚", "country": "United States",
+        "city": "旧金山", "region": "加利福尼亚", "country": "美国",
     },
     "8.8.8.8": {
         "lat": 37.4056, "lon": -122.0775,
-        "city": "山景城", "region": "加利福尼亚", "country": "United States",
+        "city": "山景城", "region": "加利福尼亚", "country": "美国",
     },
     "8.8.4.4": {
         "lat": 37.4056, "lon": -122.0775,
-        "city": "山景城", "region": "加利福尼亚", "country": "United States",
+        "city": "山景城", "region": "加利福尼亚", "country": "美国",
     },
 }
 
