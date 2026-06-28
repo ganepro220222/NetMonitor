@@ -693,7 +693,8 @@ def test_source_guards():
         and os.path.getsize(os.path.join(ROOT, "src", "web", "vendor", "ne_countries.json")) > 400000
         and os.path.isfile(os.path.join(ROOT, "scripts", "build_globe_countries.py"))
         and "applyGlobePolygonStyle" in html
-        and "GLOBE_POLY_ALT_BASE" in html
+        and "GLOBE_HOVER_ROTATE_DELAY_MS" in html
+        and "globeClearPolyHover" in html
         and "logarithmicDepthBuffer" in html
         # Chinese country names on both the 2D world map (nameMap) and the 3D globe
         and "CN_COUNTRY" in html
@@ -1219,17 +1220,42 @@ def test_world_geo_hover_country_label():
 def test_globe_countries_vendor_names():
     """Vendored ne_countries.json must carry real country names (not all Unknown)."""
     import json
+    import re
+
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    m = re.search(r"const CN_COUNTRY=(\{[^;]+\});", html)
+    cn_map = json.loads(m.group(1)) if m else {}
 
     path = os.path.join(ROOT, "src", "web", "vendor", "ne_countries.json")
     data = json.load(open(path, encoding="utf-8"))
     names = [(f.get("properties") or {}).get("name") for f in data.get("features") or []]
+    missing = sorted({n for n in names if n and n not in cn_map})
     ok = (
         len(names) >= 200
         and sum(1 for n in names if n and n != "Unknown") >= 200
         and "China" in names
         and "United States of America" in names
+        and cn_map.get("Aruba") == "阿鲁巴"
+        and not missing
     )
+    if missing:
+        print(f"  missing CN_COUNTRY keys ({len(missing)}): " + ", ".join(repr(n) for n in missing[:8]))
     print(f"globe countries vendor names -> {ok}")
+    return ok
+
+
+def test_globe_hover_rotate_delay():
+    """Country hover must delay auto-rotate resume (not instant on mouse-out)."""
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    hover = html[html.find("function onGlobePolyHover("):html.find("function onGlobePointClick", html.find("function onGlobePolyHover("))]
+    ok = (
+        "GLOBE_HOVER_ROTATE_DELAY_MS" in html
+        and "globePauseRotate(GLOBE_HOVER_ROTATE_DELAY_MS)" in hover
+        and "autoRotate=!globeHoverPoly" not in hover
+        and "clearTimeout(globe.__rotTimer)" in hover
+        and "globeClearPolyHover()" in html
+    )
+    print(f"globe hover rotate delay -> {ok}")
     return ok
 
 
@@ -1535,6 +1561,7 @@ def main():
         ("overview_fresh", test_overview_fresh_refresh()),
         ("world_geo_label", test_world_geo_hover_country_label()),
         ("globe_countries_names", test_globe_countries_vendor_names()),
+        ("globe_hover_rotate_delay", test_globe_hover_rotate_delay()),
         ("globe_dyn_guard", test_globe_dynamic_data_guard()),
         ("globe_dyn_sig_label", test_globe_dynamic_sig_target_label()),
         ("globe_stale_detail", test_globe_stale_detail_sync()),
