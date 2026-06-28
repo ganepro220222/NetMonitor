@@ -1216,6 +1216,23 @@ def test_world_geo_hover_country_label():
     return ok
 
 
+def test_globe_countries_vendor_names():
+    """Vendored ne_countries.json must carry real country names (not all Unknown)."""
+    import json
+
+    path = os.path.join(ROOT, "src", "web", "vendor", "ne_countries.json")
+    data = json.load(open(path, encoding="utf-8"))
+    names = [(f.get("properties") or {}).get("name") for f in data.get("features") or []]
+    ok = (
+        len(names) >= 200
+        and sum(1 for n in names if n and n != "Unknown") >= 200
+        and "China" in names
+        and "United States of America" in names
+    )
+    print(f"globe countries vendor names -> {ok}")
+    return ok
+
+
 def test_globe_dynamic_data_guard():
     """3D globe must skip points/arcs refresh when poll data is unchanged."""
     html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
@@ -1517,6 +1534,7 @@ def main():
         ("counts_hint_orange", test_counts_hint_includes_orange()),
         ("overview_fresh", test_overview_fresh_refresh()),
         ("world_geo_label", test_world_geo_hover_country_label()),
+        ("globe_countries_names", test_globe_countries_vendor_names()),
         ("globe_dyn_guard", test_globe_dynamic_data_guard()),
         ("globe_dyn_sig_label", test_globe_dynamic_sig_target_label()),
         ("globe_stale_detail", test_globe_stale_detail_sync()),

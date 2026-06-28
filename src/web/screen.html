@@ -1934,7 +1934,7 @@ function setGlobeStyle(style, btn){ applyGlobeStyle(style); }
 function loadGlobeCountries(){
   if(!globe) return;
   if(globeBordersData){ globe.polygonsData(globeBordersData); return; }
-  fetch('/vendor/ne_countries.json').then(r=>r.ok?r.json():null).then(j=>{
+  fetch('/vendor/ne_countries.json?v=3').then(r=>r.ok?r.json():null).then(j=>{
     if(!j) return;
     globeBordersData=(j.features||[]).filter(f=>f&&f.geometry);
     if(globe) globe.polygonsData(globeBordersData);

@@ -23,6 +23,8 @@ SRC_URL = (
 )
 MIN_FEATURES = 200
 MIN_BYTES = 400_000
+MIN_RINGS = 250
+MAX_RINGS = 650
 # Drop micro secondary islands/holes (each ring is a separate globe.gl draw call,
 # but invisible at globe scale). Every country always keeps its largest landmass,
 # so no country disappears; only tiny secondary rings below this area (sq-degrees)
@@ -115,10 +117,15 @@ def _filter_islands(geometry: dict) -> dict:
 
 
 def _pick_name(props: dict) -> str:
-    """Prefer cartographic NAME labels (match world.json + CN_COUNTRY keys)."""
-    for key in ("NAME", "BRK_NAME", "ADMIN", "SOVEREIGNT", "NAME_LONG"):
+    """Prefer cartographic NAME labels (match world.json + CN_COUNTRY keys).
+
+    Natural Earth source uses NAME/ADMIN; our vendored output only stores {name}.
+    Always accept an existing non-empty "name" so a re-build cannot wipe labels
+    to "Unknown" (regression that broke hover labels in b738b25).
+    """
+    for key in ("NAME", "BRK_NAME", "ADMIN", "SOVEREIGNT", "NAME_LONG", "name"):
         val = (props.get(key) or "").strip()
-        if val:
+        if val and val != "Unknown":
             return val
     return "Unknown"
 
@@ -170,6 +177,17 @@ def build(raw_geojson: dict) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
+def _ring_count(out: dict) -> int:
+    total = 0
+    for f in out["features"]:
+        g = f["geometry"]
+        if g["type"] == "Polygon":
+            total += len(g["coordinates"])
+        else:
+            total += sum(len(poly) for poly in g["coordinates"])
+    return total
+
+
 def validate(out: dict, path: str) -> None:
     n = len(out.get("features") or [])
     if n < MIN_FEATURES:
@@ -177,18 +195,27 @@ def validate(out: dict, path: str) -> None:
     size = os.path.getsize(path)
     if size < MIN_BYTES:
         raise SystemExit(f"Output too small: {size} bytes (need >= {MIN_BYTES})")
+    names = [((f.get("properties") or {}).get("name") or "").strip() for f in out["features"]]
+    unknown = sum(1 for nm in names if nm == "Unknown" or not nm)
+    if unknown:
+        raise SystemExit(f"{unknown} feature(s) have missing/Unknown name — rebuild from Natural Earth, not ne_countries.json")
+    if len(set(names)) < MIN_FEATURES - 5:
+        raise SystemExit(f"Too few unique country names: {len(set(names))}")
+    rings = _ring_count(out)
+    if rings < MIN_RINGS or rings > MAX_RINGS:
+        raise SystemExit(f"Unexpected ring count {rings} (expected {MIN_RINGS}–{MAX_RINGS} after island filter)")
     verts = 0
-    for f in out["features"]:
+    for f, nm in zip(out["features"], names):
         g = f["geometry"]
         if g["type"] == "Polygon":
-            rings = g["coordinates"]
+            rs = g["coordinates"]
         else:
-            rings = [r for poly in g["coordinates"] for r in poly]
-        for ring in rings:
+            rs = [r for poly in g["coordinates"] for r in poly]
+        for ring in rs:
             verts += len(ring)
             if len(ring) < 4:
-                raise SystemExit(f"Degenerate ring remains in {f['properties']['name']}")
-    print(f"  features={n}  vertices={verts}  bytes={size}")
+                raise SystemExit(f"Degenerate ring remains in {nm}")
+    print(f"  features={n}  rings={rings}  vertices={verts}  bytes={size}")
 
 
 def main() -> int:
