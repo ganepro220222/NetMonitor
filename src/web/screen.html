@@ -685,6 +685,24 @@ function activeRotatePool(){
     : getRotatePool((pathsData&&pathsData.paths)||[]);
 }
 
+/** Keep selectedTid pointing at a live target/path even when auto-rotate is off. */
+function ensureSelectedTidValid(){
+  if(topoMode==='geo'){
+    const targets=(geoData&&geoData.targets)||[];
+    if(!targets.length){ selectedTid=null; return; }
+    if(!selectedTid||!targets.find(t=>t.tid===selectedTid)){
+      const mappable=targets.filter(t=>t.geo&&t.geo.lon!=null&&t.geo.lat!=null);
+      selectedTid=(mappable[0]||targets[0]||{}).tid||null;
+    }
+  } else if(topoMode==='single'){
+    const paths=(pathsData&&pathsData.paths)||[];
+    if(!paths.length){ selectedTid=null; return; }
+    if(!selectedTid||!paths.find(p=>p.tid===selectedTid)){
+      selectedTid=(paths[0]||{}).tid||null;
+    }
+  }
+}
+
 function poolKey(pool){return pool.map(p=>p.tid).join('|');}
 
 function rotatePoolKeyInfo(poolInfo){
@@ -740,6 +758,7 @@ function startRotateTimer(poolInfo){
 
 /** Update pool/badge; only restart the interval when ``restartTimer`` or pool changed. */
 function refreshRotateState(restartTimer=false){
+  ensureSelectedTidValid();
   const paths=(pathsData&&pathsData.paths)||[];
   const poolInfo=activeRotatePool();
   const geoOk=topoMode==='geo';
@@ -755,11 +774,6 @@ function refreshRotateState(restartTimer=false){
     rotatePoolKey=key;
     rotateIdx=0;
     restartTimer=true;
-    if(!poolInfo.pool.find(p=>p.tid===selectedTid)){
-      selectedTid=poolInfo.pool[0].tid;
-      if(topoMode==='geo'&&geoData) renderGeo(geoData,false);
-      else if(pathsData) renderSingleTopo(pathsData,false);
-    }
   }else{
     rotateIdx=Math.max(0,poolInfo.pool.findIndex(p=>p.tid===selectedTid));
   }
@@ -1926,10 +1940,44 @@ function showGlobeNodeDetail(tid){
     `<span style="margin-left:8px;font-size:11px;color:var(--dim)">点「全貌」回到全球</span></div>`;
   requestAnimationFrame(()=>markScrollable(d));
 }
+function renderGlobeMapSummary(data, opts){
+  const d=document.getElementById('topoDetail'); if(!d) return;
+  const targets=(data&&data.targets)||[];
+  const src=(data&&data.source)||null;
+  const mappable=targets.filter(t=>t.geo&&t.geo.lon!=null&&t.geo.lat!=null);
+  const srcHint=src
+    ? (' · 弧线源 '+esc(monitorSourceLabel(src))+
+       (src.loc_source==='egress_ip'?'（公网出口）':
+        src.loc_source==='local_ip'?'（本机公网）':''))
+    : (' · 监控源未定位（内网需能访问外网查出口 IP，或手动填写；并确认 assets/ip2region_v4.xdb 已下载）');
+  const notice=opts&&opts.notice
+    ? `<div style="margin-bottom:6px;color:var(--orange)">${esc(opts.notice)}</div>`:'';
+  d.innerHTML=notice+
+    `<div>3D 地球 — 可上图 ${mappable.length} 个${srcHint}</div>`+
+    `<div style="margin-top:4px;font-size:11px;color:var(--dim)">点击节点查看详情；拖拽旋转 / 滚轮缩放；点「全貌」恢复默认视角</div>`;
+  requestAnimationFrame(()=>markScrollable(d));
+}
+function syncGlobeDetailState(data){
+  if(!globeDetailTid) return;
+  if(((data&&data.targets)||[]).some(t=>t.tid===globeDetailTid)) return;
+  globeDetailTid=null;
+  renderGlobeMapSummary(data);
+}
 /* Drill from the globe node detail into the full single-path tracert view.
    Reuses the existing 2D drill (drillToSinglePath) — switches to 单路径 and
    focuses the node; returning to 地理视图 restores the globe (geo3D persists). */
-function drillGlobeDetail(){ if(globeDetailTid) drillToSinglePath(globeDetailTid); }
+function drillGlobeDetail(){
+  const tid=globeDetailTid;
+  if(!tid) return;
+  const targets=(geoData&&geoData.targets)||[];
+  const paths=(pathsData&&pathsData.paths)||[];
+  if(!targets.some(t=>t.tid===tid)||!paths.some(p=>p.tid===tid)){
+    globeDetailTid=null;
+    renderGlobeMapSummary(geoData,{notice:'目标已不存在或已刷新，请重新选择节点。'});
+    return;
+  }
+  drillToSinglePath(tid);
+}
 function globeCameraFor(){
   if(geoMapUserChoice==='china') return {lat:34,lng:104,altitude:1.5};
   if(geoMapUserChoice==='world') return {lat:10,lng:60,altitude:2.5};
@@ -1942,6 +1990,7 @@ function renderGlobe(data, updateBadge=true){
   ensureGlobeLib().then(()=>{
     if(!geo3D||topoMode!=='geo') return;
     const g=initGlobe();
+    ensureSelectedTidValid();
     const targets=(data&&data.targets)||[];
     const src=(data&&data.source)||null;
     const hasSrc=src&&src.lon!=null&&src.lat!=null;
@@ -1972,6 +2021,7 @@ function renderGlobe(data, updateBadge=true){
     requestAnimationFrame(()=>{try{const cw=el.clientWidth, ch=el.clientHeight;
       if(cw&&ch&&(g.__lw!==cw||g.__lh!==ch)){ g.__lw=cw; g.__lh=ch; g.width(cw); g.height(ch); }
     }catch(e){}});
+    syncGlobeDetailState(data);
     // NOTE: do NOT move the camera on data refresh — periodic loadAll/SSE renders
     // would otherwise yank the globe back to the preset every cycle and the
     // gentle auto-rotation would appear to "stop". Camera moves only on explicit

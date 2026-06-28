@@ -1248,6 +1248,54 @@ def test_globe_dynamic_sig_target_label():
     return ok
 
 
+def test_globe_stale_detail_sync():
+    """3D globe must clear stale detail/selection when a target disappears."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    globe_block = html[html.find("function renderGlobe("):html.find("function syncGlobeVisibility", html.find("function renderGlobe("))]
+    rotate_block = html[html.find("function refreshRotateState("):html.find("function syncAutoRotate", html.find("function refreshRotateState("))]
+    static_ok = (
+        "function ensureSelectedTidValid" in html
+        and "function syncGlobeDetailState" in html
+        and "function renderGlobeMapSummary" in html
+        and "ensureSelectedTidValid();" in rotate_block
+        and rotate_block.find("ensureSelectedTidValid();") < rotate_block.find("poolInfo.pool.length<ROTATE.minPaths")
+        and "syncGlobeDetailState(data)" in globe_block
+        and "targets.some(t=>t.tid===tid)" in html[html.find("function drillGlobeDetail("):html.find("function globeCameraFor", html.find("function drillGlobeDetail("))]
+    )
+
+    def ensure_selected_tid_valid(topo_mode, selected_tid, geo_targets, paths):
+        if topo_mode == "geo":
+            if not geo_targets:
+                return None
+            if not selected_tid or not any(t["tid"] == selected_tid for t in geo_targets):
+                mappable = [t for t in geo_targets if t.get("geo")]
+                return (mappable[0] if mappable else geo_targets[0])["tid"]
+            return selected_tid
+        if topo_mode == "single":
+            if not paths:
+                return None
+            if not selected_tid or not any(p["tid"] == selected_tid for p in paths):
+                return paths[0]["tid"]
+            return selected_tid
+        return selected_tid
+
+    def sync_globe_detail_state(globe_detail_tid, targets):
+        if not globe_detail_tid:
+            return None, False
+        if any(t["tid"] == globe_detail_tid for t in targets):
+            return globe_detail_tid, False
+        return None, True
+
+    geo_targets = [{"tid": "T1", "geo": {"lat": 1, "lon": 2}}]
+    selected = ensure_selected_tid_valid("geo", "T2", geo_targets, [])
+    detail_tid, cleared = sync_globe_detail_state("T2", geo_targets)
+    logic_ok = selected == "T1" and detail_tid is None and cleared
+    ok = static_ok and logic_ok
+    print(f"globe stale detail sync -> {ok}")
+    return ok
+
+
 def test_geo_place_label_cn():
     """Monitor geo labels translate city/region/country and avoid mixed CN/EN."""
     html_path = os.path.join(ROOT, "src", "web", "screen.html")
@@ -1462,6 +1510,7 @@ def main():
         ("world_geo_label", test_world_geo_hover_country_label()),
         ("globe_dyn_guard", test_globe_dynamic_data_guard()),
         ("globe_dyn_sig_label", test_globe_dynamic_sig_target_label()),
+        ("globe_stale_detail", test_globe_stale_detail_sync()),
         ("geo_place_label", test_geo_place_label_cn()),
         ("monitor_source_label", test_monitor_source_label_cn()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
