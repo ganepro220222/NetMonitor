@@ -1285,6 +1285,88 @@ def test_geo_place_label_cn():
     return ok
 
 
+def test_monitor_source_label_cn():
+    """Monitor-source pins reuse geoPlaceLabel; auto path must not show raw English."""
+    html_path = os.path.join(ROOT, "src", "web", "screen.html")
+    html = open(html_path, encoding="utf-8").read()
+    static_ok = (
+        "function monitorSourceLabel" in html
+        and html.count("monitorSourceLabel(src)") >= 3
+    )
+
+    cn_country = {"United States": "美国"}
+    cn_place = {"California": "加利福尼亚", "Los Angeles": "洛杉矶"}
+
+    def cn_place_fn(name):
+        if name is None:
+            return ""
+        s = str(name).strip()
+        if not s or s == "0":
+            return ""
+        if s in cn_country:
+            return cn_country[s]
+        if s in cn_place:
+            return cn_place[s]
+        if any("\u4e00" <= ch <= "\u9fff" for ch in s):
+            return s
+        return ""
+
+    def geo_place_label(g):
+        if not g:
+            return ""
+        city = cn_place_fn(g.get("city"))
+        region = cn_place_fn(g.get("region"))
+        country = cn_place_fn(g.get("country"))
+        parts = []
+        if city:
+            parts.append(city)
+        if region and region != city:
+            parts.append(region)
+        if country and country != city and country != region:
+            parts.append(country)
+        if parts:
+            return " · ".join(parts)
+        raw = [x for x in (g.get("city"), g.get("region"), g.get("country")) if x and str(x).strip() and str(x).strip() != "0"]
+        return " · ".join(raw) if raw else ""
+
+    def monitor_source_label(src):
+        if not src:
+            return "监控主机"
+        if src.get("loc_source") == "manual":
+            custom = str(src.get("label") or "").strip()
+            if custom:
+                return custom
+        place = geo_place_label(src)
+        return ("监控主机 · " + place) if place else "监控主机"
+
+    auto_src = {
+        "label": "监控主机 · Los Angeles",
+        "loc_source": "egress_ip",
+        "city": "Los Angeles",
+        "region": "California",
+        "country": "United States",
+    }
+    manual_src = {
+        "label": "上海办公室",
+        "loc_source": "manual",
+        "city": "上海",
+        "region": "上海",
+        "country": "中国",
+    }
+    auto_label = monitor_source_label(auto_src)
+    manual_label = monitor_source_label(manual_src)
+    logic_ok = (
+        "Los Angeles" not in auto_label
+        and "California" not in auto_label
+        and "United States" not in auto_label
+        and "洛杉矶" in auto_label
+        and manual_label == "上海办公室"
+    )
+    ok = static_ok and logic_ok
+    print(f"monitor source label cn -> {ok}")
+    return ok
+
+
 def test_screen_data_seq_guard():
     """loadAll/refreshLivePanels must ignore stale API responses when requests overlap."""
     html_path = os.path.join(ROOT, "src", "web", "screen.html")
@@ -1354,6 +1436,7 @@ def main():
         ("world_geo_label", test_world_geo_hover_country_label()),
         ("globe_dyn_guard", test_globe_dynamic_data_guard()),
         ("geo_place_label", test_geo_place_label_cn()),
+        ("monitor_source_label", test_monitor_source_label_cn()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
         ("source", test_source_guards()),
         ("demo", test_demo_payload_shape()),

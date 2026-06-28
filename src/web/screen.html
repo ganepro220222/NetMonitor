@@ -1427,6 +1427,17 @@ function geoPlaceLabel(g){
   return raw.length?raw.join(' · '):'';
 }
 
+/** Monitor-source pin label: manual geo keeps user label; auto uses geoPlaceLabel. */
+function monitorSourceLabel(src){
+  if(!src) return '监控主机';
+  if(src.loc_source==='manual'){
+    const custom=String(src.label||'').trim();
+    if(custom) return custom;
+  }
+  const place=geoPlaceLabel(src);
+  return place?('监控主机 · '+place):'监控主机';
+}
+
 function geoScatterLabelPos(lon, lat, center){
   const dLon=lon-center[0], dLat=lat-center[1];
   if(Math.abs(dLon)>=Math.abs(dLat)){
@@ -1613,13 +1624,13 @@ function renderGeo(data, updateBadge=true){
       {offset:0, color:'rgba(45,224,255,0.34)'},
       {offset:1, color:'rgba(34,160,220,0.12)'}]);
     const srcMarker=(src&&src.lon!=null&&src.lat!=null)?[{
-      name: src.label||'监控主机',
+      name: monitorSourceLabel(src),
       value:[src.lon, src.lat, 1],
       itemStyle:{color:'#a5f3fc', shadowBlur:20, shadowColor:'rgba(125,211,252,0.95)',
                  borderColor:'#e0f2fe', borderWidth:1.5},
       symbol:'circle', symbolSize: mapMode==='world'?12:10,
       label:{show:true, position:'bottom', distance:7,
-             formatter:()=>(src.label||'监控主机').slice(0,16),
+             formatter:()=>monitorSourceLabel(src).slice(0,16),
              color:'#bae6fd', fontSize:10, lineHeight:12,
              backgroundColor:'rgba(8,16,32,0.72)', padding:[2,4], borderRadius:3},
     }]:[];
@@ -1750,7 +1761,7 @@ function renderGeo(data, updateBadge=true){
     const insetCount=(data.inset||[]).length;
     const offMap=insetCount+hiddenOverseas.length;
     const srcHint=src
-      ? (' · 弧线源 '+esc(src.label||src.city||'监控主机')+
+      ? (' · 弧线源 '+esc(monitorSourceLabel(src))+
          (src.loc_source==='egress_ip'?'（公网出口）':
           src.loc_source==='local_ip'?'（本机公网）':''))
       : (' · 监控源未定位（内网需能访问外网查出口 IP，或手动填写；并确认 assets/ip2region_v4.xdb 已下载）');
@@ -1936,7 +1947,7 @@ function renderGlobe(data, updateBadge=true){
     const hasSrc=src&&src.lon!=null&&src.lat!=null;
     const mappable=targets.filter(t=>t.geo&&t.geo.lon!=null&&t.geo.lat!=null);
     const pts=[], arcs=[], rings=[], labelPts=[];
-    if(hasSrc){ const sp={lat:src.lat,lng:src.lon,name:src.label||'监控主机',
+    if(hasSrc){ const sp={lat:src.lat,lng:src.lon,name:monitorSourceLabel(src),
                           color:'#22d3ee',alt:0.06,halt:0.085,r:0.62};
       pts.push(sp); labelPts.push(sp); }   // monitor source always labeled
     mappable.forEach(t=>{
