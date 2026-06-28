@@ -938,7 +938,7 @@ function cnPlace(name){
 /** Compact signature so renderGlobe skips globe.gl data pushes when nothing changed. */
 function globeDynamicSig(pts, labelPts, arcs, rings){
   return JSON.stringify({
-    p: pts.map(x=>[x.lat,x.lng,x.color,x.tid,x.r,x.alt]),
+    p: pts.map(x=>[x.lat,x.lng,x.color,x.tid,x.name,x.r,x.alt]),
     l: labelPts.map(x=>x.tid||x.name),
     a: arcs.map(x=>[x.a,x.b,x.c,x.d,x.color&&x.color[1]]),
     r: rings.map(x=>[x.lat,x.lng]),

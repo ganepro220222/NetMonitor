@@ -1211,14 +1211,40 @@ def test_globe_dynamic_data_guard():
     """3D globe must skip points/arcs refresh when poll data is unchanged."""
     html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
     block = html[html.find("function renderGlobe("):html.find("function syncGlobeVisibility", html.find("function renderGlobe("))]
+    sig_block = html[html.find("function globeDynamicSig("):html.find("function colorForStatus", html.find("function globeDynamicSig("))]
     ok = (
         "function globeDynamicSig" in html
         and "g.__dynSig!==dynSig" in block
         and "g.__dynSig=dynSig" in block
         and block.count("pointsData(pts)") == 1
         and "resumeAnimation" not in block
+        and "x.tid,x.name,x.r" in sig_block
     )
     print(f"globe dynamic data guard -> {ok}")
+    return ok
+
+
+def test_globe_dynamic_sig_target_label():
+    """Target rename must change globeDynamicSig so 3D labels refresh."""
+    import json
+
+    def globe_dynamic_sig(pts, label_pts, arcs, rings):
+        return json.dumps(
+            {
+                "p": [[x["lat"], x["lng"], x["color"], x.get("tid"), x.get("name"), x["r"], x["alt"]] for x in pts],
+                "l": [x.get("tid") or x.get("name") for x in label_pts],
+                "a": [[x["a"], x["b"], x["c"], x["d"], x.get("color") and x["color"][1]] for x in arcs],
+                "r": [[x["lat"], x["lng"]] for x in rings],
+            },
+            sort_keys=True,
+        )
+
+    pt_old = {"lat": 1, "lng": 2, "color": "#f00", "tid": "T1", "name": "Old Name", "r": 0.4, "alt": 0.03}
+    pt_new = dict(pt_old, name="New Name")
+    sig_old = globe_dynamic_sig([pt_old], [pt_old], [], [])
+    sig_new = globe_dynamic_sig([pt_new], [pt_new], [], [])
+    ok = sig_old != sig_new
+    print(f"globe dynamic sig target label -> {ok}")
     return ok
 
 
@@ -1435,6 +1461,7 @@ def main():
         ("overview_fresh", test_overview_fresh_refresh()),
         ("world_geo_label", test_world_geo_hover_country_label()),
         ("globe_dyn_guard", test_globe_dynamic_data_guard()),
+        ("globe_dyn_sig_label", test_globe_dynamic_sig_target_label()),
         ("geo_place_label", test_geo_place_label_cn()),
         ("monitor_source_label", test_monitor_source_label_cn()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
