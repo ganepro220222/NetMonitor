@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable, Optional
 
 from src.trace_policy import summarize_for_display
+from src.webhook_error_labels import enrich_webhook_failure
 
 try:
     from src.geo_resolver import GeoResolver, parse_manual_geo
@@ -739,6 +740,7 @@ def build_events(web, *, window: str = "today", limit: int = 30) -> list[dict]:
                 ts = row.get("updated_at")
                 if ts is not None and float(ts) < start_ts:
                     continue
+                row = enrich_webhook_failure(row)
                 events.append({
                     "id": f"webhook-{row.get('id') or ts}",
                     "time": _ts_to_time(ts),
@@ -748,7 +750,7 @@ def build_events(web, *, window: str = "today", limit: int = 30) -> list[dict]:
                     "ip": "",
                     "level": "orange",
                     "type": "webhook_fail",
-                    "text": row.get("error") or row.get("event") or "投递失败",
+                    "text": row.get("error_text") or row.get("error") or "投递失败",
                 })
         except Exception:
             pass

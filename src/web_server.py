@@ -45,6 +45,10 @@ from datetime import datetime
 from typing import Optional
 
 from src.diag_sem import DIAG_TASK_SEM
+from src.webhook_error_labels import (
+    enrich_webhook_delivery,
+    enrich_webhook_failure,
+)
 
 try:
     from flask import Flask, Response, request
@@ -5911,6 +5915,16 @@ function connect(){
     es.close();es=null;retryTimer=setTimeout(connect,3000);};}
 initNotifications();
 connect();
+function whEventText(ev){
+  const m={alert_red:'告警',recovery:'恢复',alert_reminder:'续报',
+    incident_closed_summary:'闭环摘要',diagnostic_update:'诊断更新'};
+  return m[ev]||ev||'?';
+}
+function whErrorText(row){
+  if(!row)return '';
+  if(row.error_text)return row.error_text;
+  return row.error||row.last_error||'';
+}
 async function refreshWebhookFailBanner(){
   try{
     const r=await fetch('/api/webhook/stats');
@@ -5921,8 +5935,11 @@ async function refreshWebhookFailBanner(){
     const pending=(j&&j.stats&&j.stats.pending)||0;
     if(!fails.length&&!pending){pill.style.display='none';return;}
     const top=fails[0];
-    const hint=top?`${top.event||'?'} ${top.error||''}`:`pending ${pending}`;
-    pill.textContent='⚠ Webhook '+hint.slice(0,48);
+    const hint=top
+      ?`${whEventText(top.event)} · ${whErrorText(top)}`
+      :`待重试 ${pending} 条`;
+    pill.textContent='⚠ Webhook '+hint.slice(0,56);
+    pill.title=(top&&(top.error||top.last_error))?('技术详情: '+(top.error||top.last_error)+' — 点击查看投递详情'):'点击查看 Webhook 投递详情';
     pill.style.display='inline-block';
     if(document.getElementById('wh-fail-overlay')&&!document.getElementById('wh-fail-overlay').classList.contains('hidden')){
       refreshWebhookFailPanel();
@@ -5952,11 +5969,12 @@ function _whDebugText(row){
     `delivery_id: ${row.delivery_id||''}`,
     `target_id: ${row.target_id||''}`,
     `target_label: ${row.target_label||''}`,
-    `event: ${row.event||''}`,
+    `event: ${row.event||''}${row.event_text?(' ('+row.event_text+')'):''}`,
     `state: ${row.delivery_state||''}`,
     `attempt_count: ${row.attempt_count??''}`,
     `max_attempts: ${row.max_attempts??''}`,
     `last_error: ${row.last_error||''}`,
+    `error_text: ${whErrorText(row)||''}`,
     `first_queued_ts: ${_whFmtTs(row.first_queued_ts)} (${row.first_queued_ts??''})`,
     `next_attempt_ts: ${_whFmtTs(row.next_attempt_ts)} (${row.next_attempt_ts??''})`,
     `last_attempt_ts: ${_whFmtTs(row.last_attempt_ts)} (${row.last_attempt_ts??''})`,
@@ -6023,18 +6041,20 @@ function renderWebhookFailPanel(stats, rows){
   }
   const head=`<tr>
     <th>操作</th><th>delivery_id</th><th>target</th><th>event</th><th>state</th>
-    <th>attempt</th><th>last_error</th><th>next_attempt</th><th>first_queued</th><th>payload</th>
+    <th>attempt</th><th>说明</th><th>next_attempt</th><th>first_queued</th><th>payload</th>
   </tr>`;
   const bodyRows=rows.map((r,i)=>{
     const target=`${esc(r.target_label||'—')}<div class="wh-mono" style="color:var(--dim)">${esc(r.target_id||'')}</div>`;
+    const errDisp=esc(whErrorText(r));
+    const errTitle=esc(r.last_error||r.error||'');
     return `<tr>
       <td><button type="button" class="wh-copy-btn" onclick="copyWebhookDebug(${i})">复制</button></td>
       <td class="wh-mono">${esc(r.delivery_id||'')}</td>
       <td>${target}</td>
-      <td>${esc(r.event||'')}</td>
+      <td>${esc(r.event_text||whEventText(r.event)||'—')}</td>
       <td class="${_whStateClass(r.delivery_state)}">${esc(r.delivery_state||'')}</td>
       <td>${esc(String(r.attempt_count??0))}${r.max_attempts?('/'+esc(String(r.max_attempts))):''}</td>
-      <td class="wh-mono">${esc(r.last_error||'—')}</td>
+      <td class="wh-mono" title="${errTitle}">${errDisp}</td>
       <td>${esc(_whFmtTs(r.next_attempt_ts))}</td>
       <td>${esc(_whFmtTs(r.first_queued_ts))}</td>
       <td class="wh-mono">${esc(_whPayloadSummary(r))}</td>
@@ -7527,6 +7547,7 @@ class WebServer:
                 try:
                     rows = ds.get_webhook_problem_deliveries(
                         limit=max(1, min(limit, 200)))
+                    rows = [enrich_webhook_delivery(r) for r in rows]
                 except Exception:
                     rows = []
                 return json.dumps(rows, ensure_ascii=False), 200, {
@@ -7555,7 +7576,10 @@ class WebServer:
                     "Content-Type": "application/json"}
             try:
                 stats = ds.get_webhook_delivery_stats()
-                failures = ds.get_last_webhook_failures(5)
+                failures = [
+                    enrich_webhook_failure(f)
+                    for f in ds.get_last_webhook_failures(5)
+                ]
             except Exception:
                 stats = {}
                 failures = []
