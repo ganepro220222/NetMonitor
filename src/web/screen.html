@@ -498,7 +498,7 @@ function fitStage(){
   el.style.left=((innerWidth-1920*s)/2)+'px';
   el.style.top=((innerHeight-1080*s)/2)+'px';
 }
-addEventListener('resize',()=>{fitStage();markScrollable();if(isGeoChartReady()) geoChart.resize();}); fitStage();
+addEventListener('resize',()=>{fitStage();markScrollable();if(isGeoChartReady()) geoChart.resize();syncGlobeScaleCompensation();}); fitStage();
 
 function markScrollable(root){
   const base=root||document;
@@ -2189,6 +2189,65 @@ function globeCameraFor(){
   if(geoMapUserChoice==='world') return {lat:10,lng:60,altitude:2.0};
   return {lat:22,lng:108,altitude:2.0};
 }
+
+/** #stage visual scale from layout vs getBoundingClientRect (handles zoom/DPR rounding). */
+function measureStageScale(){
+  const stage=document.getElementById('stage');
+  if(!stage||!stage.clientWidth||!stage.clientHeight) return 1;
+  const sr=stage.getBoundingClientRect();
+  const sx=sr.width/stage.clientWidth, sy=sr.height/stage.clientHeight;
+  const s=Math.min(sx||1, sy||1);
+  return s>0?s:1;
+}
+function clearGlobeScaleCompensation(el){
+  if(!el) return;
+  el.style.width=''; el.style.height=''; el.style.left=''; el.style.top='';
+  el.style.right=''; el.style.bottom=''; el.style.transform=''; el.style.transformOrigin='';
+  delete el.__globeScaleSig;
+}
+/** Resize globe.gl only when #globeViz layout changed — never on every data poll. */
+function syncGlobeRenderSize(el, g){
+  if(!el||!g) return;
+  requestAnimationFrame(()=>{try{
+    const cw=el.clientWidth, ch=el.clientHeight;
+    if(cw&&ch&&(g.__lw!==cw||g.__lh!==ch)){
+      g.__lw=cw; g.__lh=ch; g.width(cw); g.height(ch);
+    }
+  }catch(e){}});
+}
+/** Counter #stage CSS scale so globe pointer coords match raycast (3D only). */
+function syncGlobeScaleCompensation(){
+  const el=document.getElementById('globeViz');
+  if(!el) return;
+  if(!geo3D||topoMode!=='geo'){
+    clearGlobeScaleCompensation(el);
+    if(globe){ globe.__lw=0; globe.__lh=0; }
+    return;
+  }
+  const parent=el.parentElement;
+  if(!parent) return;
+  const baseW=parent.clientWidth, baseH=parent.clientHeight;
+  if(!baseW||!baseH) return;
+  const s=measureStageScale();
+  if(Math.abs(s-1)<0.001){
+    if(el.__globeScaleSig){
+      clearGlobeScaleCompensation(el);
+      if(globe){ globe.__lw=0; globe.__lh=0; syncGlobeRenderSize(el, globe); }
+    }
+    return;
+  }
+  const sig=s.toFixed(4)+':'+baseW+':'+baseH;
+  if(el.__globeScaleSig===sig) return;
+  el.__globeScaleSig=sig;
+  el.style.left='0'; el.style.top='0';
+  el.style.right='auto'; el.style.bottom='auto';
+  el.style.transformOrigin='0 0';
+  el.style.width=Math.round(baseW*s)+'px';
+  el.style.height=Math.round(baseH*s)+'px';
+  el.style.transform='scale('+(1/s)+')';
+  if(globe) syncGlobeRenderSize(el, globe);
+}
+
 function renderGlobe(data, updateBadge=true){
   const el=document.getElementById('globeViz');
   if(!el) return;
@@ -2221,12 +2280,8 @@ function renderGlobe(data, updateBadge=true){
       g.__dynSig=dynSig;
       g.pointsData(pts).htmlElementsData(labelPts).arcsData(arcs).ringsData(rings);
     }
-    // Resize only when the container size actually changed (e.g. first show).
-    // Calling width()/height() every refresh re-renders the whole scene and made
-    // the borders visibly blink on each rotation/poll tick.
-    requestAnimationFrame(()=>{try{const cw=el.clientWidth, ch=el.clientHeight;
-      if(cw&&ch&&(g.__lw!==cw||g.__lh!==ch)){ g.__lw=cw; g.__lh=ch; g.width(cw); g.height(ch); }
-    }catch(e){}});
+    // Canvas size: only when layout changed (see syncGlobeRenderSize) — not every poll.
+    syncGlobeRenderSize(el, g);
     syncGlobeDetailState(data);
     // NOTE: do NOT move the camera on data refresh — periodic loadAll/SSE renders
     // would otherwise yank the globe back to the preset every cycle and the
@@ -2245,6 +2300,7 @@ function syncGlobeVisibility(){
   if(!on) globeHideSearch();
   if(globe){ if(on){ if(globe.resumeAnimation) globe.resumeAnimation(); }
              else  { if(globe.pauseAnimation)  globe.pauseAnimation();  } }
+  syncGlobeScaleCompensation();
 }
 // Pause the globe's render loop while the page is hidden (minimised/occluded) to
 // save GPU on a 24/7 screen. Data polling (loadAll/SSE) is separate and keeps

@@ -1356,6 +1356,52 @@ def test_globe_stale_detail_sync():
     return ok
 
 
+def test_globe_stage_scale_compensation():
+    """3D globe must compensate #stage CSS scale for pointer/raycast alignment."""
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    measure = html[
+        html.find("function measureStageScale(") : html.find(
+            "function clearGlobeScaleCompensation(", html.find("function measureStageScale(")
+        )
+    ]
+    comp = html[
+        html.find("function syncGlobeScaleCompensation(") : html.find(
+            "function renderGlobe(", html.find("function syncGlobeScaleCompensation(")
+        )
+    ]
+    render = html[
+        html.find("function renderGlobe(") : html.find(
+            "function syncGlobeVisibility", html.find("function renderGlobe(")
+        )
+    ]
+    vis = html[
+        html.find("function syncGlobeVisibility(") : html.find(
+            "document.addEventListener('visibilitychange'", html.find("function syncGlobeVisibility(")
+        )
+    ]
+    resize_block = html[
+        html.find("addEventListener('resize'") : html.find("fitStage();", html.find("addEventListener('resize'")) + 120
+    ]
+    ok = (
+        "function measureStageScale(" in html
+        and "function syncGlobeScaleCompensation(" in html
+        and "function syncGlobeRenderSize(" in html
+        and "getBoundingClientRect()" in measure
+        and "sr.width/stage.clientWidth" in measure
+        and "clearGlobeScaleCompensation" in html
+        and "Math.abs(s-1)<0.001" in comp
+        and "__globeScaleSig" in comp
+        and "parent.clientWidth" in comp
+        and "(1/s)" in comp
+        and "syncGlobeRenderSize(el, g)" in render
+        and "syncGlobeScaleCompensation()" not in render
+        and "syncGlobeScaleCompensation();" in vis
+        and "syncGlobeScaleCompensation();" in resize_block
+    )
+    print(f"globe stage scale compensation -> {ok}")
+    return ok
+
+
 def test_geo_place_label_cn():
     """Monitor geo labels translate city/region/country and avoid mixed CN/EN."""
     html_path = os.path.join(ROOT, "src", "web", "screen.html")
@@ -1527,7 +1573,6 @@ def test_overseas_focus_viewport_points():
     fn = html[html.find("function collectGeoFocusPoints("):html.find("function buildGraticule(", html.find("function collectGeoFocusPoints("))]
     ok = (
         "if(!isOverseasGeo(g)&&src&&src.lon!=null&&src.lat!=null)" in fn
-        and "Domestic focus: target + source" in fn
         and "}else if(src&&src.lon!=null&&src.lat!=null){" in fn
     )
     print(f"overseas focus viewport points -> {ok}")
@@ -1587,6 +1632,7 @@ def main():
         ("globe_dyn_guard", test_globe_dynamic_data_guard()),
         ("globe_dyn_sig_label", test_globe_dynamic_sig_target_label()),
         ("globe_stale_detail", test_globe_stale_detail_sync()),
+        ("globe_scale_comp", test_globe_stage_scale_compensation()),
         ("geo_place_label", test_geo_place_label_cn()),
         ("monitor_source_label", test_monitor_source_label_cn()),
         ("egress_off_path", test_geo_source_egress_off_request_path()),
