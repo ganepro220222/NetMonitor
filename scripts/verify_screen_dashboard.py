@@ -42,8 +42,32 @@ def test_parse_window():
 def test_score_helpers():
     risk = compute_risk_score(red=1, orange=0, open_incidents=1, webhook_failures=0)
     health = compute_health_score(green=7, total=8, red=1, orange=0, avg_uptime=99.9)
-    ok = risk["score"] > 0 and 0 <= health["score"] <= 10
-    print(f"score helpers risk={risk} health={health} -> {ok}")
+    empty = compute_health_score(green=0, total=0, red=0, orange=0, avg_uptime=None)
+    ok = (
+        risk["score"] > 0
+        and 0 <= health["score"] <= 10
+        and empty["score"] is None
+        and empty["grade"] == "--"
+    )
+    print(f"score helpers risk={risk} health={health} empty={empty} -> {ok}")
+    return ok
+
+
+def test_empty_targets_overview_scores():
+    """Zero monitored targets must not show fabricated risk/health scores."""
+    invalidate_screen_cache()
+    w = WebServer(port=0)
+    w._running = True
+    ov = build_overview(w, window="today")
+    ok = (
+        ov["counts"]["targets"] == 0
+        and (ov.get("risk") or {}).get("score") is None
+        and (ov.get("risk") or {}).get("grade") == "--"
+        and (ov.get("health") or {}).get("score") is None
+        and (ov.get("health") or {}).get("grade") == "--"
+        and (ov.get("score_inputs") or {}).get("green_ratio") is None
+    )
+    print(f"empty targets overview scores -> {ok}")
     return ok
 
 
@@ -933,6 +957,7 @@ def test_geo_xdb_foolproof_bootstrap():
         and "download_ip2region.py" in start_bat
         and "download_ip2region.py" in setup_bat
         and "--quiet" in start_bat
+        and ") > start.bat" in setup_bat
     )
     print(f"geo xdb foolproof bootstrap -> {ok}")
     return ok
@@ -1584,6 +1609,7 @@ def main():
     tests = [
         ("parse_window", test_parse_window()),
         ("scores", test_score_helpers()),
+        ("empty_scores", test_empty_targets_overview_scores()),
         ("summarize_break", test_summarize_break_wording()),
         ("break_kind", test_break_kind_display()),
         ("alert_path_ok", test_alert_path_ok_while_probe_fails()),

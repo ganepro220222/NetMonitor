@@ -42,8 +42,31 @@ if errorlevel 1 (
     echo         Re-run setup.bat or start.bat when online.
 )
 
-echo  [4/4] Generating icon ...
+echo  [4/5] Generating icon ...
 .venv\Scripts\python.exe -c "from src.icon_generator import ensure_icon; ensure_icon()"
+
+echo  [5/5] Writing start.bat ...
+(
+echo @echo off
+echo cd /d "%%~dp0"
+echo.
+echo if not exist ".venv\Scripts\python.exe" ^(
+echo     echo.
+echo     echo  First run: please execute setup.bat once.
+echo     echo.
+echo     pause
+echo     exit /b 1
+echo ^)
+echo.
+echo echo [NetMonitor] Checking geo database...
+echo .venv\Scripts\python.exe scripts\download_ip2region.py --quiet
+echo if errorlevel 1 ^(
+echo     echo [WARN] Geo DB not ready - map auto-geo limited until download succeeds.
+echo ^)
+echo.
+echo .venv\Scripts\python.exe main.py
+echo if errorlevel 1 pause
+) > start.bat
 
 echo.
 echo  =====================================================

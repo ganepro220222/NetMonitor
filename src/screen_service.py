@@ -92,10 +92,13 @@ def compute_risk_score(*, red: int, orange: int, open_incidents: int,
     return {"score": round(score, 1), "grade": grade}
 
 
+_NO_SCORE = {"score": None, "grade": "--"}
+
+
 def compute_health_score(*, green: int, total: int, red: int, orange: int,
                          avg_uptime: float | None) -> dict:
     if total <= 0:
-        return {"score": 10.0, "grade": "优"}
+        return dict(_NO_SCORE)
     ratio = green / total
     uptime_part = (avg_uptime / 100.0) if avg_uptime is not None else ratio
     penalty = (red * 0.08 + orange * 0.03) / max(total, 1)
@@ -463,19 +466,23 @@ def build_overview(web, *, window: str = "today",
         except Exception:
             avg_uptime = None
 
-    risk = compute_risk_score(
-        red=counts["red"],
-        orange=counts["orange"],
-        open_incidents=len(open_map),
-        webhook_failures=webhook_failures,
-    )
-    health = compute_health_score(
-        green=counts["green"],
-        total=counts["targets"],
-        red=counts["red"],
-        orange=counts["orange"],
-        avg_uptime=avg_uptime,
-    )
+    if counts["targets"] <= 0:
+        risk = dict(_NO_SCORE)
+        health = dict(_NO_SCORE)
+    else:
+        risk = compute_risk_score(
+            red=counts["red"],
+            orange=counts["orange"],
+            open_incidents=len(open_map),
+            webhook_failures=webhook_failures,
+        )
+        health = compute_health_score(
+            green=counts["green"],
+            total=counts["targets"],
+            red=counts["red"],
+            orange=counts["orange"],
+            avg_uptime=avg_uptime,
+        )
     out = {
         "updated_at": int(time.time()),
         "window": window,
@@ -492,7 +499,8 @@ def build_overview(web, *, window: str = "today",
             "orange": counts["orange"],
             "open_incidents": len(open_map),
             "webhook_failures": webhook_failures,
-            "green_ratio": round(counts["green"] / max(counts["targets"], 1), 4),
+            "green_ratio": (round(counts["green"] / counts["targets"], 4)
+                            if counts["targets"] else None),
             "avg_uptime_pct": round(avg_uptime, 3) if avg_uptime is not None else None,
         },
     }

@@ -871,15 +871,23 @@ function onRouteChangedSSE(m){
 }
 
 function renderScoreHints(ov){
-  const meta=ov.score_meta||{};
-  const inp=ov.score_inputs||{};
+  const c=ov.counts||{};
   const rh=document.getElementById('riskHint');
   const hh=document.getElementById('healthHint');
-  if(meta.risk){
+  if(!(c.targets>0)){
+    const msg='尚未配置监控节点';
+    if(rh) rh.textContent=msg;
+    if(hh) hh.textContent=msg;
+    return;
+  }
+  const meta=ov.score_meta||{};
+  const inp=ov.score_inputs||{};
+  if(meta.risk&&rh){
     rh.textContent=`${meta.risk.formula} · red ${inp.red||0} · 未恢复 ${inp.open_incidents||0}`;
   }
-  if(meta.health){
-    hh.textContent=`${meta.health.formula} · 正常比 ${((inp.green_ratio||0)*100).toFixed(1)}%`;
+  if(meta.health&&hh){
+    const gr=inp.green_ratio;
+    hh.textContent=`${meta.health.formula} · 正常比 ${gr!=null?(gr*100).toFixed(1):'--'}%`;
   }
 }
 function renderOverview(ov){
@@ -890,21 +898,23 @@ function renderOverview(ov){
   document.getElementById('healthRing').textContent=(ov.health&&ov.health.score!=null)?ov.health.score:'--';
   document.getElementById('healthGrade').textContent=(ov.health&&ov.health.grade)||'--';
   const riskRing=document.getElementById('riskRing');
-  const riskScore=(ov.risk&&ov.risk.score!=null)?ov.risk.score:0;
-  const riskCol=riskScore>=60?'var(--red)':riskScore>=30?'var(--orange)':'var(--cyan)';
+  const riskHas=ov.risk&&ov.risk.score!=null;
+  const riskScore=riskHas?ov.risk.score:0;
+  const riskCol=riskHas?(riskScore>=60?'var(--red)':riskScore>=30?'var(--orange)':'var(--cyan)'):'var(--dim)';
   riskRing.style.borderColor='rgba(148,163,184,.20)';
-  riskRing.style.boxShadow=`0 0 22px ${riskCol}33,inset 0 0 18px ${riskCol}10`;
+  riskRing.style.boxShadow=riskHas?`0 0 22px ${riskCol}33,inset 0 0 18px ${riskCol}10`:'none';
   riskRing.style.color=riskCol;
   riskRing.style.setProperty('--arc',riskCol);
-  riskRing.style.setProperty('--pct',Math.max(0,Math.min(1,riskScore/100)));
+  riskRing.style.setProperty('--pct',riskHas?Math.max(0,Math.min(1,riskScore/100)):0);
   const healthRing=document.getElementById('healthRing');
-  const healthScore=(ov.health&&ov.health.score!=null)?ov.health.score:0;
-  const healthCol=healthScore>=8?'var(--green)':healthScore>=6?'var(--orange)':'var(--red)';
+  const healthHas=ov.health&&ov.health.score!=null;
+  const healthScore=healthHas?ov.health.score:0;
+  const healthCol=healthHas?(healthScore>=8?'var(--green)':healthScore>=6?'var(--orange)':'var(--red)'):'var(--dim)';
   healthRing.style.borderColor='rgba(148,163,184,.20)';
-  healthRing.style.boxShadow=`0 0 22px ${healthCol==='var(--green)'?'rgba(34,197,94,.3)':healthCol==='var(--orange)'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'},inset 0 0 18px rgba(255,255,255,.04)`;
+  healthRing.style.boxShadow=healthHas?`0 0 22px ${healthCol==='var(--green)'?'rgba(34,197,94,.3)':healthCol==='var(--orange)'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'},inset 0 0 18px rgba(255,255,255,.04)`:'none';
   healthRing.style.color=healthCol;
   healthRing.style.setProperty('--arc',healthCol);
-  healthRing.style.setProperty('--pct',Math.max(0,Math.min(1,healthScore/10)));
+  healthRing.style.setProperty('--pct',healthHas?Math.max(0,Math.min(1,healthScore/10)):0);
   document.getElementById('countsHint').textContent=
     `节点 ${c.targets||0} · 正常 ${c.green||0} · 警告 ${c.orange||0} · 告警 ${c.red||0} · 未恢复 ${ov.open_incidents||0}`;
   document.getElementById('riskStats').innerHTML=[
@@ -921,19 +931,23 @@ function renderOverview(ov){
  *  payload already on hand (no extra request). Outer = healthier. */
 function renderHealthRadar(ov){
   const svg=document.getElementById('healthRadar'); if(!svg) return;
-  const c=ov.counts||{}; const tot=Math.max(c.targets||0,1);
+  const c=ov.counts||{};
+  const noData=!(c.targets>0)||((ov.risk&&ov.risk.score==null)&&(ov.health&&ov.health.score==null));
+  const tot=Math.max(c.targets||0,1);
   const risk=(ov.risk&&ov.risk.score!=null)?ov.risk.score:0;
   const health=(ov.health&&ov.health.score!=null)?ov.health.score:0;
   const up=(ov.avg_uptime_pct!=null)?ov.avg_uptime_pct:100;
   const clamp=v=>Math.max(0,Math.min(100,v));
-  const dims=[
+  const dims=noData?[
+    ['连通率', 0],['可用率', 0],['健康分', 0],['低风险', 0],['无故障', 0],
+  ]:[
     ['连通率', (c.green||0)/tot*100],
     ['可用率', up],
     ['健康分', health*10],
     ['低风险', 100-risk],
     ['无故障', (1-(c.red||0)/tot)*100],
   ].map(d=>[d[0],clamp(d[1])]);
-  const col=health>=8?'34,211,238':health>=6?'245,158,11':'239,68,68';
+  const col=noData?'100,116,139':(health>=8?'34,211,238':health>=6?'245,158,11':'239,68,68');
   const cx=160, cy=160, R=76, labelR=96, n=dims.length;
   const ang=i=>(-90+i*360/n)*Math.PI/180;
   const pt=(i,r)=>[cx+Math.cos(ang(i))*r, cy+Math.sin(ang(i))*r];
@@ -949,14 +963,17 @@ function renderHealthRadar(ov){
     g+=`<line x1="${cx}" y1="${cy}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" stroke="rgba(34,211,238,.13)"/>`;
     const [lx,ly]=pt(i,labelR);
     const anc=lx>cx+6?'start':(lx<cx-6?'end':'middle');
+    const val=noData?'--':Math.round(d[1]);
     g+=`<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="var(--dim)" font-size="10.5" `
       +`text-anchor="${anc}" dominant-baseline="middle">${d[0]} `
-      +`<tspan fill="rgb(${col})" font-weight="700">${Math.round(d[1])}</tspan></text>`;
+      +`<tspan fill="rgb(${col})" font-weight="700">${val}</tspan></text>`;
   });
-  g+=`<polygon points="${poly(i=>R*dims[i][1]/100)}" fill="rgba(${col},.20)" `
-    +`stroke="rgb(${col})" stroke-width="2" stroke-linejoin="round" filter="url(#radarGlow)"/>`;
-  dims.forEach((d,i)=>{const [px,py]=pt(i,R*d[1]/100);
-    g+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="3" fill="rgb(${col})"/>`;});
+  if(!noData){
+    g+=`<polygon points="${poly(i=>R*dims[i][1]/100)}" fill="rgba(${col},.20)" `
+      +`stroke="rgb(${col})" stroke-width="2" stroke-linejoin="round" filter="url(#radarGlow)"/>`;
+    dims.forEach((d,i)=>{const [px,py]=pt(i,R*d[1]/100);
+      g+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="3" fill="rgb(${col})"/>`;});
+  }
   svg.innerHTML=g;
 }
 
