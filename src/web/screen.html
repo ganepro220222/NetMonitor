@@ -1281,14 +1281,21 @@ function collectGeoPoints(targets, src){
 }
 
 /** Viewport fit uses target + monitor-source pins only — break hops must not
- *  zoom the map in/out when tracert data arrives on refresh. */
+ *  zoom the map in/out when tracert data arrives on refresh.
+ *  Domestic focus: target + source (both fit in China).  Overseas focus: target
+ *  only — source still draws arcs but must not pull the center to Africa/Med. */
 function collectGeoFocusPoints(targets, src, focusTid){
   const pts=[];
   const row=(targets||[]).find(t=>t.tid===focusTid);
-  if(row&&row.geo&&row.geo.lon!=null&&row.geo.lat!=null){
-    pts.push([row.geo.lon, row.geo.lat]);
+  const g=row&&row.geo;
+  if(g&&g.lon!=null&&g.lat!=null){
+    pts.push([g.lon, g.lat]);
+    if(!isOverseasGeo(g)&&src&&src.lon!=null&&src.lat!=null){
+      pts.push([src.lon, src.lat]);
+    }
+  }else if(src&&src.lon!=null&&src.lat!=null){
+    pts.push([src.lon, src.lat]);
   }
-  if(src&&src.lon!=null&&src.lat!=null) pts.push([src.lon, src.lat]);
   return pts;
 }
 

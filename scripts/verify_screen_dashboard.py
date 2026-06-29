@@ -1521,6 +1521,19 @@ def test_screen_data_seq_guard():
     return ok
 
 
+def test_overseas_focus_viewport_points():
+    """Overseas focus must not include monitor source in bbox (avoids Africa center)."""
+    html = open(os.path.join(ROOT, "src", "web", "screen.html"), encoding="utf-8").read()
+    fn = html[html.find("function collectGeoFocusPoints("):html.find("function buildGraticule(", html.find("function collectGeoFocusPoints("))]
+    ok = (
+        "if(!isOverseasGeo(g)&&src&&src.lon!=null&&src.lat!=null)" in fn
+        and "Domestic focus: target + source" in fn
+        and "}else if(src&&src.lon!=null&&src.lat!=null){" in fn
+    )
+    print(f"overseas focus viewport points -> {ok}")
+    return ok
+
+
 def main():
     tests = [
         ("parse_window", test_parse_window()),
@@ -1564,6 +1577,7 @@ def main():
         ("render_geo_markscroll", test_render_geo_marks_topo_detail()),
         ("geo_zero_guard", test_geo_chart_zero_size_guard()),
         ("geo_viewport_merge", test_geo_viewport_setoption_merge()),
+        ("overseas_focus_pts", test_overseas_focus_viewport_points()),
         ("screen_data_seq", test_screen_data_seq_guard()),
         ("counts_hint_orange", test_counts_hint_includes_orange()),
         ("overview_fresh", test_overview_fresh_refresh()),
