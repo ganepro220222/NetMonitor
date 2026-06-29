@@ -665,6 +665,7 @@ def test_source_guards():
         and "/api/screen/geo" in ws
         and 'route("/vendor/' in ws.replace(" ", "")
         and "src/web/vendor" in open(os.path.join(ROOT, "build_exe.spec"), encoding="utf-8").read()
+        and "screen.html" in open(os.path.join(ROOT, "build_exe.spec"), encoding="utf-8").read()
         # 3D globe (globe.gl) — twin of the 2D map; assets vendored + bundled
         and "renderGlobe" in html
         and "toggleGlobe" in html

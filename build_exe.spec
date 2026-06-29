@@ -13,7 +13,8 @@ block_cipher = None
 datas = [
     # 应用图标 + 告警音效 + 可选 ip2region_v4.xdb（离线 GeoIP，纯本地查表）
     ('assets', 'assets'),
-    # 态势大屏地理视图：ECharts + 中国/世界 GeoJSON（禁止 CDN 降级）
+    # 态势大屏：HTML 页面 + 自托管静态资源（禁止 CDN 降级）
+    ('src/web/screen.html', 'src/web'),
     ('src/web/vendor', 'src/web/vendor'),
 ]
 

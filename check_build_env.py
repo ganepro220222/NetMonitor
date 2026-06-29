@@ -36,6 +36,25 @@ def check_pathlib():
         print("  pathlib removed OK.")
         return True
 
+def check_screen_page():
+    """态势大屏 HTML 必须打入 exe（/screen 路由读 src/web/screen.html）。"""
+    root = os.path.dirname(os.path.abspath(__file__))
+    html = os.path.join(root, "src", "web", "screen.html")
+    if not os.path.isfile(html):
+        print()
+        print("  [ERROR] Missing screen dashboard page:")
+        print(f"    - {os.path.relpath(html, root)}")
+        return False
+    spec = os.path.join(root, "build_exe.spec")
+    if os.path.isfile(spec):
+        body = open(spec, encoding="utf-8").read()
+        if "screen.html" not in body:
+            print()
+            print("  [ERROR] build_exe.spec must bundle src/web/screen.html")
+            return False
+    return True
+
+
 def check_screen_vendor():
     """态势大屏地图依赖的自托管静态资源（禁止 CDN）。"""
     root = os.path.dirname(os.path.abspath(__file__))
@@ -86,6 +105,8 @@ if __name__ == '__main__':
         sys.exit(1)
     if not check_pyinstaller():
         sys.exit(2)
+    if not check_screen_page():
+        sys.exit(4)
     if not check_screen_vendor():
         sys.exit(3)
     check_ip2region_optional()

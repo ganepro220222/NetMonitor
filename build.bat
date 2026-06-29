@@ -44,7 +44,9 @@ if exist "dist"  rmdir /s /q "dist"
 echo  [4/5] Offline GeoIP database (optional, local-only at runtime)...
 %VENV_PY% scripts\download_ip2region.py
 if errorlevel 1 (
-    echo  [WARN] ip2region.xdb not downloaded — map still works with manual geo.
+    echo  [WARN] ip2region_v4.xdb not downloaded — exe will lack offline public-IP geo until xdb exists beside exe or is downloaded at runtime.
+) else if not exist "assets\ip2region_v4.xdb" (
+    echo  [WARN] assets\ip2region_v4.xdb still missing after download step.
 )
 
 echo  [5/5] Building... (2-5 minutes)
