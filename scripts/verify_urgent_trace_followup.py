@@ -30,6 +30,12 @@ def test_followup_scheduled_on_clean_trace_while_red():
         def current_target_generation(self, tid):
             return 0
 
+        def list_sending_webhook_delivery_ids(self, target_id, events=None):
+            return []
+
+        def drop_pending_webhook_events(self, target_id, events, reason):
+            return 0
+
     a._config = _Cfg()
     a._data_store = _DS()
     a.set_trace_request_callback(lambda tid: requested.append(tid))

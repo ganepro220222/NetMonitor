@@ -1958,42 +1958,46 @@ class AlertManager:
             self._verify_outbox_send_commit(
                 delivery_id=delivery_id, gate=gate,
                 commit_epoch=commit_epoch)
-            with _ORIGINAL_HTTP_OPEN(req, timeout=timeout) as resp:
-                getheader = getattr(resp, "getheader", None)
-                if callable(getheader):
-                    clen_hdr = getheader("Content-Length")
-                    if clen_hdr is not None:
-                        try:
-                            clen = int(clen_hdr)
-                        except ValueError:
-                            pass
-                        else:
-                            if clen > _MAX_RESPONSE_BYTES:
-                                raise ValueError(
-                                    f"webhook response Content-Length too large: "
-                                    f"{clen}")
-                read_fn = getattr(resp, "read", None)
-                if callable(read_fn):
-                    # Cap reads so chunked / missing Content-Length responses
-                    # cannot grow without bound.  When Content-Length is
-                    # present and within the cap, also verify the full body
-                    # arrived so truncated responses still retry.
-                    data = read_fn(_MAX_RESPONSE_BYTES + 1)
-                    if len(data) > _MAX_RESPONSE_BYTES:
-                        raise ValueError(
-                            f"webhook response body too large: "
-                            f"{len(data)} bytes")
-                    if clen_hdr is not None:
-                        try:
-                            clen = int(clen_hdr)
-                        except ValueError:
-                            clen = None
-                        if (clen is not None
-                                and clen <= _MAX_RESPONSE_BYTES
-                                and len(data) < clen):
-                            import http.client as _http_client
-                            raise _http_client.IncompleteRead(
-                                data, clen - len(data))
+
+        clen_hdr = None
+        with _ORIGINAL_HTTP_OPEN(req, timeout=timeout) as resp:
+            getheader = getattr(resp, "getheader", None)
+            if callable(getheader):
+                clen_hdr = getheader("Content-Length")
+                if clen_hdr is not None:
+                    try:
+                        clen = int(clen_hdr)
+                    except ValueError:
+                        pass
+                    else:
+                        if clen > _MAX_RESPONSE_BYTES:
+                            raise ValueError(
+                                f"webhook response Content-Length too large: "
+                                f"{clen}")
+            read_fn = getattr(resp, "read", None)
+            if callable(read_fn):
+                # Cap reads so chunked / missing Content-Length responses
+                # cannot grow without bound.  When Content-Length is
+                # present and within the cap, also verify the full body
+                # arrived so truncated responses still retry.
+                data = read_fn(_MAX_RESPONSE_BYTES + 1)
+                if len(data) > _MAX_RESPONSE_BYTES:
+                    raise ValueError(
+                        f"webhook response body too large: "
+                        f"{len(data)} bytes")
+                if clen_hdr is not None:
+                    try:
+                        clen = int(clen_hdr)
+                    except ValueError:
+                        clen = None
+                    if (clen is not None
+                            and clen <= _MAX_RESPONSE_BYTES
+                            and len(data) < clen):
+                        import http.client as _http_client
+                        raise _http_client.IncompleteRead(
+                            data, clen - len(data))
+
+        with self._webhook_outbox_send_lock:
             try:
                 self._verify_outbox_send_commit(
                     delivery_id=delivery_id, gate=gate,

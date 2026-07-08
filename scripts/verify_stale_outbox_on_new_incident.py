@@ -44,8 +44,9 @@ def test_stale_diagnostic_dropped_on_new_incident():
     a, disp, ds = make_alerter(
         targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     delivered = []
-    a._send_webhook = staticmethod(
-        lambda *args, **kw: delivered.append(args[1]))
+    a._send_webhook = (
+        lambda url, event, target, ip, status, message, ts_str,
+        extra=None, **kw: delivered.append(event))
 
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     _flush(disp)
@@ -96,8 +97,9 @@ def test_short_flap_alert_red_not_dropped():
     a, disp, ds = make_alerter(
         targets=[{"id": "t1", "label": "GW", "ip": "10.0.0.1"}])
     delivered = []
-    a._send_webhook = staticmethod(
-        lambda *args, **kw: delivered.append(args[1]))
+    a._send_webhook = (
+        lambda url, event, target, ip, status, message, ts_str,
+        extra=None, **kw: delivered.append(event))
 
     a.on_status_change("t1", "GW", "10.0.0.1", "red")
     seq = a._webhook_incidents["t1"].push_seq

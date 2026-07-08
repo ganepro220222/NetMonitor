@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.webhook_test_util import make_alerter
+import src.alert_manager as am_mod
 from src.alert_manager import AlertManager
 
 
@@ -225,6 +226,54 @@ def _urlopen_entry_race_scenario(*, action: str, delivery_id: str):
     }
 
 
+def _during_urlopen_race_scenario(*, action: str, delivery_id: str):
+    """Race while urlopen/read is in progress (send lock released)."""
+    a, disp, ds = make_alerter()
+    entered = threading.Event()
+    release = threading.Event()
+    http_calls = []
+    target_id = "t1"
+
+    class _SlowResp:
+        def __enter__(self):
+            entered.set()
+            release.wait(timeout=5)
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def getheader(self, name):
+            return None
+
+        def read(self, n=-1):
+            return b""
+
+    def _slow_open(req, timeout=10):
+        http_calls.append(1)
+        return _SlowResp()
+
+    row, target_id = _enqueue_reminder(
+        a, ds, delivery_id=delivery_id, target_id=target_id)
+
+    t = threading.Thread(
+        target=disp._deliver_one, args=(row, time.time()), daemon=True)
+    with patch.object(am_mod, "_ORIGINAL_HTTP_OPEN", side_effect=_slow_open):
+        t.start()
+        assert entered.wait(timeout=5), "did not enter urlopen"
+        expected_error = _apply_action(a, action, target_id)
+        release.set()
+        t.join(timeout=5)
+
+    rem = _outbox_row(ds, delivery_id)
+    return {
+        "action": action,
+        "sent": http_calls,
+        "rows": [(rem["delivery_id"], rem["delivery_state"], rem["last_error"])],
+        "expected_error": expected_error,
+    }
+
+
 def _check_during_send(r):
     ok = (
         r["sent"] == []
@@ -232,6 +281,16 @@ def _check_during_send(r):
         and r["rows"][0][2] == r["expected_error"]
     )
     print(f"Bug165 {r['action']} during _send_webhook -> {ok} {r}")
+    return ok
+
+
+def _check_during_urlopen(r):
+    ok = (
+        r["sent"] == [1]
+        and r["rows"][0][1] == "dropped_stale"
+        and r["rows"][0][2] == r["expected_error"]
+    )
+    print(f"Bug165 {r['action']} during urlopen -> {ok} {r}")
     return ok
 
 
@@ -314,6 +373,24 @@ def test_remove_urlopen_entry_race():
             action="remove", delivery_id="remove-urlopen_entry"))
 
 
+def test_ack_during_urlopen():
+    return _check_during_urlopen(
+        _during_urlopen_race_scenario(
+            action="ack", delivery_id="ack-during_urlopen"))
+
+
+def test_pause_during_urlopen():
+    return _check_during_urlopen(
+        _during_urlopen_race_scenario(
+            action="pause", delivery_id="pause-during_urlopen"))
+
+
+def test_remove_during_urlopen():
+    return _check_during_urlopen(
+        _during_urlopen_race_scenario(
+            action="remove", delivery_id="remove-during_urlopen"))
+
+
 def main():
     results = [
         ("ack_during_send", test_ack_during_send()),
@@ -328,6 +405,9 @@ def main():
         ("ack_urlopen_entry", test_ack_urlopen_entry_race()),
         ("pause_urlopen_entry", test_pause_urlopen_entry_race()),
         ("remove_urlopen_entry", test_remove_urlopen_entry_race()),
+        ("ack_during_urlopen", test_ack_during_urlopen()),
+        ("pause_during_urlopen", test_pause_during_urlopen()),
+        ("remove_during_urlopen", test_remove_during_urlopen()),
     ]
     failed = [n for n, ok in results if not ok]
     if failed:

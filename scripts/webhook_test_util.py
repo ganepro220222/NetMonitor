@@ -78,7 +78,7 @@ def install_push_capture(a, calls, disp=None):
             "extra": extra, **kw,
         })
 
-    a._send_webhook = staticmethod(_send)
+    a._send_webhook = _send
 
     def _flush(n=8, delay=0.02):
         d = disp or WebhookOutboxDispatcher(a)
