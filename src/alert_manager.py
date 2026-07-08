@@ -2193,8 +2193,10 @@ class AlertManager:
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST")
         if delivery_id:
+            from src.webhook_outbox import webhook_http_timeout
+            timeout = webhook_http_timeout(event, attempt)
             self._commit_outbox_webhook_http(
-                req, delivery_id=delivery_id, gate=gate)
+                req, delivery_id=delivery_id, gate=gate, timeout=timeout)
         else:
             with urllib.request.urlopen(req, timeout=10):
                 pass

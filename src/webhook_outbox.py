@@ -8,6 +8,8 @@ from typing import Any
 
 # Retry backoff: 5s, 15s, 30s, 60s, 120s, 300s, then every 300s.
 BACKOFF_SECONDS = (5, 15, 30, 60, 120, 300)
+# alert_red: compact early retries (attempt-1 indexing).
+ALERT_RED_BACKOFF_SECONDS = (2, 5, 10, 30, 60, 300)
 DISPATCH_INTERVAL_SEC = 2.0
 CLOSED_SUMMARY_DELAY_SEC = 60
 SENDING_LEASE_SEC = 120.0
@@ -24,11 +26,25 @@ class WebhookDeliveryAborted(Exception):
         self.side_effect_committed = side_effect_committed
 
 
-def compute_next_attempt_ts(attempt_count: int, now: float | None = None) -> float:
+def compute_next_attempt_ts(
+        attempt_count: int, now: float | None = None, *,
+        event: str = "") -> float:
     """Return the next retry timestamp after a failed attempt."""
     now = now or time.time()
-    idx = min(max(attempt_count, 0), len(BACKOFF_SECONDS) - 1)
-    return now + BACKOFF_SECONDS[idx]
+    if event == "alert_red":
+        backoff = ALERT_RED_BACKOFF_SECONDS
+        idx = min(max(attempt_count - 1, 0), len(backoff) - 1)
+    else:
+        backoff = BACKOFF_SECONDS
+        idx = min(max(attempt_count, 0), len(backoff) - 1)
+    return now + backoff[idx]
+
+
+def webhook_http_timeout(event: str, attempt: int) -> int:
+    """HTTP timeout seconds for outbox delivery attempts."""
+    if event == "alert_red" and attempt <= 3:
+        return 5
+    return 10
 
 
 def max_attempts_for_event(event: str) -> int:
@@ -200,7 +216,7 @@ class WebhookOutboxDispatcher:
                 delivery_id, state="failed_permanent", error=err, now=now,
                 attempt_count=attempt, only_if_sending=True)
             return
-        next_ts = compute_next_attempt_ts(attempt, now)
+        next_ts = compute_next_attempt_ts(attempt, now, event=event)
         ds.finish_webhook_outbox(
             delivery_id, state="pending", error=err, now=now,
             attempt_count=attempt, next_attempt_ts=next_ts,

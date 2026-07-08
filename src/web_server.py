@@ -111,6 +111,8 @@ class _TracerouteScheduler:
     # ~20-hop responsive path in ~15–25s while still tolerating slow hops.
     URGENT_WAIT_MS = 500
     ROUTINE_WAIT_MS = 1000
+    # Cap concurrent urgent tracert subprocesses (multi-node simultaneous red).
+    URGENT_MAX_CONCURRENT = 8
 
     def __init__(self, cache: dict, cache_lock: threading.Lock,
                  interval: int = 300, push_fn=None):
@@ -124,10 +126,13 @@ class _TracerouteScheduler:
         self._prev_route_changed: dict[str, bool] = {}  # Rule B: require 2 consecutive changes
         self._targets: dict[str, str] = {}
         self._targets_lock = threading.Lock()
-        # Urgent traces spawn immediately — one daemon thread + subprocess per
-        # target, never queued behind the periodic full-scan serial loop.
+        # Urgent traces spawn immediately — bounded pool (URGENT_MAX_CONCURRENT)
+        # with a pending queue; one daemon thread + subprocess per target.
         self._urgent_inflight: dict[str, threading.Thread] = {}
         self._urgent_recent: set[str] = set()   # completed urgent tids this sched tick
+        self._urgent_pending: list[str] = []    # tids waiting for a pool slot
+        self._urgent_pending_set: set[str] = set()
+        self._urgent_sem = threading.BoundedSemaphore(self.URGENT_MAX_CONCURRENT)
         self._urgent_lock = threading.Lock()
         # Per-tid monotonic generation counter.  Bumped whenever the
         # target's identity or history baseline changes (IP edit,
@@ -197,35 +202,56 @@ class _TracerouteScheduler:
     def request_now(self, tid: str):
         """Start an urgent traceroute immediately (red alert / manual refresh).
 
-        Spawns a dedicated daemon thread and subprocess per target.  Multiple
-        red nodes trace in parallel — never queued behind the periodic
-        full-scan loop or another target's in-flight tracert.  Re-requests
-        for the same tid while a trace is already running are deduped.
+        Accepts into a bounded urgent pool (URGENT_MAX_CONCURRENT); excess
+        requests wait in a per-tid pending queue.  Re-requests for the same tid
+        while in-flight or already pending are deduped.
         """
         self._spawn_urgent(tid)
 
-    def _spawn_urgent(self, tid: str) -> bool:
-        """Launch urgent tracert in a new thread.  Returns False if skipped."""
-        with self._urgent_lock:
-            existing = self._urgent_inflight.get(tid)
-            if existing is not None and existing.is_alive():
-                return False
-            with self._targets_lock:
-                info = self._targets.get(tid)
-            if not info:
-                return False
-            if isinstance(info, dict):
-                info = dict(info)
-            else:
-                info = {"ip": info, "probe_ports": [80, 443]}
+    def _urgent_tid_active(self, tid: str) -> bool:
+        th = self._urgent_inflight.get(tid)
+        return th is not None and th.is_alive()
 
-            def _worker(target_info=info):
+    def _spawn_urgent(self, tid: str) -> bool:
+        """Queue or launch urgent tracert.  Returns True if accepted."""
+        with self._urgent_lock:
+            if self._urgent_tid_active(tid) or tid in self._urgent_pending_set:
+                return False
+        if self._urgent_sem.acquire(blocking=False):
+            if self._start_urgent_thread(tid):
+                return True
+            self._urgent_sem.release()
+        with self._urgent_lock:
+            if self._urgent_tid_active(tid) or tid in self._urgent_pending_set:
+                return False
+            self._urgent_pending.append(tid)
+            self._urgent_pending_set.add(tid)
+        return True
+
+    def _start_urgent_thread(self, tid: str) -> bool:
+        """Start one urgent worker.  Caller must hold a semaphore permit."""
+        with self._targets_lock:
+            raw = self._targets.get(tid)
+        if not raw:
+            return False
+        if isinstance(raw, dict):
+            info = dict(raw)
+        else:
+            info = {"ip": raw, "probe_ports": [80, 443]}
+
+        with self._urgent_lock:
+            if self._urgent_tid_active(tid):
+                return False
+
+            def _worker(target_info=info, worker_tid=tid):
                 try:
-                    self._run_one(tid, target_info, urgent=True)
+                    self._run_one(worker_tid, target_info, urgent=True)
                 finally:
                     with self._urgent_lock:
-                        self._urgent_inflight.pop(tid, None)
-                        self._urgent_recent.add(tid)
+                        self._urgent_inflight.pop(worker_tid, None)
+                        self._urgent_recent.add(worker_tid)
+                    self._urgent_sem.release()
+                    self._drain_urgent_pending()
 
             th = threading.Thread(
                 target=_worker,
@@ -235,6 +261,29 @@ class _TracerouteScheduler:
             self._urgent_inflight[tid] = th
             th.start()
             return True
+
+    def _drain_urgent_pending(self) -> None:
+        """Start the next queued urgent trace when a pool slot frees."""
+        while True:
+            with self._urgent_lock:
+                tid = None
+                while self._urgent_pending:
+                    cand = self._urgent_pending.pop(0)
+                    self._urgent_pending_set.discard(cand)
+                    if self._urgent_tid_active(cand):
+                        continue
+                    tid = cand
+                    break
+            if tid is None:
+                return
+            if not self._urgent_sem.acquire(blocking=False):
+                with self._urgent_lock:
+                    self._urgent_pending.insert(0, tid)
+                    self._urgent_pending_set.add(tid)
+                return
+            if self._start_urgent_thread(tid):
+                return
+            self._urgent_sem.release()
 
     def _urgent_skip_set(self) -> set[str]:
         """Target ids that should not be re-traced by the routine full-scan."""
@@ -6012,6 +6061,10 @@ function _whDebugText(row){
     `incident_id: ${row.incident_id||''}`,
     `incident_seq: ${row.incident_seq??''}`,
     `order_key: ${row.order_key||''}`,
+    `queue_delay_sec: ${row.queue_delay_sec??''}`,
+    `retry_wait_sec: ${row.retry_wait_sec??''}`,
+    `delivery_lag_sec: ${row.delivery_lag_sec??''}`,
+    `order_queue_depth: ${row.order_queue_depth??''}`,
     `payload_summary: ${_whPayloadSummary(row)}`,
   ];
   return lines.join('\n');
@@ -6072,7 +6125,8 @@ function renderWebhookFailPanel(stats, rows){
   }
   const head=`<tr>
     <th>操作</th><th>delivery_id</th><th>target</th><th>event</th><th>state</th>
-    <th>attempt</th><th>说明</th><th>next_attempt</th><th>first_queued</th><th>payload</th>
+    <th>attempt</th><th>说明</th><th>queue_delay</th><th>retry_wait</th><th>depth</th>
+    <th>next_attempt</th><th>first_queued</th><th>payload</th>
   </tr>`;
   const bodyRows=rows.map((r,i)=>{
     const target=`${esc(r.target_label||'—')}<div class="wh-mono" style="color:var(--dim)">${esc(r.target_id||'')}</div>`;
@@ -6086,6 +6140,9 @@ function renderWebhookFailPanel(stats, rows){
       <td class="${_whStateClass(r.delivery_state)}">${esc(r.delivery_state||'')}</td>
       <td>${esc(String(r.attempt_count??0))}${r.max_attempts?('/'+esc(String(r.max_attempts))):''}</td>
       <td class="wh-mono" title="${errTitle}">${errDisp}</td>
+      <td>${esc(r.queue_delay_sec!=null?String(r.queue_delay_sec)+'s':'—')}</td>
+      <td>${esc(r.retry_wait_sec!=null?String(r.retry_wait_sec)+'s':'—')}</td>
+      <td>${esc(r.order_queue_depth!=null?String(r.order_queue_depth):'—')}</td>
       <td>${esc(_whFmtTs(r.next_attempt_ts))}</td>
       <td>${esc(_whFmtTs(r.first_queued_ts))}</td>
       <td class="wh-mono">${esc(_whPayloadSummary(r))}</td>

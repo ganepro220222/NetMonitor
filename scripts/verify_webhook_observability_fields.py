@@ -25,6 +25,8 @@ REQUIRED_PROBLEM_FIELDS = [
     "delivery_state", "attempt_count", "max_attempts",
     "last_error", "first_queued_ts", "next_attempt_ts",
     "last_attempt_ts", "payload_summary",
+    "queue_delay_sec", "retry_wait_sec", "delivery_lag_sec",
+    "order_queue_depth",
 ]
 
 
@@ -91,7 +93,8 @@ def test_api_field_completeness():
         ok = False
 
     # Fields present (last_attempt_ts may be NULL for never-attempted rows)
-    NULLABLE_FIELDS = {"last_error", "max_attempts", "last_attempt_ts"}
+    NULLABLE_FIELDS = {"last_error", "max_attempts", "last_attempt_ts",
+                       "delivery_lag_sec"}
     for r in problems:
         for field in REQUIRED_PROBLEM_FIELDS:
             if field not in r:
@@ -107,6 +110,22 @@ def test_api_field_completeness():
         if not isinstance(ps, str) or len(ps) < 5:
             print(f"  FAIL: payload_summary too short for {r['delivery_id']}: {ps!r}")
             ok = False
+
+    # Timing fields populated
+    for r in problems:
+        if r["delivery_id"] == "D-PROB":
+            qd = r.get("queue_delay_sec")
+            rw = r.get("retry_wait_sec")
+            depth = r.get("order_queue_depth")
+            if not isinstance(qd, (int, float)) or qd < 0:
+                print(f"  FAIL: queue_delay_sec invalid: {qd!r}")
+                ok = False
+            if not isinstance(rw, (int, float)) or rw < 0:
+                print(f"  FAIL: retry_wait_sec invalid: {rw!r}")
+                ok = False
+            if not isinstance(depth, int) or depth < 1:
+                print(f"  FAIL: order_queue_depth invalid: {depth!r}")
+                ok = False
 
     print(f"  API field completeness: {ok}  problems={sorted(problem_ids)}")
 
@@ -157,9 +176,13 @@ def test_xss_static_source_check():
         r"\$\{esc\(r\.target_id",
         r"\$\{esc\(r\.event",
         r"\$\{esc\(r\.delivery_state",
-        r"\$\{esc\(r\.last_error",
+        r"esc\(whErrorText\(r\)\)",
+        r"esc\(r\.last_error\|\|r\.error",
         r"esc\(_whPayloadSummary",
         r"esc\(_whFmtTs",
+        r"r\.queue_delay_sec",
+        r"r\.retry_wait_sec",
+        r"r\.order_queue_depth",
     ]
     missing = [pat for pat in required_esc if not re.search(pat, panel_src)]
     panel_esc_ok = bool(panel_src) and not missing

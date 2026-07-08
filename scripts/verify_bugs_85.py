@@ -20,7 +20,7 @@ def test_source_urgent_skip_set_dedupes_full_scan():
     ok = (
         "_urgent_skip_set" in block
         and "already_traced" in block
-        and "_drain_urgent" not in open(WEB_SERVER, encoding="utf-8").read()
+        and "def _drain_urgent_pending" in open(WEB_SERVER, encoding="utf-8").read()
     )
     print(f"Bug85 urgent skip set in scheduler loop -> {ok}")
     return ok

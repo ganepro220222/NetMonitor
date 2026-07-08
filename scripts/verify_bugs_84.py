@@ -1,4 +1,4 @@
-"""Regression: urgent tracert spawns immediately in parallel (Bug 84 evolution)."""
+"""Regression: urgent tracert bounded pool + parallel spawn (Bug 84 evolution)."""
 import os
 import sys
 import threading
@@ -14,16 +14,17 @@ WEB_SERVER = os.path.join(
 )
 
 
-def test_source_spawn_urgent_not_queued():
+def test_source_spawn_urgent_bounded_pool():
     with open(WEB_SERVER, encoding="utf-8") as f:
         src = f.read()
     ok = (
         "def _spawn_urgent" in src
-        and "def _drain_urgent" not in src
+        and "def _drain_urgent_pending" in src
+        and "URGENT_MAX_CONCURRENT" in src
         and "self._spawn_urgent(tid)" in src
         and "Urgent traces spawn immediately" in src
     )
-    print(f"Bug84 urgent spawn API (no queue drain) -> {ok}")
+    print(f"Bug84 urgent spawn API (bounded pool) -> {ok}")
     return ok
 
 
@@ -91,7 +92,7 @@ def test_same_tid_deduped_while_inflight():
 
 def main():
     results = [
-        ("source", test_source_spawn_urgent_not_queued()),
+        ("source", test_source_spawn_urgent_bounded_pool()),
         ("parallel", test_request_now_spawns_parallel_threads()),
         ("dedupe", test_same_tid_deduped_while_inflight()),
     ]

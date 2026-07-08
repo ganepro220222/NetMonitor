@@ -1124,6 +1124,12 @@ class DataStore:
         now = time.time()
         recent_cutoff = self._webhook_ops_recent_cutoff(now)
         try:
+            depth_rows = conn.execute(
+                "SELECT order_key, COUNT(*) FROM webhook_outbox "
+                "WHERE delivery_state IN ('pending', 'sending') "
+                "GROUP BY order_key",
+            ).fetchall()
+            queue_depths = {ok: cnt for ok, cnt in depth_rows}
             rows = conn.execute(
                 "SELECT * FROM webhook_outbox "
                 "WHERE delivery_state IN ('pending', 'sending') "
@@ -1149,10 +1155,42 @@ class DataStore:
                 d["payload"] = payload
                 d["payload_summary"] = self._webhook_payload_summary(payload)
                 d["target_label"] = (payload.get("target") or "").strip()
+                self._enrich_webhook_delivery_timing(d, now, queue_depths)
                 out.append(d)
             return out
         except Exception:
             return []
+
+    @staticmethod
+    def _enrich_webhook_delivery_timing(
+            d: dict, now: float, queue_depths: dict) -> dict:
+        fq = float(d.get("first_queued_ts") or 0)
+        la = float(d.get("last_attempt_ts") or 0)
+        na = float(d.get("next_attempt_ts") or 0)
+        ets = float(d.get("event_ts") or fq)
+        dts = float(d.get("delivered_ts") or 0)
+        st = d.get("delivery_state") or ""
+
+        if la > 0:
+            d["queue_delay_sec"] = round(max(0.0, la - fq))
+        elif fq > 0:
+            d["queue_delay_sec"] = round(max(0.0, now - fq))
+        else:
+            d["queue_delay_sec"] = None
+
+        if st == "pending" and na > now:
+            d["retry_wait_sec"] = round(na - now)
+        else:
+            d["retry_wait_sec"] = 0
+
+        if dts > 0:
+            d["delivery_lag_sec"] = round(max(0.0, dts - ets))
+        else:
+            d["delivery_lag_sec"] = None
+
+        ok = d.get("order_key") or ""
+        d["order_queue_depth"] = int(queue_depths.get(ok, 0))
+        return d
 
     @staticmethod
     def _webhook_payload_summary(payload: dict) -> str:

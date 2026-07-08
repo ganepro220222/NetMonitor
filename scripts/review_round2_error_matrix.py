@@ -74,7 +74,7 @@ class ErrorMatrixHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"errcode":429,"errmsg":"rate limited"}')
         elif path == "/timeout":
-            # Sleep longer than the HTTP timeout (10s) to cause read timeout
+            # Sleep longer than alert_red first-attempt HTTP timeout (5s).
             time.sleep(15)
             self.send_response(200)
             self.end_headers()
@@ -377,7 +377,7 @@ def test_03_connection_refused(server: ErrorMatrixServer):
 
 def test_04_read_timeout(server: ErrorMatrixServer):
     print("\n── 4. Read timeout ──")
-    # /timeout sleeps 15s, but urlopen timeout is 10s → should time out
+    # /timeout sleeps 15s; alert_red attempts 1-3 use 5s HTTP timeout.
     a, disp, ds = make_fixture(server.base_url, "/timeout")
     rows = ds.get_webhook_deliveries(limit=10)
     did = rows[0]["delivery_id"] if rows else ""
@@ -403,7 +403,7 @@ def test_04_read_timeout(server: ErrorMatrixServer):
     record("04c attempt_count incremented", attempt >= 1,
            f"got {attempt}")
     record("04d not delivered", state != "delivered")
-    record("04e elapsed ~10s (timeout)", 9 <= elapsed <= 20,
+    record("04e elapsed ~5s (alert_red timeout)", 4 <= elapsed <= 12,
            f"elapsed={elapsed:.1f}s")
 
 
@@ -487,7 +487,8 @@ def test_06_abnormal_close(server: ErrorMatrixServer):
     record("06b error about incomplete/close",
            any(kw in (last_error or "").lower()
                for kw in ["incomplete", "close", "reset", "shutdown",
-                          "connection", "eof", "remote", "truncat"]),
+                          "connection", "eof", "remote", "truncat",
+                          "timed out", "timeout"]),
            f"error={last_error[:80] if last_error else 'N/A'}")
     record("06c attempt_count incremented", attempt >= 1,
            f"got {attempt}")
@@ -586,10 +587,8 @@ def test_08_backoff_sequence(server: ErrorMatrixServer):
         if state in ("failed_permanent", "delivered", "dropped_stale"):
             break
 
-    # Expected: _handle_failure computes attempt = attempt_count+1, so
-    # the first failure (attempt_count=0) → compute_next_attempt_ts(1) →
-    # BACKOFF_SECONDS[1]=15s.  Actual sequence: 15, 30, 60, 120, 300, 300, 300
-    expected = [15, 30, 60, 120, 300, 300, 300]
+    # alert_red compact backoff: attempt=1 -> 2s, then 5, 10, 30, 60, 300, 300
+    expected = [2, 5, 10, 30, 60, 300, 300]
     ok_seqs = []
     for idx, (got, exp) in enumerate(zip(next_ts_values, expected[:len(next_ts_values)])):
         ok = abs(got - exp) < 2.0  # allow ±2s tolerance
