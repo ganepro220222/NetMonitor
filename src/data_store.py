@@ -1244,20 +1244,21 @@ class DataStore:
 
     def drop_pending_webhook_events(
             self, target_id: str, events: tuple[str, ...],
-            reason: str) -> None:
+            reason: str) -> int:
         if not target_id or not events:
-            return
+            return 0
         now = time.time()
         placeholders = ",".join("?" * len(events))
         with self._outbox_lock:
             conn = self._outbox_write_conn()
-            conn.execute(
+            cur = conn.execute(
                 f"UPDATE webhook_outbox SET delivery_state='dropped_stale', "
                 f"last_error=?, updated_at=? "
                 f"WHERE target_id=? AND delivery_state IN ('pending','sending') "
                 f"AND event IN ({placeholders})",
                 (reason or "dropped", now, target_id, *events))
             conn.commit()
+            return cur.rowcount
 
     def find_pending_recovery(
             self, order_key: str, incident_id: str = "") -> dict | None:

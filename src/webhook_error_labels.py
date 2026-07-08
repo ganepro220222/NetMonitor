@@ -10,6 +10,7 @@ WEBHOOK_ERROR_LABELS: dict[str, str] = {
     "target_orphan": "监控目标已删除或不存在",
     "stale_identity": "目标身份已变更，旧消息已作废",
     "stale_incident_on_restart": "程序重启后，旧故障通知已失效",
+    "stale_incident_aux_cleared": "新故障已开始，旧诊断/续报已清理",
     "recovered_after_restart": "程序重启后继续重试",
     "stale_sending_recovered": "发送中断已恢复，将继续投递",
     "unblocked_for_closed_summary": "已随闭环摘要一并处理",

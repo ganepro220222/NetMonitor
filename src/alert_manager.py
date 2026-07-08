@@ -287,6 +287,10 @@ class AlertManager:
             pt = ping_type or "icmp"
             fr = failure_reason or ""
             trace_ok = should_request_traceroute(pt, fr)
+            with self._webhook_incident_lock:
+                will_new_incident = target_id not in self._webhook_incidents
+            if will_new_incident:
+                self._clear_stale_aux_outbox_for_new_incident(target_id)
             _, is_new = self._open_or_update_webhook_incident(
                 target_id, target_label, target_ip, status="red",
                 ping_type=pt, failure_reason=fr,
@@ -1345,6 +1349,22 @@ class AlertManager:
             )
             self._maybe_request_trace_refresh(snap, now)
 
+    def _clear_stale_aux_outbox_for_new_incident(self, tid: str) -> None:
+        """Drop leftover diagnostic/reminder rows when a new outage opens.
+
+        Only auxiliary events are cleared — alert_red and recovery are kept
+        so per-target ordering stays 发生 → 恢复 → 下一次发生.
+        """
+        if not tid:
+            return
+        self._cancel_inflight_outbox_sends(
+            tid,
+            events=("diagnostic_update", "alert_reminder"),
+            reason="stale_incident_aux_cleared",
+        )
+        if self._outbox_dispatcher is not None:
+            self._outbox_dispatcher.wake()
+
     def _push_alert_red_webhook(self, tid: str, label: str, ip: str, *,
                                 message: str = "连接中断",
                                 pending_trace: bool = True) -> None:
@@ -1610,7 +1630,18 @@ class AlertManager:
                 tid, seq = gate[1], gate[2]
                 if not self._webhook_target_known(tid):
                     return False
-                return self._webhook_valid_seq.get(tid, 0) == seq
+                cur = self._webhook_valid_seq.get(tid, 0)
+                if cur == seq:
+                    return True
+                # Green enqueues recovery without bumping seq; the next
+                # red opens a new generation while a blocked recovery may
+                # still be head-of-line.  Require an open incident on the
+                # new generation so post-send invalidation (seq+1 with no
+                # incident) still drops stale recovery.
+                if cur == seq + 1:
+                    inc = self._webhook_incidents.get(tid)
+                    return inc is not None and inc.push_seq == cur
+                return False
             if kind == "reminder":
                 tid, seq = gate[1], gate[2]
                 if not self._webhook_target_known(tid):
