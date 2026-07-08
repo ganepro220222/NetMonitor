@@ -4752,6 +4752,15 @@ class DataStore:
             return []
         # _read_conn() returns a thread-local cached connection — do NOT close.
 
+    def _table_exists(self, conn, table: str) -> bool:
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
     def _cleanup(self, conn):
         """删除超出保留期的数据。"""
         now = int(time.time())
@@ -4777,10 +4786,15 @@ class DataStore:
                 (alert_cutoff, alert_cutoff))
             conn.execute("DELETE FROM traceroute_logs WHERE ts<?",
                          (now - self._traceroute_retention_days * 86400,))
-            conn.execute("DELETE FROM icmp_diagnostic_history WHERE created_ts<?",
-                         (now - self._diag_retention_days * 86400,))
-            conn.execute("DELETE FROM dns_diagnostic_history WHERE created_ts<?",
-                         (now - self._diag_retention_days * 86400,))
+            diag_cutoff = now - self._diag_retention_days * 86400
+            if self._table_exists(conn, "icmp_diagnostic_history"):
+                conn.execute(
+                    "DELETE FROM icmp_diagnostic_history WHERE created_ts<?",
+                    (diag_cutoff,))
+            if self._table_exists(conn, "dns_diagnostic_history"):
+                conn.execute(
+                    "DELETE FROM dns_diagnostic_history WHERE created_ts<?",
+                    (diag_cutoff,))
             self._cleanup_webhook_outbox(conn, now)
 
     def _cleanup_webhook_outbox(self, conn, now: int) -> int:

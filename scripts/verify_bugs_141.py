@@ -93,7 +93,7 @@ def test_icmp_filtered_summary():
     s = summarize_for_alert(
         hops, ping_type="tcp", failure_reason="no_reply",
         tcp_checks=tcp_checks)
-    ok = ("过滤 ICMP" in s["text"] and s.get("break_at") is None)
+    ok = ("ICMP 不可见" in s["text"] and s.get("break_at") is None)
     print(f"Bug141 ICMP filtered summary -> {ok}")
     return ok
 
