@@ -10,7 +10,12 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from src.trace_policy import summarize_for_display
+from src.trace_policy import (
+    describe_failure,
+    should_request_traceroute,
+    summarize_for_display,
+    trace_skip_summary,
+)
 from src.webhook_error_labels import enrich_webhook_failure
 
 try:
@@ -365,22 +370,38 @@ def build_paths(web, *, window: str = "today", limit: int = 12) -> dict:
         trace, source = _read_traceroute(web, tid, ip, open_inc)
         hops = (trace or {}).get("hops") or []
         tcp_checks = (trace or {}).get("tcp_checks")
-        summary = summarize_for_display(
-            hops,
-            tcp_checks=tcp_checks,
-            status=status,
-            ping_type=t.get("ping_type"),
-            probe_success=t.get("probe_success"),
-            failure_reason=t.get("failure_reason"),
-            target_ip=(trace or {}).get("resolve_ip") or ip,
-        )
-        trace_status = "none"
+        ping_type = t.get("ping_type")
+        failure_reason = t.get("failure_reason")
+        trace_applicable = should_request_traceroute(ping_type, failure_reason)
         if trace:
+            summary = summarize_for_display(
+                hops,
+                tcp_checks=tcp_checks,
+                status=status,
+                ping_type=ping_type,
+                probe_success=t.get("probe_success"),
+                failure_reason=failure_reason,
+                target_ip=(trace or {}).get("resolve_ip") or ip,
+            )
             trace_status = "completed"
-        elif status in ("red", "orange"):
-            with web._tracer_lock:
-                pending = web._tracer_cache.get(tid) is None
-            trace_status = "pending" if pending and source == "none" else "none"
+        elif status in ("red", "orange") and not trace_applicable:
+            summary = trace_skip_summary(ping_type, failure_reason)
+            trace_status = "skipped"
+        else:
+            summary = summarize_for_display(
+                hops,
+                tcp_checks=tcp_checks,
+                status=status,
+                ping_type=ping_type,
+                probe_success=t.get("probe_success"),
+                failure_reason=failure_reason,
+                target_ip=ip,
+            )
+            trace_status = "none"
+            if status in ("red", "orange"):
+                with web._tracer_lock:
+                    pending = web._tracer_cache.get(tid) is None
+                trace_status = "pending" if pending and source == "none" else "none"
         graph = _path_graph(
             hops, tid, t.get("label") or tid, status, summary,
             target_ip=(trace or {}).get("resolve_ip") or ip)
@@ -585,7 +606,7 @@ def _alert_to_screen_event(row: dict) -> dict:
         text = f"{old} → {new}"
     reason = (row.get("failure_reason") or "").strip()
     if reason and etype in ("incident_open", "status_change"):
-        text += f" · {reason}"
+        text += f" · {describe_failure(reason)}"
     return {
         "id": f"alert-{row.get('id')}",
         "time": _ts_to_time(ts),
@@ -714,7 +735,7 @@ def build_events(web, *, window: str = "today", limit: int = 30) -> list[dict]:
             reason = (inc.get("failure_reason") or "").strip()
             text = f"未恢复 · 自 {_ts_to_time(started)} 起"
             if reason:
-                text += f" · {reason}"
+                text += f" · {describe_failure(reason)}"
             pinned.append({
                 "id": f"open-{inc.get('incident_id') or tid}",
                 "time": _ts_to_time(started),

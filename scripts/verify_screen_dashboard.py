@@ -23,6 +23,7 @@ from src.screen_service import (
     parse_window,
     should_merge_target_hop,
     _path_graph,
+    _alert_to_screen_event,
 )
 from src.geo_resolver import GeoResolver, is_private_ip, is_public_ip, parse_manual_geo, region_string_to_coords, build_manual_geo_from_fields, resolve_probe_ipv4, resolve_hostname_ipv4
 from src.monitor_source_geo import detect_route_local_ipv4, resolve_monitor_source
@@ -391,6 +392,63 @@ def test_build_overview_paths():
         and isinstance(ev, list)
     )
     print(f"build overview/paths/top/events -> {ok}")
+    return ok
+
+
+def test_endpoint_red_trace_status_skipped():
+    w = WebServer(port=0)
+    w._running = True
+    w.update_target(
+        tid="HTTP1", label="Web", ip="example.com", status="red",
+        ping_type="http", failure_reason="status_500",
+        latency_ms=None, jitter_ms=0.0, loss_rate=1.0,
+        probe_success=False, is_probe_result=True)
+    paths = build_paths(w, window="today")
+    p = next((x for x in paths.get("paths", []) if x.get("tid") == "HTTP1"), None)
+    summary_text = (p or {}).get("summary", {}).get("text", "")
+    ok = (
+        p is not None
+        and p.get("trace_status") == "skipped"
+        and "未执行路径追踪" in summary_text
+        and p.get("trace_status") != "pending"
+    )
+    print(f"endpoint red trace_status skipped -> {ok} status={p and p.get('trace_status')}")
+    return ok
+
+
+def test_icmp_red_trace_status_pending():
+    w = WebServer(port=0)
+    w._running = True
+    w.update_target(
+        tid="ICMP1", label="GW", ip="10.0.0.1", status="red",
+        ping_type="icmp", failure_reason="no_reply",
+        latency_ms=None, jitter_ms=0.0, loss_rate=1.0,
+        probe_success=False, is_probe_result=True)
+    paths = build_paths(w, window="today")
+    p = next((x for x in paths.get("paths", []) if x.get("tid") == "ICMP1"), None)
+    ok = p is not None and p.get("trace_status") == "pending"
+    print(f"icmp red trace_status pending -> {ok} status={p and p.get('trace_status')}")
+    return ok
+
+
+def test_event_failure_reason_described():
+    import time
+    ev = _alert_to_screen_event({
+        "id": 1,
+        "old_status": "green",
+        "new_status": "red",
+        "category": "availability",
+        "ts": time.time(),
+        "target_id": "T1",
+        "label": "N",
+        "ip": "1.2.3.4",
+        "failure_reason": "connection_refused",
+    })
+    ok = (
+        "connection_refused" not in ev.get("text", "")
+        and "TCP 连接被拒绝" in ev.get("text", "")
+    )
+    print(f"event failure_reason described -> {ok} text={ev.get('text')!r}")
     return ok
 
 
@@ -1633,6 +1691,9 @@ def main():
         ("invalidate_cache", test_invalidate_cache()),
         ("cache_web_instance", test_screen_cache_per_web_instance()),
         ("builders", test_build_overview_paths()),
+        ("trace_skipped", test_endpoint_red_trace_status_skipped()),
+        ("trace_pending", test_icmp_red_trace_status_pending()),
+        ("event_fr_text", test_event_failure_reason_described()),
         ("events_db", test_build_events_db()),
         ("topo_layout", test_topo_layout_covers_all_hops()),
         ("http", test_http_routes()),
