@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 
+from src.geo_resolver import resolve_hostname_ipv4
 from src.traceroute_summary import summarize_break, trace_signature
 
 # ── failure layer classification ─────────────────────────────────────
@@ -317,13 +318,40 @@ def _normalize_trace_ip(ip: str | None) -> str | None:
         return s
 
 
-def trace_reached_target(base: dict, target_ip: str | None) -> bool:
-    """True when the last ok hop IP equals the monitored target."""
-    tgt = _normalize_trace_ip(target_ip)
+def _target_reach_ips(target_ip: str | None,
+                      resolve_ip: str | None = None) -> set[str]:
+    """Candidate IPs for comparing traceroute last_ok against the monitor target."""
+    out: set[str] = set()
+    for raw in (resolve_ip, target_ip):
+        if not raw:
+            continue
+        norm = _normalize_trace_ip(raw)
+        if norm:
+            try:
+                ipaddress.ip_address(norm)
+                out.add(norm)
+            except ValueError:
+                pass
+    if target_ip:
+        host = target_ip.strip()
+        if host:
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                resolved = resolve_hostname_ipv4(host)
+                if resolved:
+                    out.add(str(ipaddress.ip_address(resolved)))
+    return out
+
+
+def trace_reached_target(base: dict, target_ip: str | None, *,
+                         resolve_ip: str | None = None) -> bool:
+    """True when the last ok hop IP matches the monitored target (IP or domain)."""
     last = _normalize_trace_ip((base.get("last_ok") or {}).get("ip"))
-    if not tgt or not last:
+    if not last:
         return False
-    return tgt == last
+    candidates = _target_reach_ips(target_ip, resolve_ip)
+    return bool(candidates) and last in candidates
 
 
 def format_path_ok_while_probe_fails(
@@ -332,6 +360,7 @@ def format_path_ok_while_probe_fails(
         ping_type: str | None,
         failure_reason: str | None,
         target_ip: str | None = None,
+        resolve_ip: str | None = None,
 ) -> str:
     """Webhook / screen copy when traceroute is clean but the probe is still red."""
     detail = describe_failure(failure_reason)
@@ -341,7 +370,7 @@ def format_path_ok_while_probe_fails(
     last_ip = (base.get("last_ok") or {}).get("ip")
     hop_count = _trace_hop_count_suffix(base)
 
-    if trace_reached_target(base, target_ip):
+    if trace_reached_target(base, target_ip, resolve_ip=resolve_ip):
         return (
             f"监测仍失败（{detail}）；"
             f"路由追踪可达目标{suffix}，Echo 仍无响应；无中间断点。"
@@ -390,7 +419,8 @@ def summarize_for_display(hops: list, *,
                           ping_type: str | None = None,
                           probe_success: bool | None = None,
                           failure_reason: str | None = None,
-                          target_ip: str | None = None) -> dict:
+                          target_ip: str | None = None,
+                          resolve_ip: str | None = None) -> dict:
     """Topology / big-screen summary: keep hop location, classify break kind."""
     base = summarize_break(hops or [])
     cls = classify_path_break(
@@ -413,8 +443,10 @@ def summarize_for_display(hops: list, *,
                 ping_type=ping_type,
                 failure_reason=failure_reason,
                 target_ip=target_ip,
+                resolve_ip=resolve_ip,
             )
-            base["reached"] = trace_reached_target(base, target_ip)
+            base["reached"] = trace_reached_target(
+                base, target_ip, resolve_ip=resolve_ip)
         return base
 
     break_at = base.get("break_at")
@@ -444,7 +476,8 @@ def summarize_for_alert(hops: list, *,
                         ping_type: str | None,
                         failure_reason: str | None,
                         tcp_checks: list | None = None,
-                        target_ip: str | None = None) -> dict:
+                        target_ip: str | None = None,
+                        resolve_ip: str | None = None) -> dict:
     """Build webhook / report trace summary with layer-aware context."""
     if not should_request_traceroute(ping_type, failure_reason):
         return trace_skip_summary(ping_type, failure_reason)
@@ -478,8 +511,10 @@ def summarize_for_alert(hops: list, *,
             ping_type=ping_type,
             failure_reason=failure_reason,
             target_ip=target_ip,
+            resolve_ip=resolve_ip,
         )
-        base["reached"] = trace_reached_target(base, target_ip)
+        base["reached"] = trace_reached_target(
+            base, target_ip, resolve_ip=resolve_ip)
 
     elif cls["break_kind"] == "real" and base.get("text"):
         base["text"] = (

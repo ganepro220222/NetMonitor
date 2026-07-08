@@ -28,7 +28,7 @@ import re
 import subprocess
 
 
-def run_traceroute(ip: str, max_hops: int = 30) -> list:
+def run_traceroute(ip: str, max_hops: int = 30, *, wait_ms: int = 1000) -> list:
     """
     Run the system traceroute and return a list of hop dicts.
 
@@ -37,10 +37,11 @@ def run_traceroute(ip: str, max_hops: int = 30) -> list:
         the console window. DO NOT use CREATE_NO_WINDOW with shell=True —
         that breaks pipe inheritance and gives empty output.
       • Full path to tracert.exe avoids PATH issues in daemon threads.
-      • -w 1000 (ms) instead of 1500 reduces worst-case time:
-        20 hops × 3 probes × 1.0s = 60s, well within the 120s timeout.
+      • -w wait_ms (default 1000 ms) per probe; worst case for 20 hops:
+        20 × 3 probes × wait_ms — urgent auto-traces pass a shorter wait.
       • GBK decoding first because Chinese Windows tracert outputs GBK.
     """
+    wait_ms = max(200, min(5000, int(wait_ms)))
     is_win = platform.system().lower() == "windows"
     raw = b""
 
@@ -56,7 +57,7 @@ def run_traceroute(ip: str, max_hops: int = 30) -> list:
             si.wShowWindow = subprocess.SW_HIDE
 
             result = subprocess.run(
-                [tracert, "-d", "-h", str(max_hops), "-w", "1000", ip],
+                [tracert, "-d", "-h", str(max_hops), "-w", str(wait_ms), ip],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=120, startupinfo=si)
             raw = result.stdout + result.stderr

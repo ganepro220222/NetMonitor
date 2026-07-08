@@ -105,6 +105,12 @@ def tcp_check(ip: str, port: int, timeout: float = 2.5) -> dict:
 
 class _TracerouteScheduler:
     DEFAULT_INTERVAL = 300
+    # Urgent (red-alert / on-demand) traces: shorter per-probe wait so the
+    # run is more likely to finish inside the fault window.
+    # Per-probe wait for urgent (red-alert) tracert — tuned to finish a
+    # ~20-hop responsive path in ~15–25s while still tolerating slow hops.
+    URGENT_WAIT_MS = 500
+    ROUTINE_WAIT_MS = 1000
 
     def __init__(self, cache: dict, cache_lock: threading.Lock,
                  interval: int = 300, push_fn=None):
@@ -118,9 +124,11 @@ class _TracerouteScheduler:
         self._prev_route_changed: dict[str, bool] = {}  # Rule B: require 2 consecutive changes
         self._targets: dict[str, str] = {}
         self._targets_lock = threading.Lock()
-        # Red-alert / manual request_now targets (high priority).
-        self._pending: set = set()
-        self._pending_lock = threading.Lock()
+        # Urgent traces spawn immediately — one daemon thread + subprocess per
+        # target, never queued behind the periodic full-scan serial loop.
+        self._urgent_inflight: dict[str, threading.Thread] = {}
+        self._urgent_recent: set[str] = set()   # completed urgent tids this sched tick
+        self._urgent_lock = threading.Lock()
         # Per-tid monotonic generation counter.  Bumped whenever the
         # target's identity or history baseline changes (IP edit,
         # remove, or explicit history wipe).  _run_one captures the
@@ -187,41 +195,62 @@ class _TracerouteScheduler:
         self._result_callback = cb
 
     def request_now(self, tid: str):
-        """Queue an urgent traceroute (red alert / manual). Deduped by tid."""
-        with self._pending_lock:
-            self._pending.add(tid)
+        """Start an urgent traceroute immediately (red alert / manual refresh).
 
-    def _drain_urgent(self) -> set:
-        """Run all urgent traceroutes before the next routine full-scan hop.
-
-        Uses live _targets (not a full-scan snapshot) so a node that turns
-        red mid-scan is still reachable.  Cannot interrupt a traceroute
-        already inside _run_one() (subprocess may block up to ~120s).
-
-        Returns the set of target ids traced in this drain (for deduping
-        against the periodic full-scan pass that follows).
+        Spawns a dedicated daemon thread and subprocess per target.  Multiple
+        red nodes trace in parallel — never queued behind the periodic
+        full-scan loop or another target's in-flight tracert.  Re-requests
+        for the same tid while a trace is already running are deduped.
         """
-        with self._pending_lock:
-            urgent = list(self._pending)
-            self._pending.clear()
-        if not urgent:
-            return set()
-        with self._targets_lock:
-            targets = dict(self._targets)
-        ran = set()
-        for tid in urgent:
-            info = targets.get(tid)
-            if info:
-                self._run_one(tid, info)
-                ran.add(tid)
-                time.sleep(1)
-        return ran
+        self._spawn_urgent(tid)
+
+    def _spawn_urgent(self, tid: str) -> bool:
+        """Launch urgent tracert in a new thread.  Returns False if skipped."""
+        with self._urgent_lock:
+            existing = self._urgent_inflight.get(tid)
+            if existing is not None and existing.is_alive():
+                return False
+            with self._targets_lock:
+                info = self._targets.get(tid)
+            if not info:
+                return False
+            if isinstance(info, dict):
+                info = dict(info)
+            else:
+                info = {"ip": info, "probe_ports": [80, 443]}
+
+            def _worker(target_info=info):
+                try:
+                    self._run_one(tid, target_info, urgent=True)
+                finally:
+                    with self._urgent_lock:
+                        self._urgent_inflight.pop(tid, None)
+                        self._urgent_recent.add(tid)
+
+            th = threading.Thread(
+                target=_worker,
+                daemon=True,
+                name=f"trace-urgent-{tid[:16]}",
+            )
+            self._urgent_inflight[tid] = th
+            th.start()
+            return True
+
+    def _urgent_skip_set(self) -> set[str]:
+        """Target ids that should not be re-traced by the routine full-scan."""
+        with self._urgent_lock:
+            skip = set(self._urgent_recent)
+            skip.update(self._urgent_inflight.keys())
+        return skip
 
     def _loop(self):
         last_full = time.time()   # defer first full scan
         while True:
             time.sleep(5)
-            already_traced = self._drain_urgent()
+            with self._urgent_lock:
+                already_traced = set(self._urgent_recent)
+                self._urgent_recent.clear()
+            already_traced |= self._urgent_skip_set()
 
             with self._targets_lock:
                 snap = dict(self._targets)
@@ -230,18 +259,15 @@ class _TracerouteScheduler:
             if snap and now - last_full >= self.interval:
                 traced_this_pass = set(already_traced)
                 for tid, info in snap.items():
-                    # Priority: red-alert tracerts jump ahead of the
-                    # next periodic target (not ahead of one already
-                    # running inside _run_one).
-                    traced_this_pass |= self._drain_urgent()
+                    traced_this_pass |= self._urgent_skip_set()
                     if tid in traced_this_pass:
                         continue
-                    self._run_one(tid, info)
+                    self._run_one(tid, info, urgent=False)
                     traced_this_pass.add(tid)
                     time.sleep(2)
                 last_full = time.time()
 
-    def _run_one(self, tid: str, target_info):
+    def _run_one(self, tid: str, target_info, *, urgent: bool = False):
         """
         Run traceroute + TCP checks for one target and store in cache.
         target_info: {"ip": "...", "label": "...", "probe_ports": [...]}
@@ -279,11 +305,14 @@ class _TracerouteScheduler:
         start_ds_gen = (self._data_store.current_target_generation(tid)
                          if self._data_store is not None else None)
         start_ip     = ip
+        spawn_ts     = time.time() if urgent else None
 
         is_domain = not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip)
         dns       = dns_check(ip) if is_domain else None
         resolve   = (dns["ips"][0] if dns and dns.get("success") else ip)
-        hops      = run_traceroute(resolve, max_hops=self.max_hops)
+        wait_ms   = self.URGENT_WAIT_MS if urgent else self.ROUTINE_WAIT_MS
+        hops      = run_traceroute(resolve, max_hops=self.max_hops,
+                                   wait_ms=wait_ms)
         # Always run TCP checks so ICMP-blocked detection remains valid
         tcp_checks = [tcp_check(resolve, p) for p in probe_ports[:6]]
         entry     = {
@@ -484,6 +513,8 @@ class _TracerouteScheduler:
                 "route_changed": route_changed,
                 "resolve_ip": resolve,
                 "tcp_checks": tcp_checks,
+                "urgent": urgent,
+                "spawn_ts": spawn_ts,
             }
             cb = self._result_callback
             try:

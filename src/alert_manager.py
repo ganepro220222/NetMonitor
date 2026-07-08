@@ -157,6 +157,10 @@ def ensure_sound_files(assets_dir: str) -> dict:
 
 _AGGREGATE_LIST_MAX = 10
 _AGGREGATE_TRACE_MAX = 5
+# One follow-up urgent tracert while still red when the first result was
+# path-clean (reached, no break) — catches ongoing faults the first sample
+# may have missed due to ICMP/ping timing vs tracert sampling.
+TRACE_FOLLOWUP_DELAY_SEC = 35
 
 
 @dataclass
@@ -170,6 +174,7 @@ class WebhookIncident:
     reminder_count: int = 0
     last_trace_at: float = 0.0
     last_trace_request_at: float = 0.0
+    trace_followup_scheduled: bool = False
     last_trace_summary: dict | None = None
     last_trace_signature: tuple | None = None
     acknowledged: bool = False
@@ -794,27 +799,20 @@ class AlertManager:
     # ── Auto-traceroute ──────────────────────────────────────────────
 
     def _trigger_auto_trace(self, tid: str, label: str, ip: str) -> None:
-        """Request an immediate traceroute via the scheduler when a node turns red.
+        """Fire an urgent parallel tracert when a node turns red.
 
-        Previously this ran its own separate traceroute thread and wrote to DB
-        directly.  That caused double-writes when the scheduler also processed
-        a request_now() for the same event — producing two near-identical
-        history records seconds apart.
-
-        Now the scheduler is the single authoritative executor: all traceroutes
-        (periodic or event-triggered) run through _run_one() and write through
-        the same path.  alert_manager's only job here is to signal urgency.
+        WebServer.update_target() also calls request_now() on the same
+        transition; this belt-and-suspenders path ensures a trace is
+        requested even if that hook is bypassed.  The scheduler dedupes
+        concurrent requests for the same tid.
         """
-        import time
-        now = time.time()
-        if now - self._last_trace.get(tid, 0) < 60:
+        cb = self._trace_request_callback
+        if cb is None:
             return
-        self._last_trace[tid] = now
-        # Delegate to web_server scheduler — it already calls request_now()
-        # when a node turns red in update_target(), so this is now a no-op
-        # at the alert_manager level.  The method is kept for future use
-        # (e.g. attaching route-change detection hooks here).
-        # Direct DB writes removed to eliminate double-write.
+        try:
+            cb(tid)
+        except Exception as e:
+            print(f"[AlertManager] urgent trace request failed: {e}")
 
     # ── Webhook incident lifecycle ───────────────────────────────────
 
@@ -1219,6 +1217,10 @@ class AlertManager:
         if snap.get("last_trace_at"):
             trace_time = time.strftime(
                 "%Y-%m-%d %H:%M:%S", time.localtime(snap["last_trace_at"]))
+        fault_to_trace = None
+        if snap.get("started_at") and snap.get("last_trace_at"):
+            fault_to_trace = round(
+                float(snap["last_trace_at"]) - float(snap["started_at"]))
         return {
             "available": True,
             "trace_time": trace_time,
@@ -1226,6 +1228,7 @@ class AlertManager:
             "reached": summary.get("reached"),
             "last_ok": summary.get("last_ok"),
             "break_at": summary.get("break_at"),
+            "fault_to_trace_sec": fault_to_trace,
             "route_changed": False,
         }
 
@@ -1448,6 +1451,52 @@ class AlertManager:
         except Exception as e:
             print(f"[AlertManager] trace refresh request failed: {e}")
 
+    def _maybe_schedule_trace_followup(self, tid: str, summary: dict,
+                                       snap: dict) -> None:
+        """Schedule one delayed urgent re-trace when the first sample was clean."""
+        if snap.get("current_status") != "red":
+            return
+        if not summary.get("reached") or summary.get("break_at"):
+            return
+        cb = self._trace_request_callback
+        if cb is None:
+            return
+        with self._webhook_incident_lock:
+            inc = self._webhook_incidents.get(tid)
+            if inc is None or not inc.trace_applicable:
+                return
+            if inc.trace_followup_scheduled:
+                return
+            inc.trace_followup_scheduled = True
+
+        def _retry() -> None:
+            with self._webhook_incident_lock:
+                inc2 = self._webhook_incidents.get(tid)
+                if inc2 is None or inc2.current_status != "red":
+                    return
+                if not inc2.trace_applicable:
+                    return
+            try:
+                cb(tid)
+            except Exception as e:
+                print(f"[AlertManager] trace follow-up failed: {e}")
+
+        threading.Timer(TRACE_FOLLOWUP_DELAY_SEC, _retry).start()
+
+    @staticmethod
+    def _enrich_trace_message(summary: dict, *, started_at: float,
+                              trace_at: float) -> str:
+        msg = summary.get("text") or "traceroute 诊断更新"
+        latency = trace_at - started_at
+        if (summary.get("reached")
+                and not summary.get("break_at")
+                and latency >= 20):
+            msg += (
+                f"；追踪于故障后 {round(latency)} 秒完成，"
+                f"若路径无断点可能已处于故障尾声或瞬断已过"
+            )
+        return msg
+
     def on_traceroute_result(self, result: dict) -> None:
         """Called by WebServer scheduler after a committed traceroute."""
         tid = result.get("tid")
@@ -1479,6 +1528,7 @@ class AlertManager:
                 failure_reason=inc.failure_reason,
                 tcp_checks=result.get("tcp_checks"),
                 target_ip=inc.ip,
+                resolve_ip=result.get("resolve_ip"),
             )
             signature = trace_signature_from_summary(summary)
 
@@ -1497,13 +1547,28 @@ class AlertManager:
                 should_send = first_trace or (not change_only) or changed
             snap = self._snapshot_incident(inc)
 
-        if not should_send or snap is None:
+        if snap is None:
+            return
+        self._maybe_schedule_trace_followup(tid, summary or {}, snap)
+
+        if not should_send:
             return
 
         trace_extra = self._build_trace_extra(snap, pending=False)
         trace_extra["route_changed"] = route_changed
+        if result.get("urgent"):
+            trace_extra["urgent"] = True
+        if result.get("spawn_ts") and result.get("ts"):
+            trace_extra["trace_runtime_sec"] = round(
+                float(result["ts"]) - float(result["spawn_ts"]))
         now = time.time()
         duration = now - snap["started_at"]
+        trace_at = float(result.get("ts") or now)
+        diag_msg = self._enrich_trace_message(
+            summary or {},
+            started_at=snap["started_at"],
+            trace_at=trace_at,
+        )
         extra = {
             "incident": {
                 "started_at": time.strftime(
@@ -1522,7 +1587,7 @@ class AlertManager:
             target=snap["label"],
             ip=snap["ip"],
             status=snap["current_status"],
-            message=summary.get("text", "traceroute 诊断更新"),
+            message=diag_msg,
             extra=extra,
             order_key=snap["tid"],
             gate=("incident", snap["tid"], snap["push_seq"]),
